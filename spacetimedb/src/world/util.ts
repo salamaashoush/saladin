@@ -8,6 +8,7 @@ import {
   type BuildingKind as BuildingKindT,
 } from '../../../shared/enums.ts';
 import { nearestIndex } from '../../../shared/sim.ts';
+import { balancedGatherTypes } from '../../../shared/economy.ts';
 
 export interface NodePos {
   id: bigint;
@@ -97,5 +98,37 @@ export function assignGather(
     ...u,
     gatherState: GatherState.ToResource,
     targetNode: nodes[idx].id,
+  });
+}
+
+// Send a batch of gatherer rows to nodes. With `preferType` every gatherer heads
+// for that resource (fallback any); otherwise types are round-robined food-first
+// across what's available so the economy never neglects food and starves. Each
+// gatherer then takes the nearest node of its assigned type.
+export function assignGatherBalanced(
+  ctx: any,
+  units: any[],
+  nodes: NodePos[],
+  preferType?: number
+): void {
+  if (nodes.length === 0 || units.length === 0) return;
+  const available = [...new Set(nodes.map((n) => n.resType))];
+  const types =
+    preferType === undefined
+      ? balancedGatherTypes(available, units.length)
+      : units.map(() => preferType);
+  units.forEach((u, i) => {
+    const e = ctx.db.entity.entityId.find(u.entityId);
+    if (!e) return;
+    const want = types[i];
+    const pool = nodes.filter((n) => n.resType === want);
+    const chosen = pool.length > 0 ? pool : nodes;
+    const idx = nearestIndex(e.x, e.y, chosen);
+    if (idx < 0) return;
+    ctx.db.unit.entityId.update({
+      ...u,
+      gatherState: GatherState.ToResource,
+      targetNode: chosen[idx].id,
+    });
   });
 }

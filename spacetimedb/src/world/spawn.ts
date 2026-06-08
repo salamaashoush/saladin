@@ -31,7 +31,7 @@ import {
   type UnitKind as UnitKindT,
   type BuildingKind as BuildingKindT,
 } from '../../../shared/enums.ts';
-import { clampWorld, getSeed, buildNodes, assignGather } from './util.ts';
+import { clampWorld, getSeed, buildNodes, assignGatherBalanced } from './util.ts';
 
 // ctx is typed inside reducers; helpers take `any` to avoid threading the schema
 // generic everywhere. They only touch typed table rows.
@@ -154,13 +154,17 @@ export function foundPlayer(
   });
 
   const nodes = buildNodes(ctx);
+  const fresh: any[] = [];
   for (let i = 0; i < START_PEASANTS; i++) {
     const a = (i / START_PEASANTS) * Math.PI * 2;
     const px = clampWorld(base.x + Math.cos(a) * SPAWN_CLUSTER);
     const py = clampWorld(base.y + Math.sin(a) * SPAWN_CLUSTER);
     const id = spawnUnitEntity(ctx, owner, UnitKind.Peasant, px, py);
-    assignGather(ctx, id, px, py, nodes);
+    const u = ctx.db.unit.entityId.find(id);
+    if (u) fresh.push(u);
   }
+  // Balanced food-first assignment so the opening economy never starves.
+  assignGatherBalanced(ctx, fresh, nodes);
   return keepId;
 }
 

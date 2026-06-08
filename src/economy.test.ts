@@ -7,6 +7,8 @@ import {
   resourceField,
   applyUpkeep,
   marketSale,
+  foodLow,
+  balancedGatherTypes,
   UNIT_DEFS,
   BUILDING_DEFS,
   ResourceType,
@@ -203,5 +205,41 @@ describe('def costs are valid ResourceCost objects', () => {
   it('every BUILDING_DEFS cost is a valid ResourceCost', () => {
     for (const [kind, def] of Object.entries(BUILDING_DEFS))
       assertValid(`building ${kind} (${def.label})`, def.cost);
+  });
+});
+
+describe('balanced gathering (anti-starvation)', () => {
+  it('foodLow trips when the larder is below the per-pop reserve', () => {
+    expect(foodLow(10, 5)).toBe(true); // 10 < 5*6
+    expect(foodLow(40, 5)).toBe(false); // 40 >= 30
+  });
+
+  it('round-robins gatherers food-first across available resources', () => {
+    const all = [
+      ResourceType.Wood,
+      ResourceType.Stone,
+      ResourceType.Food,
+      ResourceType.Gold,
+    ];
+    const t = balancedGatherTypes(all, 4);
+    // food is always first so a small economy never neglects it
+    expect(t[0]).toBe(ResourceType.Food);
+    // all four resources covered, none clustered
+    expect(new Set(t).size).toBe(4);
+  });
+
+  it('falls back gracefully when only some resources exist', () => {
+    const t = balancedGatherTypes([ResourceType.Wood], 3);
+    expect(t).toEqual([
+      ResourceType.Wood,
+      ResourceType.Wood,
+      ResourceType.Wood,
+    ]);
+    expect(balancedGatherTypes([], 3)).toEqual([]);
+  });
+
+  it('first gatherer always takes food when food nodes exist', () => {
+    const t = balancedGatherTypes([ResourceType.Stone, ResourceType.Food], 1);
+    expect(t[0]).toBe(ResourceType.Food);
   });
 });

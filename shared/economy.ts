@@ -84,6 +84,35 @@ export function addResource(
   return { ...p, [field]: p[field] + amt };
 }
 
+// ── gather assignment ───────────────────────────────────────────────────────
+
+// Gather priority: food first (units starve without it), then wood, stone, gold.
+export const GATHER_PRIORITY: ResourceType[] = [
+  ResourceType.Food,
+  ResourceType.Wood,
+  ResourceType.Stone,
+  ResourceType.Gold,
+];
+
+// Per-pop food cushion below which the economy should bias hard toward food.
+export const FOOD_RESERVE_PER_POP = 6;
+
+export function foodLow(food: number, pop: number): boolean {
+  return food < pop * FOOD_RESERVE_PER_POP;
+}
+
+// Round-robin a resource type to each of `n` idle gatherers over the types
+// actually present (food-first), so peasants spread across resources instead of
+// all clumping on the single nearest node and letting food collapse.
+export function balancedGatherTypes(
+  available: ReadonlyArray<number>,
+  n: number
+): number[] {
+  const order = GATHER_PRIORITY.filter((t) => available.includes(t));
+  if (order.length === 0) return [];
+  return Array.from({ length: n }, (_, i) => order[i % order.length]);
+}
+
 // ── upkeep / starvation ───────────────────────────────────────────────────────
 
 export interface UpkeepResult {

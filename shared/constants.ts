@@ -46,7 +46,7 @@ export const MARKET_RATE = 2;
 export const START_PEASANTS = 5;
 export const START_WOOD = 60;
 export const START_STONE = 30;
-export const START_FOOD = 60;
+export const START_FOOD = 100;
 export const START_GOLD = 0;
 export const PEASANT_COST = 20;
 

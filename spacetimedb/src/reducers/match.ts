@@ -4,7 +4,7 @@ import {
   MAX_AI_OPPONENTS,
   enemyFaction,
 } from '../../../shared/defs.ts';
-import { Faction } from '../../../shared/enums.ts';
+import { Faction, ResourceType } from '../../../shared/enums.ts';
 import { spacetimedb } from '../schema/db.ts';
 import { foundPlayer, spawnAi } from '../world/spawn.ts';
 import {
@@ -13,7 +13,8 @@ import {
   regenerateWorld,
   otherHumansPresent,
 } from '../world/commands.ts';
-import { assignIdleGatherers } from '../world/economy.ts';
+import { assignIdleGatherers, popInfo } from '../world/economy.ts';
+import { foodLow } from '../../../shared/economy.ts';
 
 // Join the shared world (multiplayer). Founds a base on first call; reconnects
 // just flip online. Faction is the player's chosen side.
@@ -81,7 +82,13 @@ export const addAi = spacetimedb.reducer(
   }
 );
 
-// Send every idle gatherer owned by the caller to the nearest resource node.
+// Send every idle gatherer to work — balanced food-first, but all-in on food
+// when the larder is running low so a "Gather" click can't starve the base.
 export const autoGather = spacetimedb.reducer((ctx) => {
-  assignIdleGatherers(ctx, ctx.sender);
+  const p = ctx.db.player.identity.find(ctx.sender);
+  const prefer =
+    p && foodLow(p.food, popInfo(ctx, ctx.sender).pop)
+      ? ResourceType.Food
+      : undefined;
+  assignIdleGatherers(ctx, ctx.sender, prefer);
 });

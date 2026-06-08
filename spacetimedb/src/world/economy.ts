@@ -14,7 +14,13 @@ import { hasPrereq } from '../../../shared/tech.ts';
 import { canAfford, payCost } from '../../../shared/economy.ts';
 import { nearestIndex } from '../../../shared/sim.ts';
 import { nearestPassableGrid } from '../../../shared/pathfinding.ts';
-import { clampWorld, getSeed, passableWith, buildNodes } from './util.ts';
+import {
+  clampWorld,
+  getSeed,
+  passableWith,
+  buildNodes,
+  assignGatherBalanced,
+} from './util.ts';
 import { buildOccupancy, movePatch, ownedBuildingKinds } from './placement.ts';
 import { spawnUnitEntity } from './spawn.ts';
 
@@ -46,27 +52,12 @@ export function assignIdleGatherers(
   preferType?: number
 ): void {
   const nodes = buildNodes(ctx);
-  if (nodes.length === 0) return;
-  const preferred =
-    preferType === undefined
-      ? nodes
-      : nodes.filter((n) => n.resType === preferType);
-  for (const u of [...ctx.db.unit.iter()]) {
-    if (!u.owner.equals(owner)) continue;
-    if (u.gatherState !== GatherState.Idle) continue;
+  const idle = [...ctx.db.unit.iter()].filter((u) => {
+    if (!u.owner.equals(owner) || u.gatherState !== GatherState.Idle) return false;
     const def = UNIT_DEFS[u.kind as UnitKindT] ?? UNIT_DEFS[UnitKind.Peasant];
-    if (def.carry <= 0) continue;
-    const e = ctx.db.entity.entityId.find(u.entityId);
-    if (!e) continue;
-    const pool = preferred.length > 0 ? preferred : nodes;
-    const idx = nearestIndex(e.x, e.y, pool);
-    if (idx < 0) continue;
-    ctx.db.unit.entityId.update({
-      ...u,
-      gatherState: GatherState.ToResource,
-      targetNode: pool[idx].id,
-    });
-  }
+    return def.carry > 0;
+  });
+  assignGatherBalanced(ctx, idle, nodes, preferType);
 }
 
 // Owner-parameterized command logic. The player-facing reducers authorize via
