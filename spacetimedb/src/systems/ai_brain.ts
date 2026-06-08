@@ -37,6 +37,7 @@ import { spacetimedb } from '../schema/db.ts';
 import { aiBrainTimer } from '../schema/tables.ts';
 import { scheduleRefs } from '../schema/schedule_refs.ts';
 import { assignIdleGatherers, trainFrom } from '../world/economy.ts';
+import { startResearchFor } from '../world/research.ts';
 import { aiFindSpot, placeFor, movePatch } from '../world/placement.ts';
 import { nearestEnemyKeep, assaultIntel } from '../world/commands.ts';
 import { dist } from '../world/util.ts';
@@ -286,6 +287,23 @@ export const aiBrain = spacetimedb.reducer(
             if (canAfford(p, cost)) {
               const s = aiFindSpot(ctx, plan.kind, ke.x, ke.y);
               if (s) placeFor(ctx, owner, plan.kind, s.x, s.y);
+            }
+          }
+        }
+
+        // ── research: start the highest-priority Blacksmith tech the bot can
+        //    afford. Runs through the SAME startResearchFor a human uses — it
+        //    rejects already-done/in-flight/unaffordable/prereq-missing techs and
+        //    only succeeds (returns null) on a real start, so this is no cheat:
+        //    the bot pays full cost and waits out the research timer. One start
+        //    per decision window keeps the spend paced like the rest of the macro.
+        if (prof.research.length > 0) {
+          const smith = allBuildings.find(
+            (b) => b.owner.equals(owner) && b.kind === BuildingKind.Blacksmith
+          );
+          if (smith) {
+            for (const tech of prof.research) {
+              if (startResearchFor(ctx, owner, smith, tech) === null) break;
             }
           }
         }

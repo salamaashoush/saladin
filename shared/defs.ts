@@ -25,11 +25,13 @@ import {
   goldDensity,
 } from './terrain.ts';
 import { ResourceType, type Faction } from './enums.ts';
+import { Tech } from './research.ts';
 import type { Vec2 } from './sim.ts';
 
 export * from './units.ts';
 export * from './buildings_defs.ts';
 export * from './tech.ts';
+export * from './research.ts';
 
 export interface ResourceDef {
   label: string;
@@ -111,6 +113,11 @@ export interface AiProfile {
   scouts: boolean; // sends an early scout toward the enemy (Hard only)
   defendReactDelay: number; // seconds of sustained threat before recalling
   raidReactDelay: number; // grace period before raids begin
+  // research — Blacksmith techs the bot pursues, in priority order. Empty = never
+  // researches (Easy). The brain starts the first affordable, prereq-met, not-yet-
+  // owned tech via the SAME startResearchFor helper a human's reducer calls — no
+  // free techs, no skipped costs/prereqs. Tech ids are shared/research.ts Tech.
+  research: number[];
 }
 
 export const AiDifficulty = { Easy: 0, Normal: 1, Hard: 2 } as const;
@@ -129,6 +136,7 @@ export const AI_PROFILES: Record<number, AiProfile> = {
     // or scouts — a gentle foe that mostly throws its main body at the keep.
     recallMargin: 2, recallFraction: 0.34, raidFraction: 0,
     scouts: false, defendReactDelay: 6, raidReactDelay: 9999,
+    research: [], // Easy never visits the Blacksmith for upgrades
   },
   // Normal: steady tempo, mixed army with some cavalry and a single siege engine.
   1: {
@@ -143,6 +151,8 @@ export const AI_PROFILES: Record<number, AiProfile> = {
     // about half the field army on a real attack, but doesn't scout.
     recallMargin: 1, recallFraction: 0.5, raidFraction: 0.25,
     scouts: false, defendReactDelay: 3, raidReactDelay: 120,
+    // armor first to survive the player's volleys, then a weapon edge.
+    research: [Tech.ArmorMail, Tech.SharpenedBlades, Tech.FletchedArrows],
   },
   // Hard: thinks fast, teches the full tree quickly, counters precisely and
   // brings a siege train to crack the player's walls/keep.
@@ -158,6 +168,15 @@ export const AI_PROFILES: Record<number, AiProfile> = {
     // any threat, and scouts the map to react to what the player is actually doing.
     recallMargin: 0, recallFraction: 0.6, raidFraction: 0.34,
     scouts: true, defendReactDelay: 1, raidReactDelay: 75,
+    // teches the full edge: armor, both weapons, then hp + masonry to harden base.
+    research: [
+      Tech.ArmorMail,
+      Tech.SharpenedBlades,
+      Tech.FletchedArrows,
+      Tech.ArmorPlate,
+      Tech.Conscription,
+      Tech.Masonry,
+    ],
   },
 };
 

@@ -15,6 +15,8 @@ export const AI_BRAIN_TICK_MS = 1000;
 export const AI_BRAIN_DT = AI_BRAIN_TICK_MS / 1000;
 export const ECONOMY_TICK_MS = 2000;
 export const ECONOMY_DT = ECONOMY_TICK_MS / 1000;
+export const RESEARCH_TICK_MS = 1000;
+export const RESEARCH_DT = RESEARCH_TICK_MS / 1000;
 
 export const ARRIVE_EPS = 0.05;
 export const HARVEST_RANGE = 0.7;

@@ -19,6 +19,10 @@ import {
   DEFENSIVE_LEASH,
 } from '../../../shared/combat.ts';
 import {
+  effectiveUnitDef,
+  effectiveBuildingDef,
+} from '../../../shared/research.ts';
+import {
   moraleAfterHit,
   moraleRecover,
   isRouting,
@@ -153,6 +157,26 @@ export const combatTick = spacetimedb.reducer(
   (ctx) => {
     const seed = getSeed(ctx);
     const units = [...ctx.db.unit.iter()];
+
+    // Per-tick tech cache: owner identity (hex) → completed techMask. Read once per
+    // owner, not per pair, so the researched bonuses fold into effective stats
+    // cheaply. effectiveUnitDef/effectiveBuildingDef short-circuit on mask 0n.
+    const maskByOwner = new Map<string, bigint>();
+    const maskOf = (owner: any): bigint => {
+      const key = owner.toHexString();
+      let m = maskByOwner.get(key);
+      if (m === undefined) {
+        m = ctx.db.player.identity.find(owner)?.techMask ?? 0n;
+        maskByOwner.set(key, m);
+      }
+      return m;
+    };
+    // A unit's effective def, folding its OWNER's researched techs.
+    const unitDefOf = (u: any) => effectiveUnitDef(u.kind, maskOf(u.owner));
+    // A building's effective def, folding Masonry from its owner's techs.
+    const bldgDefOf = (b: any) =>
+      effectiveBuildingDef(b.kind, maskOf(b.owner));
+
     // Units that took damage this tick: they dent morale here and skip the
     // end-of-tick recovery pass (you don't catch your breath while being hit).
     const hitThisTick = new Set<bigint>();
@@ -162,7 +186,7 @@ export const combatTick = spacetimedb.reducer(
     const dentMorale = (defId: bigint, oldHp: number, newHp: number) => {
       const du = ctx.db.unit.entityId.find(defId);
       if (!du) return; // building or already dead — no morale
-      const ddef = UNIT_DEFS[du.kind as UnitKindT];
+      const ddef = unitDefOf(du);
       const maxHp = ddef?.maxHp ?? du.hp;
       const dmgFrac = maxHp > 0 ? (oldHp - newHp) / maxHp : 0;
       hitThisTick.add(defId);
@@ -178,7 +202,7 @@ export const combatTick = spacetimedb.reducer(
       const u = ctx.db.unit.entityId.find(snap.entityId);
       if (!u) continue;
       if (u.garrisonedIn !== 0n) continue; // sheltered — fights via its host, not here
-      const def = UNIT_DEFS[u.kind as UnitKindT] ?? UNIT_DEFS[UnitKind.Peasant];
+      const def = unitDefOf(u) ?? UNIT_DEFS[UnitKind.Peasant];
       if (def.attack <= 0) continue; // non-combatants never fight
 
       const e = ctx.db.entity.entityId.find(u.entityId);
@@ -257,8 +281,8 @@ export const combatTick = spacetimedb.reducer(
           continue;
         }
         const targetArmor = tu
-          ? UNIT_DEFS[tu.kind as UnitKindT].armorClass
-          : BUILDING_DEFS[tb!.kind as BuildingKindT].armorClass;
+          ? unitDefOf(tu).armorClass
+          : bldgDefOf(tb!).armorClass;
         const newHp = applyDamage(
           tu ? tu.hp : tb!.hp,
           effectiveDamage(def, targetArmor)
@@ -328,8 +352,7 @@ export const combatTick = spacetimedb.reducer(
     // A garrisoned host's ranged occupants stack their bows onto its volley; a
     // structure that cannot shoot on its own still fires once archers man it.
     for (const b of [...ctx.db.building.iter()]) {
-      const bdef =
-        BUILDING_DEFS[b.kind as BuildingKindT] ?? BUILDING_DEFS[BuildingKind.Keep];
+      const bdef = bldgDefOf(b) ?? BUILDING_DEFS[BuildingKind.Keep];
       const garrisonFire = garrisonFirePower(
         occupantFireProfile(ctx, b.entityId),
         bdef
@@ -361,7 +384,7 @@ export const combatTick = spacetimedb.reducer(
           fresh.hp,
           effectiveDamage(
             { attack: fireAttack, damageType: bdef.damageType },
-            UNIT_DEFS[fresh.kind as UnitKindT].armorClass
+            unitDefOf(fresh).armorClass
           )
         );
         if (newHp <= 0) {

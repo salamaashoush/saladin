@@ -11,4 +11,5 @@ export const scheduleRefs: {
   combatTick?: unknown;
   aiBrain?: unknown;
   economySystem?: unknown;
+  researchSystem?: unknown;
 } = {};

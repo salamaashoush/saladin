@@ -113,6 +113,22 @@ export const player = table(
     keepEntity: t.u64(),
     defeated: t.bool(),
     slot: t.u8(), // stable spawn-corner slot (0..MAX_PLAYERS-1)
+    techMask: t.u64(), // completed Blacksmith techs as a bitset — combat reads one number
+  }
+);
+
+// One row per (owner, tech) being researched or completed. The Blacksmith starts
+// it; researchSystem advances `progress` each tick and, on completion, flips the
+// owner's player.techMask bit and sets `done`. `progress` is the fraction 0..1 so
+// the HUD can draw a bar without knowing the per-tech time.
+export const research = table(
+  { name: 'research', public: true },
+  {
+    researchId: t.u64().primaryKey().autoInc(),
+    owner: t.identity().index('btree'),
+    tech: t.u8(),
+    progress: t.f32(),
+    done: t.bool(),
   }
 );
 
@@ -179,6 +195,14 @@ export const aiBrainTimer = table(
 
 export const economyTimer = table(
   { name: 'economy_timer', scheduled: (): any => scheduleRefs.economySystem },
+  {
+    scheduledId: t.u64().primaryKey().autoInc(),
+    scheduledAt: t.scheduleAt(),
+  }
+);
+
+export const researchTimer = table(
+  { name: 'research_timer', scheduled: (): any => scheduleRefs.researchSystem },
   {
     scheduledId: t.u64().primaryKey().autoInc(),
     scheduledAt: t.scheduleAt(),

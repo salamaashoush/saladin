@@ -6,6 +6,7 @@ import {
   garrison,
   resourceNode,
   player,
+  research,
   config,
   shot,
   ai,
@@ -14,6 +15,7 @@ import {
   combatTimer,
   aiBrainTimer,
   economyTimer,
+  researchTimer,
 } from './tables.ts';
 
 export const spacetimedb = schema({
@@ -23,6 +25,7 @@ export const spacetimedb = schema({
   garrison,
   resourceNode,
   player,
+  research,
   config,
   shot,
   ai,
@@ -31,6 +34,7 @@ export const spacetimedb = schema({
   combatTimer,
   aiBrainTimer,
   economyTimer,
+  researchTimer,
 });
 
 export default spacetimedb;

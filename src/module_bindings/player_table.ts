@@ -24,4 +24,5 @@ export default __t.row({
   keepEntity: __t.u64().name("keep_entity"),
   defeated: __t.bool(),
   slot: __t.u8(),
+  techMask: __t.u64().name("tech_mask"),
 });

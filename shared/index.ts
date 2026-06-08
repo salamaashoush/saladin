@@ -13,3 +13,4 @@ export * from './elevation.ts';
 export * from './pathfinding.ts';
 export * from './buildings.ts';
 export * from './defs.ts';
+export * from './research.ts';

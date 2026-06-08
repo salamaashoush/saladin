@@ -19,6 +19,10 @@ import {
   allocSlot,
 } from '../../../shared/defs.ts';
 import { AiPhase } from '../../../shared/ai.ts';
+import {
+  effectiveUnitDef,
+  effectiveBuildingDef,
+} from '../../../shared/research.ts';
 import { MORALE_MAX } from '../../../shared/morale.ts';
 import { scatterNodes as scatterNodesPure } from '../../../shared/terrain.ts';
 import { findBuildableNear } from '../../../shared/buildings.ts';
@@ -30,12 +34,18 @@ import {
   Faction,
   Stance,
   type UnitKind as UnitKindT,
-  type BuildingKind as BuildingKindT,
 } from '../../../shared/enums.ts';
 import { clampWorld, getSeed, buildNodes, assignGatherBalanced } from './util.ts';
 
 // ctx is typed inside reducers; helpers take `any` to avoid threading the schema
 // generic everywhere. They only touch typed table rows.
+
+// An owner's completed-tech bitmask, defaulting to 0n before the player row exists
+// (the keep is spawned inside foundPlayer, just before player.insert). Newly
+// trained units/structures fold researched bonuses (hp/armor) at spawn.
+function ownerTechMask(ctx: any, owner: any): bigint {
+  return ctx.db.player.identity.find(owner)?.techMask ?? 0n;
+}
 export function spawnUnitEntity(
   ctx: any,
   owner: any,
@@ -43,7 +53,10 @@ export function spawnUnitEntity(
   x: number,
   y: number
 ): bigint {
-  const def = UNIT_DEFS[kind as UnitKindT] ?? UNIT_DEFS[UnitKind.Peasant];
+  const base = UNIT_DEFS[kind as UnitKindT] ?? UNIT_DEFS[UnitKind.Peasant];
+  // Fold the owner's researched techs so a new unit starts at its EFFECTIVE hp
+  // (e.g. Conscription/Plate). speed is unchanged by tech — read from base.
+  const def = effectiveUnitDef(kind, ownerTechMask(ctx, owner)) ?? base;
   const e = ctx.db.entity.insert({ entityId: 0n, x, y, facing: 0 });
   ctx.db.unit.insert({
     entityId: e.entityId,
@@ -80,7 +93,9 @@ export function spawnBuilding(
   x: number,
   y: number
 ): bigint {
-  const def = BUILDING_DEFS[kind as BuildingKindT] ?? BUILDING_DEFS[BuildingKind.Keep];
+  const def =
+    effectiveBuildingDef(kind, ownerTechMask(ctx, owner)) ??
+    BUILDING_DEFS[BuildingKind.Keep];
   const e = ctx.db.entity.insert({ entityId: 0n, x, y, facing: 0 });
   ctx.db.building.insert({
     entityId: e.entityId,
@@ -152,6 +167,7 @@ export function foundPlayer(
     keepEntity: keepId,
     defeated: false,
     slot,
+    techMask: 0n,
   });
 
   const nodes = buildNodes(ctx);

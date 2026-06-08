@@ -48,6 +48,7 @@ import PlaceBuildingReducer from "./place_building_reducer";
 import PlaceWallReducer from "./place_wall_reducer";
 import SetRallyReducer from "./set_rally_reducer";
 import SetStanceReducer from "./set_stance_reducer";
+import StartResearchReducer from "./start_research_reducer";
 import StartSkirmishReducer from "./start_skirmish_reducer";
 import TrainUnitReducer from "./train_unit_reducer";
 import UngarrisonBuildingReducer from "./ungarrison_building_reducer";
@@ -61,6 +62,7 @@ import ConfigRow from "./config_table";
 import EntityRow from "./entity_table";
 import GarrisonRow from "./garrison_table";
 import PlayerRow from "./player_table";
+import ResearchRow from "./research_table";
 import ResourceNodeRow from "./resource_node_table";
 import ShotRow from "./shot_table";
 import UnitRow from "./unit_table";
@@ -152,6 +154,20 @@ const tablesSchema = __schema({
       { name: 'player_player_id_key', constraint: 'unique', columns: ['playerId'] },
     ],
   }, PlayerRow),
+  research: __table({
+    name: 'research',
+    indexes: [
+      { accessor: 'owner', name: 'research_owner_idx_btree', algorithm: 'btree', columns: [
+        'owner',
+      ] },
+      { accessor: 'researchId', name: 'research_research_id_idx_btree', algorithm: 'btree', columns: [
+        'researchId',
+      ] },
+    ],
+    constraints: [
+      { name: 'research_research_id_key', constraint: 'unique', columns: ['researchId'] },
+    ],
+  }, ResearchRow),
   resourceNode: __table({
     name: 'resource_node',
     indexes: [
@@ -203,6 +219,7 @@ const reducersSchema = __reducers(
   __reducerSchema("place_wall", PlaceWallReducer),
   __reducerSchema("set_rally", SetRallyReducer),
   __reducerSchema("set_stance", SetStanceReducer),
+  __reducerSchema("start_research", StartResearchReducer),
   __reducerSchema("start_skirmish", StartSkirmishReducer),
   __reducerSchema("train_unit", TrainUnitReducer),
   __reducerSchema("ungarrison_building", UngarrisonBuildingReducer),

@@ -109,8 +109,24 @@ export const Player = __t.object("Player", {
   keepEntity: __t.u64(),
   defeated: __t.bool(),
   slot: __t.u8(),
+  techMask: __t.u64(),
 });
 export type Player = __Infer<typeof Player>;
+
+export const Research = __t.object("Research", {
+  researchId: __t.u64(),
+  owner: __t.identity(),
+  tech: __t.u8(),
+  progress: __t.f32(),
+  done: __t.bool(),
+});
+export type Research = __Infer<typeof Research>;
+
+export const ResearchTimer = __t.object("ResearchTimer", {
+  scheduledId: __t.u64(),
+  scheduledAt: __t.scheduleAt(),
+});
+export type ResearchTimer = __Infer<typeof ResearchTimer>;
 
 export const ResourceNode = __t.object("ResourceNode", {
   entityId: __t.u64(),

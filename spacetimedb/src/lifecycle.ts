@@ -6,6 +6,7 @@ import {
   COMBAT_TICK_MS,
   AI_BRAIN_TICK_MS,
   ECONOMY_TICK_MS,
+  RESEARCH_TICK_MS,
 } from '../../shared/constants.ts';
 import { spacetimedb } from './schema/db.ts';
 import { scatterNodes } from './world/spawn.ts';
@@ -42,6 +43,10 @@ export const init = spacetimedb.init((ctx) => {
   ctx.db.economyTimer.insert({
     scheduledId: 0n,
     scheduledAt: ScheduleAt.interval(BigInt(ECONOMY_TICK_MS) * 1000n),
+  });
+  ctx.db.researchTimer.insert({
+    scheduledId: 0n,
+    scheduledAt: ScheduleAt.interval(BigInt(RESEARCH_TICK_MS) * 1000n),
   });
 });
 

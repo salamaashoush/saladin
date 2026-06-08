@@ -16,9 +16,11 @@ export * from './reducers/unit_commands.ts';
 export * from './reducers/build_commands.ts';
 export * from './reducers/garrison_commands.ts';
 export * from './reducers/market.ts';
+export * from './reducers/research.ts';
 
 export * from './systems/movement.ts';
 export * from './systems/gather_ai.ts';
 export * from './systems/combat.ts';
 export * from './systems/ai_brain.ts';
 export * from './systems/economy.ts';
+export * from './systems/research.ts';
