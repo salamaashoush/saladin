@@ -18,6 +18,7 @@ const WORLD_TABLES = [
   tables.entity,
   tables.unit,
   tables.building,
+  tables.garrison,
   tables.resourceNode,
   tables.player,
   tables.config,

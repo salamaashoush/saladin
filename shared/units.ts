@@ -31,6 +31,8 @@ export interface UnitDef {
   requires?: BuildingKind; // extra tech prereq beyond the training building
   prefersBuildings?: boolean; // siege: hunt structures over soft targets
   moraleAura?: number; // radius an allied support unit (Imam) steadies morale within (0 = none)
+  garrisonable?: boolean; // foot/missile troops may shelter in walls/towers (cavalry/siege cannot)
+  ranged?: boolean; // fires from a distance — adds bow fire to a host structure when garrisoned
 }
 
 export const UNIT_DEFS: Record<UnitKind, UnitDef> = {
@@ -67,6 +69,7 @@ export const UNIT_DEFS: Record<UnitKind, UnitDef> = {
     aggroRange: 6,
     cost: { wood: 35 },
     tint: 0x3a3a3a,
+    garrisonable: true, // foot soldier — can hold a wall (no bow, lends no fire)
   },
   [UnitKind.Archer]: {
     label: 'Archer',
@@ -84,6 +87,8 @@ export const UNIT_DEFS: Record<UnitKind, UnitDef> = {
     aggroRange: 7,
     cost: { wood: 45 },
     tint: 0x5a3a1a,
+    garrisonable: true,
+    ranged: true, // bow fire stacks onto a garrisoned tower/keep's volley
   },
   [UnitKind.Knight]: {
     label: 'Knight',
@@ -157,6 +162,8 @@ export const UNIT_DEFS: Record<UnitKind, UnitDef> = {
     aggroRange: 7,
     cost: { wood: 40, gold: 20 },
     tint: 0x4a3a2a,
+    garrisonable: true,
+    ranged: true, // bolts from the battlements punch armor from cover
   },
   [UnitKind.Ram]: {
     label: 'Battering Ram',
@@ -213,5 +220,6 @@ export const UNIT_DEFS: Record<UnitKind, UnitDef> = {
     cost: { food: 40 }, // cheap support, trainable from the Keep
     tint: 0xe8e2d0,
     moraleAura: 7, // steadies nearby allies' morale and resists their rout
+    garrisonable: true, // shelters inside (protected) — non-shooter, lends no fire
   },
 };

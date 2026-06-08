@@ -14,6 +14,7 @@ export * from './lifecycle.ts';
 export * from './reducers/match.ts';
 export * from './reducers/unit_commands.ts';
 export * from './reducers/build_commands.ts';
+export * from './reducers/garrison_commands.ts';
 export * from './reducers/market.ts';
 
 export * from './systems/movement.ts';

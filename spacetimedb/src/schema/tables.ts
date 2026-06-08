@@ -46,8 +46,21 @@ export const unit = table(
     routing: t.bool(), // latched rout state — hysteresis: set <ROUT, cleared >RALLY
     homeX: t.f32(), // posted position — Defensive units leash to it
     homeY: t.f32(),
+    garrisonedIn: t.u64(), // host building entityId while sheltered (0 = in the field)
     path: t.array(PathPoint),
     pathIdx: t.u32(),
+  }
+);
+
+// One row per sheltered unit. A garrisoned unit leaves the field loops (movement,
+// combat, target acquisition) and, if ranged, lends fire to its host structure.
+export const garrison = table(
+  { name: 'garrison', public: true },
+  {
+    slotId: t.u64().primaryKey().autoInc(),
+    building: t.u64().index('btree'), // host structure entityId
+    unit: t.u64().unique(), // sheltered unit entityId (one slot per unit)
+    owner: t.identity(),
   }
 );
 

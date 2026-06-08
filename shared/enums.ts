@@ -35,6 +35,7 @@ export const BuildingKind = {
   Granary: 9,
   FishingHut: 10,
   SiegeWorkshop: 11,
+  Watchtower: 12,
 } as const;
 export type BuildingKind = (typeof BuildingKind)[keyof typeof BuildingKind];
 

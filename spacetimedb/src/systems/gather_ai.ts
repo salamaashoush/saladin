@@ -41,6 +41,7 @@ export const unitAi = spacetimedb.reducer({ timer: aiTimer.rowType }, (ctx) => {
   };
 
   for (const u of [...ctx.db.unit.iter()]) {
+    if (u.garrisonedIn !== 0n) continue; // sheltered — off the field
     if (u.gatherState === GatherState.Idle) continue;
     const e = ctx.db.entity.entityId.find(u.entityId);
     if (!e) continue;

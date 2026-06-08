@@ -19,16 +19,23 @@ export interface Toast {
   kind: 'info' | 'error';
 }
 
+export interface SelectedBuilding {
+  id: string;
+  kind: number;
+  occupants: number; // units currently garrisoned inside (0 if not a host)
+  garrisonCap: number; // 0 = cannot host a garrison
+}
+
 interface GameUIState {
   selection: SelectionSummary;
-  selectedBuilding: { id: string; kind: number } | null;
+  selectedBuilding: SelectedBuilding | null;
   ownedBuildings: number[]; // BuildingKinds the player currently owns (tech tree)
   toasts: Toast[];
   buildMode: number | null; // BuildingKind being placed, or null
   demolishMode: boolean;
   lastSkirmish: SkirmishConfig | null; // remembered for "Rematch"
   setSelection: (s: SelectionSummary) => void;
-  setSelectedBuilding: (b: { id: string; kind: number } | null) => void;
+  setSelectedBuilding: (b: SelectedBuilding | null) => void;
   setOwnedBuildings: (kinds: number[]) => void;
   pushToast: (text: string, kind?: Toast['kind']) => void;
   dismissToast: (id: number) => void;

@@ -23,6 +23,7 @@ export interface HUDProps {
   onDemolish: (id: string) => void;
   onGatherAll: () => void;
   onTrade: (resType: number, amount: number) => void;
+  onUngarrison: (buildingId: string) => void;
   onAddAi: () => void;
   onLeave: () => void;
   onSetStance: (stance: number) => void;
@@ -73,6 +74,7 @@ export function HUD(props: HUDProps) {
             onDemolish={props.onDemolish}
             onGatherAll={props.onGatherAll}
             onTrade={props.onTrade}
+            onUngarrison={props.onUngarrison}
           />
         </div>
         <div className={styles.barRight}>

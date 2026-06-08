@@ -48,6 +48,7 @@ function App() {
           onDemolish={actions.demolish}
           onGatherAll={actions.gatherAll}
           onTrade={actions.trade}
+          onUngarrison={actions.ungarrison}
           onAddAi={() => actions.addAi(1)}
           onLeave={actions.leaveGame}
           onSetStance={(s) => game?.setSelectedStance(s)}

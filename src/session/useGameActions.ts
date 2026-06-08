@@ -18,6 +18,8 @@ export function useGameActions() {
   const demolishBuilding = useReducer(reducers.demolishBuilding);
   const autoGather = useReducer(reducers.autoGather);
   const marketTrade = useReducer(reducers.marketTrade);
+  const garrisonUnit = useReducer(reducers.garrisonUnit);
+  const ungarrisonBuilding = useReducer(reducers.ungarrisonBuilding);
 
   const guard = (p: unknown) =>
     Promise.resolve(p).catch((e: unknown) =>
@@ -47,6 +49,12 @@ export function useGameActions() {
     gatherAll: () => guard(autoGather()),
     trade: (resType: number, amount: number) =>
       guard(marketTrade({ resType, amount })),
+    garrison: (unitId: string, buildingId: string) =>
+      guard(
+        garrisonUnit({ unitId: BigInt(unitId), buildingId: BigInt(buildingId) })
+      ),
+    ungarrison: (buildingId: string) =>
+      guard(ungarrisonBuilding({ buildingId: BigInt(buildingId) })),
   };
 }
 

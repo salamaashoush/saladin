@@ -11,6 +11,7 @@ import AttackUnitReducer from "../attack_unit_reducer";
 import AutoGatherReducer from "../auto_gather_reducer";
 import DemolishBuildingReducer from "../demolish_building_reducer";
 import EnterGameReducer from "../enter_game_reducer";
+import GarrisonUnitReducer from "../garrison_unit_reducer";
 import GatherResourceReducer from "../gather_resource_reducer";
 import LeaveGameReducer from "../leave_game_reducer";
 import MarketTradeReducer from "../market_trade_reducer";
@@ -21,12 +22,14 @@ import SetRallyReducer from "../set_rally_reducer";
 import SetStanceReducer from "../set_stance_reducer";
 import StartSkirmishReducer from "../start_skirmish_reducer";
 import TrainUnitReducer from "../train_unit_reducer";
+import UngarrisonBuildingReducer from "../ungarrison_building_reducer";
 
 export type AddAiParams = __Infer<typeof AddAiReducer>;
 export type AttackUnitParams = __Infer<typeof AttackUnitReducer>;
 export type AutoGatherParams = __Infer<typeof AutoGatherReducer>;
 export type DemolishBuildingParams = __Infer<typeof DemolishBuildingReducer>;
 export type EnterGameParams = __Infer<typeof EnterGameReducer>;
+export type GarrisonUnitParams = __Infer<typeof GarrisonUnitReducer>;
 export type GatherResourceParams = __Infer<typeof GatherResourceReducer>;
 export type LeaveGameParams = __Infer<typeof LeaveGameReducer>;
 export type MarketTradeParams = __Infer<typeof MarketTradeReducer>;
@@ -37,4 +40,5 @@ export type SetRallyParams = __Infer<typeof SetRallyReducer>;
 export type SetStanceParams = __Infer<typeof SetStanceReducer>;
 export type StartSkirmishParams = __Infer<typeof StartSkirmishReducer>;
 export type TrainUnitParams = __Infer<typeof TrainUnitReducer>;
+export type UngarrisonBuildingParams = __Infer<typeof UngarrisonBuildingReducer>;
 

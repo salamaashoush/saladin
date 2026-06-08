@@ -16,6 +16,9 @@ import {
   footprintCenter,
   canPlace,
   isWaterAdjacent,
+  canGarrison,
+  canHostGarrison,
+  garrisonFreeSlots,
 } from '../../shared/index.ts';
 import { biasOf, NEUTRAL_BIAS, type MapBias } from '../../shared/index.ts';
 import { buildTerrain, terrainHeight } from './Terrain.ts';
@@ -81,6 +84,8 @@ interface GameConn {
     demolishBuilding: (a: { entityId: bigint }) => void;
     setRally: (a: { entityId: bigint; x: number; y: number }) => void;
     setStance: (a: { entityIds: bigint[]; stance: number }) => void;
+    garrisonUnit: (a: { unitId: bigint; buildingId: bigint }) => void;
+    ungarrisonBuilding: (a: { buildingId: bigint }) => void;
   };
 }
 
@@ -111,6 +116,10 @@ export class SaladinGame {
 
   private readonly objs = new Map<string, RObj>();
   private readonly pos = new Map<string, PosRow>();
+  // Garrison mirror: which building each sheltered unit is in, and the live
+  // occupant tally per host. Drives mesh hiding + the selected-building panel.
+  private readonly garrisonByUnit = new Map<string, string>();
+  private readonly occupantsByBuilding = new Map<string, number>();
   private readonly playerColors = new Map<string, number>();
   private readonly keys = new Set<string>();
   private readonly selected = new Set<string>();
@@ -302,6 +311,11 @@ export class SaladinGame {
       (r) => this.onBuildingUpdate(r)
     );
     on(
+      db.garrison,
+      (r) => this.onGarrisonInsert(r),
+      (r) => this.onGarrisonDelete(r)
+    );
+    on(
       db.resourceNode,
       (r) => this.spawnNode(r.entityId, r.resType, r.remaining),
       (r) => this.removeObj(r.entityId),
@@ -450,6 +464,36 @@ export class SaladinGame {
     if (this.selected.has(r.entityId.toString())) this.emitSelection();
   }
 
+  // A unit entered a structure: hide its mesh (it's behind walls now), drop it
+  // from the active selection, and bump the host's occupant tally.
+  private onGarrisonInsert(r: any) {
+    const unitId = r.unit.toString();
+    const buildingId = r.building.toString();
+    this.garrisonByUnit.set(unitId, buildingId);
+    this.occupantsByBuilding.set(
+      buildingId,
+      (this.occupantsByBuilding.get(buildingId) ?? 0) + 1
+    );
+    const o = this.objs.get(unitId);
+    if (o) o.group.visible = false;
+    if (this.selected.delete(unitId)) this.emitSelection();
+    if (this.selectedBuildingId === buildingId) this.emitSelectedBuilding();
+  }
+
+  // A unit left a structure (popped out, or the garrison row was cleared): show
+  // its mesh again and decrement the host tally.
+  private onGarrisonDelete(r: any) {
+    const unitId = r.unit.toString();
+    const buildingId = r.building.toString();
+    this.garrisonByUnit.delete(unitId);
+    const n = (this.occupantsByBuilding.get(buildingId) ?? 1) - 1;
+    if (n <= 0) this.occupantsByBuilding.delete(buildingId);
+    else this.occupantsByBuilding.set(buildingId, n);
+    const o = this.objs.get(unitId);
+    if (o) o.group.visible = true;
+    if (this.selectedBuildingId === buildingId) this.emitSelectedBuilding();
+  }
+
   // Toggle the overhead rout marker on a unit. Lazily built so non-routing units
   // pay nothing; data-driven height from the unit def keeps it above the hp bar.
   private setRouting(o: RObj, routing: boolean) {
@@ -536,6 +580,8 @@ export class SaladinGame {
     this.objs.set(id, o);
     this.updateHpBar(o);
     this.setRouting(o, routing);
+    // If the garrison row arrived before this unit's mesh, stay hidden.
+    if (this.garrisonByUnit.has(id)) group.visible = false;
   }
 
   private spawnBuilding(
@@ -712,6 +758,10 @@ export class SaladinGame {
       else mat?.dispose?.();
     });
     this.objs.delete(id);
+    // Forget garrison bookkeeping for whatever just vanished (the row deletes are
+    // authoritative, but a unit/building can be removed while still referenced).
+    this.garrisonByUnit.delete(id);
+    this.occupantsByBuilding.delete(id);
     if (o.arche === 'building') this.refreshWallsAround(o.kind, bx, bz);
     if (o.arche === 'building' && o.ownerHex === this.myHex)
       this.emitOwnedBuildings();
@@ -861,7 +911,7 @@ export class SaladinGame {
       if (o.arche === 'building' && o.ownerHex === this.myHex) {
         this.selected.clear();
         this.emitSelection();
-        this.selectBuilding(rid, o.kind);
+        this.selectBuilding(rid);
         return;
       }
       break;
@@ -872,10 +922,28 @@ export class SaladinGame {
     }
   }
 
-  private selectBuilding(id: string, kind: number) {
+  private selectBuilding(id: string) {
     this.selectedBuildingId = id;
-    useGameStore.getState().setSelectedBuilding({ id, kind });
+    this.emitSelectedBuilding();
     this.updateBuildingHighlight();
+  }
+
+  // Publish the selected building plus its live garrison so the HUD can show
+  // occupants + an Ungarrison button. Re-emitted whenever the garrison changes.
+  private emitSelectedBuilding() {
+    const id = this.selectedBuildingId;
+    const o = id ? this.objs.get(id) : null;
+    if (!id || !o) {
+      useGameStore.getState().setSelectedBuilding(null);
+      return;
+    }
+    const def = BUILDING_DEFS[o.kind as 0];
+    useGameStore.getState().setSelectedBuilding({
+      id,
+      kind: o.kind,
+      occupants: this.occupantsByBuilding.get(id) ?? 0,
+      garrisonCap: def?.garrisonCap ?? 0,
+    });
   }
 
   private clearBuildingSel() {
@@ -958,6 +1026,7 @@ export class SaladinGame {
     this.selected.clear();
     for (const [id, o] of this.objs) {
       if (o.arche !== 'unit' || o.ownerHex !== this.myHex) continue;
+      if (this.garrisonByUnit.has(id)) continue; // sheltered — not on the field
       const v = o.group.position.clone().project(this.camera);
       if (v.z < -1 || v.z > 1) continue;
       const sx = (v.x * 0.5 + 0.5) * r.width;
@@ -1004,6 +1073,8 @@ export class SaladinGame {
         }
         if (o.arche === 'building') {
           if (o.ownerHex !== this.myHex) this.commandAttack(BigInt(rid));
+          else if (canHostGarrison(BUILDING_DEFS[o.kind as 0]))
+            this.commandGarrison(rid);
           else this.commandMove(o.group.position.x, o.group.position.z);
           return;
         }
@@ -1039,6 +1110,35 @@ export class SaladinGame {
       const def = o ? UNIT_DEFS[o.kind as UnitKind] : undefined;
       if (def && def.carry > 0)
         this.conn!.reducers.gatherResource({ entityId: BigInt(id), nodeId });
+    }
+  }
+
+  // Shelter every garrisonable selected unit into the structure, up to its free
+  // slots. Non-garrisonable units (cavalry/siege) in the selection are left to
+  // walk to the building instead so a mixed group still does something sensible.
+  private commandGarrison(buildingId: string) {
+    const def = BUILDING_DEFS[
+      (this.objs.get(buildingId)?.kind ?? BuildingKind.Tower) as 0
+    ];
+    let free = garrisonFreeSlots(def, this.occupantsByBuilding.get(buildingId) ?? 0);
+    let routedAny = false;
+    for (const id of this.selected) {
+      const o = this.objs.get(id);
+      if (!o || o.arche !== 'unit') continue;
+      if (canGarrison(UNIT_DEFS[o.kind as UnitKind])) {
+        if (free <= 0) break;
+        this.conn!.reducers.garrisonUnit({
+          unitId: BigInt(id),
+          buildingId: BigInt(buildingId),
+        });
+        free--;
+        routedAny = true;
+      }
+    }
+    // Whatever could not garrison (full, or cavalry/siege) just marches over.
+    if (!routedAny) {
+      const b = this.objs.get(buildingId);
+      if (b) this.commandMove(b.group.position.x, b.group.position.z);
     }
   }
 

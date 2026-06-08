@@ -65,6 +65,7 @@ export function spawnUnitEntity(
     routing: false,
     homeX: x,
     homeY: y,
+    garrisonedIn: 0n,
     path: [],
     pathIdx: 0,
   });

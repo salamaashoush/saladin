@@ -22,6 +22,7 @@ interface BuildBarProps {
   onDemolish: (id: string) => void;
   onGatherAll: () => void;
   onTrade: (resType: number, amount: number) => void;
+  onUngarrison: (buildingId: string) => void;
 }
 
 const MARKET_LOT = 20; // resources sold per market click
@@ -85,6 +86,7 @@ export function BuildBar({
   onDemolish,
   onGatherAll,
   onTrade,
+  onUngarrison,
 }: BuildBarProps) {
   const selB = useGameStore((s) => s.selectedBuilding);
   const buildMode = useGameStore((s) => s.buildMode);
@@ -173,6 +175,24 @@ export function BuildBar({
             )}
           </div>
         </div>
+        {selB.garrisonCap > 0 && (
+          <div className={styles.group}>
+            <div className={styles.groupLabel}>
+              🛡️ Garrison {selB.occupants}/{selB.garrisonCap}
+            </div>
+            <div className={styles.tools}>
+              <span className={styles.note}>
+                Right-click with troops selected to garrison.
+              </span>
+              <Tool
+                icon="🚪"
+                label="Ungarrison"
+                disabled={selB.occupants === 0}
+                onClick={() => onUngarrison(selB.id)}
+              />
+            </div>
+          </div>
+        )}
         {orders}
       </div>
     );

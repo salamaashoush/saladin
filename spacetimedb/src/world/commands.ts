@@ -2,10 +2,12 @@ import { BuildingKind } from '../../../shared/enums.ts';
 import { mapPresetById } from '../../../shared/presets.ts';
 import { dist, getSeed } from './util.ts';
 import { scatterNodes } from './spawn.ts';
+import { clearGarrisonsOf } from './garrison.ts';
 
 // Remove everything belonging to `owner`: units, buildings, their entity rows,
 // the ai row (if a bot) and the player row. Used to tear down a match cleanly.
 export function clearOwner(ctx: any, owner: any): void {
+  clearGarrisonsOf(ctx, owner); // drop garrison slots so none outlive their units
   for (const u of [...ctx.db.unit.iter()])
     if (u.owner.equals(owner)) {
       ctx.db.unit.entityId.delete(u.entityId);

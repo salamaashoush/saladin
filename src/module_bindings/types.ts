@@ -72,6 +72,14 @@ export const Entity = __t.object("Entity", {
 });
 export type Entity = __Infer<typeof Entity>;
 
+export const Garrison = __t.object("Garrison", {
+  slotId: __t.u64(),
+  building: __t.u64(),
+  unit: __t.u64(),
+  owner: __t.identity(),
+});
+export type Garrison = __Infer<typeof Garrison>;
+
 export const MoveTimer = __t.object("MoveTimer", {
   scheduledId: __t.u64(),
   scheduledAt: __t.scheduleAt(),
@@ -137,6 +145,7 @@ export const Unit = __t.object("Unit", {
   routing: __t.bool(),
   homeX: __t.f32(),
   homeY: __t.f32(),
+  garrisonedIn: __t.u64(),
   get path() {
     return __t.array(PathPoint);
   },

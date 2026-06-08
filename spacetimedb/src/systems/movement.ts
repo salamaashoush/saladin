@@ -9,6 +9,7 @@ export const moveUnits = spacetimedb.reducer(
   { timer: moveTimer.rowType },
   (ctx) => {
     for (const u of [...ctx.db.unit.iter()]) {
+      if (u.garrisonedIn !== 0n) continue; // sheltered — off the field
       if (!u.hasTarget) continue;
       const e = ctx.db.entity.entityId.find(u.entityId);
       if (!e) continue;

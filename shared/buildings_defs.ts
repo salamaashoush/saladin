@@ -28,6 +28,8 @@ export interface BuildingDef {
   enablesTrade?: boolean; // gates the marketTrade reducer (Market)
   foodDropoff?: boolean; // alternate food deposit point (FishingHut)
   requiresWater?: boolean; // must be placed water-adjacent (FishingHut)
+  garrisonCap?: number; // how many units may shelter inside (0/undefined = none)
+  garrisonSurvivesDeath?: boolean; // on death, eject occupants (true) vs kill them (false)
 }
 
 const B = (
@@ -62,6 +64,13 @@ export const BUILDING_DEFS: Record<BuildingKind, BuildingDef> = {
     icon: '🏰',
     pop: 8,
     trains: [UnitKind.Peasant, UnitKind.Imam],
+    // The keep is a fortress: it fires on its own and shelters a full garrison
+    // whose archers stack onto its volley. Occupants spill out if it ever falls.
+    attack: 11,
+    range: 8,
+    attackRate: 1.0,
+    garrisonCap: 10,
+    garrisonSurvivesDeath: true,
   }),
   [BuildingKind.Barracks]: B('Barracks', 2, 1.4, { wood: 70, stone: 20 }, 500, true, {
     icon: '🏛️',
@@ -73,11 +82,32 @@ export const BUILDING_DEFS: Record<BuildingKind, BuildingDef> = {
     attack: 9,
     range: 7,
     attackRate: 0.9,
+    // Archers manning the tower add their bows to its fire; survivors climb down
+    // when it is destroyed rather than being buried with it.
+    garrisonCap: 5,
+    garrisonSurvivesDeath: true,
   }),
-  [BuildingKind.Wall]: B('Wall', 1, 1.2, { wood: 6, stone: 6 }, 300, true, { icon: '🧱' }),
+  [BuildingKind.Watchtower]: B('Watchtower', 1, 3.4, { wood: 80, stone: 70 }, 700, true, {
+    icon: '🛡️',
+    attack: 13,
+    range: 9,
+    attackRate: 0.8,
+    garrisonCap: 8,
+    garrisonSurvivesDeath: true,
+    requires: BuildingKind.Tower,
+  }),
+  [BuildingKind.Wall]: B('Wall', 1, 1.2, { wood: 6, stone: 6 }, 300, true, {
+    icon: '🧱',
+    // A short stretch of rampart — a couple of bowmen can line it, but a
+    // collapsing wall takes whoever was atop it down with it.
+    garrisonCap: 2,
+    garrisonSurvivesDeath: false,
+  }),
   [BuildingKind.Gatehouse]: B('Gatehouse', 1, 1.5, { wood: 15, stone: 15 }, 400, true, {
     icon: '🚪',
     passable: true,
+    garrisonCap: 3,
+    garrisonSurvivesDeath: false,
   }),
   [BuildingKind.House]: B('House', 2, 1.2, { wood: 40 }, 250, true, {
     icon: '🏠',
@@ -126,7 +156,12 @@ export const BUILD_CATEGORIES: { label: string; icon: string; kinds: BuildingKin
   {
     label: 'Defense',
     icon: '🛡️',
-    kinds: [BuildingKind.Wall, BuildingKind.Gatehouse, BuildingKind.Tower],
+    kinds: [
+      BuildingKind.Wall,
+      BuildingKind.Gatehouse,
+      BuildingKind.Tower,
+      BuildingKind.Watchtower,
+    ],
   },
   {
     label: 'Economy',

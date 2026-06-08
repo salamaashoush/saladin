@@ -35,6 +35,7 @@ export default __t.row({
   routing: __t.bool(),
   homeX: __t.f32().name("home_x"),
   homeY: __t.f32().name("home_y"),
+  garrisonedIn: __t.u64().name("garrisoned_in"),
   get path() {
     return __t.array(PathPoint);
   },

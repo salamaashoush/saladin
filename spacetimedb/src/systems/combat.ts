@@ -29,12 +29,18 @@ import {
   elevationRangeBonus,
   ELEV_BONUS_MAX,
 } from '../../../shared/elevation.ts';
+import { garrisonFirePower } from '../../../shared/garrison.ts';
 import { spacetimedb } from '../schema/db.ts';
 import { combatTimer } from '../schema/tables.ts';
 import { scheduleRefs } from '../schema/schedule_refs.ts';
 import { dist, getSeed } from '../world/util.ts';
 import { movePatch } from '../world/placement.ts';
 import { markDefeated } from '../world/spawn.ts';
+import {
+  occupantFireProfile,
+  garrisonRangeRate,
+  evacuateOnDeath,
+} from '../world/garrison.ts';
 
 // Live enemy units (as Located) for target acquisition. `units` is the tick
 // snapshot; each is re-fetched so a unit already killed this tick is excluded.
@@ -48,7 +54,9 @@ function enemyUnitsAround(
   const out: Located[] = [];
   for (const o of units) {
     if (o.entityId === selfId || o.owner.equals(owner)) continue;
-    if (!ctx.db.unit.entityId.find(o.entityId)) continue; // dead this tick
+    const fresh = ctx.db.unit.entityId.find(o.entityId);
+    if (!fresh) continue; // dead this tick
+    if (fresh.garrisonedIn !== 0n) continue; // sheltered — not a field target
     const oe = ctx.db.entity.entityId.find(o.entityId);
     if (oe) out.push({ id: o.entityId, x: oe.x, y: oe.y });
   }
@@ -83,7 +91,8 @@ function nearbyAllies(
   let n = 0;
   for (const o of units) {
     if (o.entityId === selfId || !o.owner.equals(owner)) continue;
-    if (!ctx.db.unit.entityId.find(o.entityId)) continue; // dead this tick
+    const fresh = ctx.db.unit.entityId.find(o.entityId);
+    if (!fresh || fresh.garrisonedIn !== 0n) continue; // dead or sheltered
     const oe = ctx.db.entity.entityId.find(o.entityId);
     if (oe && dist(x, y, oe.x, oe.y) <= ALLY_RADIUS) n++;
   }
@@ -107,7 +116,8 @@ function nearSupport(
   for (const o of units) {
     const aura = UNIT_DEFS[o.kind as UnitKindT]?.moraleAura ?? 0;
     if (aura <= 0 || !o.owner.equals(owner)) continue;
-    if (!ctx.db.unit.entityId.find(o.entityId)) continue; // dead this tick
+    const fresh = ctx.db.unit.entityId.find(o.entityId);
+    if (!fresh || fresh.garrisonedIn !== 0n) continue; // dead or sheltered
     const oe = ctx.db.entity.entityId.find(o.entityId);
     if (oe && dist(x, y, oe.x, oe.y) <= aura) return true;
   }
@@ -167,6 +177,7 @@ export const combatTick = spacetimedb.reducer(
       // same tick must never act, nor be acted on, via a stale snapshot row.
       const u = ctx.db.unit.entityId.find(snap.entityId);
       if (!u) continue;
+      if (u.garrisonedIn !== 0n) continue; // sheltered — fights via its host, not here
       const def = UNIT_DEFS[u.kind as UnitKindT] ?? UNIT_DEFS[UnitKind.Peasant];
       if (def.attack <= 0) continue; // non-combatants never fight
 
@@ -255,6 +266,9 @@ export const combatTick = spacetimedb.reducer(
         if (newHp <= 0) {
           if (tu) ctx.db.unit.entityId.delete(targetId);
           else {
+            // Empty the garrison first (eject survivors or kill them per the
+            // host def) so no garrison row outlives its building.
+            evacuateOnDeath(ctx, tb!, te);
             if (tb!.kind === BuildingKind.Keep) markDefeated(ctx, tb!.owner);
             ctx.db.building.entityId.delete(targetId);
           }
@@ -310,11 +324,24 @@ export const combatTick = spacetimedb.reducer(
       }
     }
 
-    // Towers auto-fire at the nearest enemy unit within range.
+    // Towers (and manned walls) auto-fire at the nearest enemy unit within range.
+    // A garrisoned host's ranged occupants stack their bows onto its volley; a
+    // structure that cannot shoot on its own still fires once archers man it.
     for (const b of [...ctx.db.building.iter()]) {
       const bdef =
         BUILDING_DEFS[b.kind as BuildingKindT] ?? BUILDING_DEFS[BuildingKind.Keep];
-      if (bdef.attack <= 0) continue;
+      const garrisonFire = garrisonFirePower(
+        occupantFireProfile(ctx, b.entityId),
+        bdef
+      );
+      const fireAttack = bdef.attack + garrisonFire;
+      if (fireAttack <= 0) continue; // neither the host nor its garrison can fire
+      // Walls/gatehouses have no fire stats of their own — borrow the occupants'
+      // reach and reload; a self-shooting host keeps its own range/cadence.
+      const gr = bdef.attack <= 0 ? garrisonRangeRate(ctx, b.entityId) : null;
+      const fireRange = bdef.range > 0 ? bdef.range : gr?.range ?? 0;
+      const fireRate = bdef.attackRate > 0 ? bdef.attackRate : gr?.rate ?? 1;
+      if (fireRange <= 0) continue;
       const be = ctx.db.entity.entityId.find(b.entityId);
       if (!be) continue;
       const cd = Math.max(0, b.cooldown - COMBAT_DT);
@@ -322,18 +349,18 @@ export const combatTick = spacetimedb.reducer(
       // Search out to the best-case elevation reach, then confirm the chosen
       // target is within this tower's range adjusted for THIS target's elevation.
       const towerElev = elevation(seed, be.x, be.y);
-      const near = nearestWithin(be.x, be.y, enemies, bdef.range * (1 + ELEV_BONUS_MAX));
+      const near = nearestWithin(be.x, be.y, enemies, fireRange * (1 + ELEV_BONUS_MAX));
       const inElevRange =
         near != null &&
         dist(be.x, be.y, near.x, near.y) <=
-          bdef.range * elevationRangeBonus(towerElev, elevation(seed, near.x, near.y));
+          fireRange * elevationRangeBonus(towerElev, elevation(seed, near.x, near.y));
       const fresh = near && inElevRange ? ctx.db.unit.entityId.find(near.id) : null;
       if (near && fresh && cd <= 0) {
         ctx.db.shot.insert({ fromX: be.x, fromY: be.y, toX: near.x, toY: near.y });
         const newHp = applyDamage(
           fresh.hp,
           effectiveDamage(
-            { attack: bdef.attack, damageType: bdef.damageType },
+            { attack: fireAttack, damageType: bdef.damageType },
             UNIT_DEFS[fresh.kind as UnitKindT].armorClass
           )
         );
@@ -344,7 +371,7 @@ export const combatTick = spacetimedb.reducer(
           ctx.db.unit.entityId.update({ ...fresh, hp: newHp });
           dentMorale(fresh.entityId, fresh.hp, newHp); // tower fire rattles too
         }
-        ctx.db.building.entityId.update({ ...b, cooldown: bdef.attackRate });
+        ctx.db.building.entityId.update({ ...b, cooldown: fireRate });
       } else if (b.cooldown !== cd) {
         ctx.db.building.entityId.update({ ...b, cooldown: cd });
       }
@@ -357,7 +384,7 @@ export const combatTick = spacetimedb.reducer(
     for (const snap of units) {
       if (hitThisTick.has(snap.entityId)) continue;
       const u = ctx.db.unit.entityId.find(snap.entityId);
-      if (!u) continue;
+      if (!u || u.garrisonedIn !== 0n) continue; // gone or sheltered (safe)
       const def = UNIT_DEFS[u.kind as UnitKindT] ?? UNIT_DEFS[UnitKind.Peasant];
       if (def.attack <= 0) continue; // non-combatants never rout
       if (u.morale >= MORALE_MAX && !u.routing) continue; // already full + steady

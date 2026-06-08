@@ -39,6 +39,7 @@ import AttackUnitReducer from "./attack_unit_reducer";
 import AutoGatherReducer from "./auto_gather_reducer";
 import DemolishBuildingReducer from "./demolish_building_reducer";
 import EnterGameReducer from "./enter_game_reducer";
+import GarrisonUnitReducer from "./garrison_unit_reducer";
 import GatherResourceReducer from "./gather_resource_reducer";
 import LeaveGameReducer from "./leave_game_reducer";
 import MarketTradeReducer from "./market_trade_reducer";
@@ -49,6 +50,7 @@ import SetRallyReducer from "./set_rally_reducer";
 import SetStanceReducer from "./set_stance_reducer";
 import StartSkirmishReducer from "./start_skirmish_reducer";
 import TrainUnitReducer from "./train_unit_reducer";
+import UngarrisonBuildingReducer from "./ungarrison_building_reducer";
 
 // Import all procedure arg schemas
 
@@ -57,6 +59,7 @@ import AiRow from "./ai_table";
 import BuildingRow from "./building_table";
 import ConfigRow from "./config_table";
 import EntityRow from "./entity_table";
+import GarrisonRow from "./garrison_table";
 import PlayerRow from "./player_table";
 import ResourceNodeRow from "./resource_node_table";
 import ShotRow from "./shot_table";
@@ -116,6 +119,24 @@ const tablesSchema = __schema({
       { name: 'entity_entity_id_key', constraint: 'unique', columns: ['entityId'] },
     ],
   }, EntityRow),
+  garrison: __table({
+    name: 'garrison',
+    indexes: [
+      { accessor: 'building', name: 'garrison_building_idx_btree', algorithm: 'btree', columns: [
+        'building',
+      ] },
+      { accessor: 'slotId', name: 'garrison_slot_id_idx_btree', algorithm: 'btree', columns: [
+        'slotId',
+      ] },
+      { accessor: 'unit', name: 'garrison_unit_idx_btree', algorithm: 'btree', columns: [
+        'unit',
+      ] },
+    ],
+    constraints: [
+      { name: 'garrison_slot_id_key', constraint: 'unique', columns: ['slotId'] },
+      { name: 'garrison_unit_key', constraint: 'unique', columns: ['unit'] },
+    ],
+  }, GarrisonRow),
   player: __table({
     name: 'player',
     indexes: [
@@ -173,6 +194,7 @@ const reducersSchema = __reducers(
   __reducerSchema("auto_gather", AutoGatherReducer),
   __reducerSchema("demolish_building", DemolishBuildingReducer),
   __reducerSchema("enter_game", EnterGameReducer),
+  __reducerSchema("garrison_unit", GarrisonUnitReducer),
   __reducerSchema("gather_resource", GatherResourceReducer),
   __reducerSchema("leave_game", LeaveGameReducer),
   __reducerSchema("market_trade", MarketTradeReducer),
@@ -183,6 +205,7 @@ const reducersSchema = __reducers(
   __reducerSchema("set_stance", SetStanceReducer),
   __reducerSchema("start_skirmish", StartSkirmishReducer),
   __reducerSchema("train_unit", TrainUnitReducer),
+  __reducerSchema("ungarrison_building", UngarrisonBuildingReducer),
 );
 
 /** The schema information for all procedures in this module. This is defined the same way as the procedures would have been defined in the server. */

@@ -14,6 +14,7 @@ import { getSeed } from '../world/util.ts';
 import { allBuildingTiles, placeFor } from '../world/placement.ts';
 import { spawnBuilding } from '../world/spawn.ts';
 import { trainFrom } from '../world/economy.ts';
+import { ejectAll } from '../world/garrison.ts';
 
 export const trainUnit = spacetimedb.reducer(
   { buildingId: t.u64(), kind: t.u8() },
@@ -81,6 +82,10 @@ export const demolishBuilding = spacetimedb.reducer(
     const p = ctx.db.player.identity.find(ctx.sender);
     if (p && def)
       ctx.db.player.identity.update({ ...p, ...refundCost(p, def.cost, 0.5) });
+    // Pop any sheltered units back to the field before razing — a demolish is
+    // voluntary, so occupants always survive regardless of garrisonSurvivesDeath.
+    const be = ctx.db.entity.entityId.find(entityId);
+    if (be) ejectAll(ctx, b, be);
     ctx.db.building.entityId.delete(entityId);
     ctx.db.entity.entityId.delete(entityId);
   }
