@@ -31,6 +31,7 @@ export interface HUDProps {
   onUngarrison: (buildingId: string) => void;
   onResearch: (buildingId: string, tech: number) => void;
   onAddAi: () => void;
+  onSaveAndQuit: () => void;
   onLeave: () => void;
   onSetStance: (stance: number) => void;
   onMinimapCanvas: (c: HTMLCanvasElement | null) => void;
@@ -59,6 +60,9 @@ export function HUD(props: HUDProps) {
         <div className={styles.topRight}>
           <button className={styles.addAi} onClick={props.onAddAi}>
             ⚔ Add AI Opponent
+          </button>
+          <button className={styles.leave} onClick={props.onSaveAndQuit}>
+            💾 Save &amp; Quit
           </button>
           <button className={styles.leave} onClick={props.onLeave}>
             ⮌ Leave Match

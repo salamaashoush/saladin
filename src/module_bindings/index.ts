@@ -37,17 +37,20 @@ import {
 import AddAiReducer from "./add_ai_reducer";
 import AttackUnitReducer from "./attack_unit_reducer";
 import AutoGatherReducer from "./auto_gather_reducer";
+import DeleteSaveReducer from "./delete_save_reducer";
 import DemolishBuildingReducer from "./demolish_building_reducer";
 import EnterGameReducer from "./enter_game_reducer";
 import GarrisonUnitReducer from "./garrison_unit_reducer";
 import GatherResourceReducer from "./gather_resource_reducer";
 import LeaveGameReducer from "./leave_game_reducer";
+import LoadMatchReducer from "./load_match_reducer";
 import MarketTradeReducer from "./market_trade_reducer";
 import MoveUnitReducer from "./move_unit_reducer";
 import PauseMatchReducer from "./pause_match_reducer";
 import PlaceBuildingReducer from "./place_building_reducer";
 import PlaceWallReducer from "./place_wall_reducer";
 import ResumeMatchReducer from "./resume_match_reducer";
+import SaveMatchReducer from "./save_match_reducer";
 import SetRallyReducer from "./set_rally_reducer";
 import SetStanceReducer from "./set_stance_reducer";
 import StartResearchReducer from "./start_research_reducer";
@@ -67,6 +70,7 @@ import MatchRow from "./match_table";
 import PlayerRow from "./player_table";
 import ResearchRow from "./research_table";
 import ResourceNodeRow from "./resource_node_table";
+import SaveSlotRow from "./save_slot_table";
 import ShotRow from "./shot_table";
 import UnitRow from "./unit_table";
 
@@ -211,6 +215,24 @@ const tablesSchema = __schema({
       { name: 'resource_node_entity_id_key', constraint: 'unique', columns: ['entityId'] },
     ],
   }, ResourceNodeRow),
+  saveSlot: __table({
+    name: 'save_slot',
+    indexes: [
+      { accessor: 'by_owner', name: 'save_slot_owner_idx_btree', algorithm: 'btree', columns: [
+        'owner',
+      ] },
+      { accessor: 'by_owner_name', name: 'save_slot_owner_name_idx_btree', algorithm: 'btree', columns: [
+        'owner',
+        'name',
+      ] },
+      { accessor: 'saveId', name: 'save_slot_save_id_idx_btree', algorithm: 'btree', columns: [
+        'saveId',
+      ] },
+    ],
+    constraints: [
+      { name: 'save_slot_save_id_key', constraint: 'unique', columns: ['saveId'] },
+    ],
+  }, SaveSlotRow),
   shot: __table({
     name: 'shot',
     indexes: [
@@ -243,17 +265,20 @@ const reducersSchema = __reducers(
   __reducerSchema("add_ai", AddAiReducer),
   __reducerSchema("attack_unit", AttackUnitReducer),
   __reducerSchema("auto_gather", AutoGatherReducer),
+  __reducerSchema("delete_save", DeleteSaveReducer),
   __reducerSchema("demolish_building", DemolishBuildingReducer),
   __reducerSchema("enter_game", EnterGameReducer),
   __reducerSchema("garrison_unit", GarrisonUnitReducer),
   __reducerSchema("gather_resource", GatherResourceReducer),
   __reducerSchema("leave_game", LeaveGameReducer),
+  __reducerSchema("load_match", LoadMatchReducer),
   __reducerSchema("market_trade", MarketTradeReducer),
   __reducerSchema("move_unit", MoveUnitReducer),
   __reducerSchema("pause_match", PauseMatchReducer),
   __reducerSchema("place_building", PlaceBuildingReducer),
   __reducerSchema("place_wall", PlaceWallReducer),
   __reducerSchema("resume_match", ResumeMatchReducer),
+  __reducerSchema("save_match", SaveMatchReducer),
   __reducerSchema("set_rally", SetRallyReducer),
   __reducerSchema("set_stance", SetStanceReducer),
   __reducerSchema("start_research", StartResearchReducer),

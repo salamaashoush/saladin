@@ -185,6 +185,182 @@ export const match = table(
   }
 );
 
+// ── Save slots + typed mirror tables ────────────────────────────────────────
+//
+// A save is a frozen copy of one match. save_slot is the index row (one per named
+// save); each mirror table holds the same columns as its live counterpart PLUS a
+// saveId so a save is "all mirror rows where saveId=S". Mirrors are PRIVATE: only
+// the owner's reducers read them, never a client subscription. The mirror columns
+// MUST mirror the live tables exactly — shared/save.ts asserts that parity in a
+// test so a new live column can't silently drop out of saves.
+// save_slot is the only save table a client ever sees: it is public so the menu
+// can subscribe + list saves, but an RLS filter (see save.ts reducer file) scopes
+// each connection to rows where owner = :sender, so one player never sees another's
+// saves. The mirror tables below stay PRIVATE — only reducers + the DB owner touch
+// them; a load is performed entirely server-side.
+export const saveSlot = table(
+  {
+    name: 'save_slot',
+    public: true,
+    indexes: [
+      { accessor: 'by_owner', algorithm: 'btree', columns: ['owner'] },
+      // one named save per owner — saveMatch replaces an existing same-name slot
+      { accessor: 'by_owner_name', algorithm: 'btree', columns: ['owner', 'name'] },
+    ],
+  },
+  {
+    saveId: t.u64().primaryKey().autoInc(),
+    owner: t.identity(),
+    name: t.string(),
+    createdAt: t.timestamp(),
+    schemaVersion: t.u32(),
+  }
+);
+
+export const saveEntity = table(
+  { name: 'save_entity' },
+  {
+    saveRowId: t.u64().primaryKey().autoInc(),
+    saveId: t.u64().index('btree'),
+    entityId: t.u64(),
+    x: t.f32(),
+    y: t.f32(),
+    facing: t.f32(),
+    matchId: t.u64(),
+  }
+);
+
+export const saveUnit = table(
+  { name: 'save_unit' },
+  {
+    saveRowId: t.u64().primaryKey().autoInc(),
+    saveId: t.u64().index('btree'),
+    entityId: t.u64(),
+    owner: t.identity(),
+    kind: t.u8(),
+    targetX: t.f32(),
+    targetY: t.f32(),
+    hasTarget: t.bool(),
+    speed: t.f32(),
+    gatherState: t.u8(),
+    targetNode: t.u64(),
+    carrying: t.u32(),
+    carryType: t.u8(),
+    harvestTimer: t.f32(),
+    hp: t.u32(),
+    attackTarget: t.u64(),
+    attackCooldown: t.f32(),
+    stance: t.u8(),
+    morale: t.f32(),
+    routing: t.bool(),
+    homeX: t.f32(),
+    homeY: t.f32(),
+    garrisonedIn: t.u64(),
+    path: t.array(PathPoint),
+    pathIdx: t.u32(),
+    matchId: t.u64(),
+  }
+);
+
+export const saveBuilding = table(
+  { name: 'save_building' },
+  {
+    saveRowId: t.u64().primaryKey().autoInc(),
+    saveId: t.u64().index('btree'),
+    entityId: t.u64(),
+    owner: t.identity(),
+    kind: t.u8(),
+    hp: t.u32(),
+    cooldown: t.f32(),
+    rallyX: t.f32(),
+    rallyY: t.f32(),
+    matchId: t.u64(),
+  }
+);
+
+export const saveResourceNode = table(
+  { name: 'save_resource_node' },
+  {
+    saveRowId: t.u64().primaryKey().autoInc(),
+    saveId: t.u64().index('btree'),
+    entityId: t.u64(),
+    resType: t.u8(),
+    remaining: t.u32(),
+    matchId: t.u64(),
+  }
+);
+
+export const savePlayer = table(
+  { name: 'save_player' },
+  {
+    saveRowId: t.u64().primaryKey().autoInc(),
+    saveId: t.u64().index('btree'),
+    identity: t.identity(),
+    playerId: t.u32(),
+    name: t.string(),
+    faction: t.u8(),
+    wood: t.u32(),
+    stone: t.u32(),
+    food: t.u32(),
+    gold: t.u32(),
+    color: t.u8(),
+    online: t.bool(),
+    keepEntity: t.u64(),
+    defeated: t.bool(),
+    slot: t.u8(),
+    techMask: t.u64(),
+    matchId: t.u64(),
+  }
+);
+
+export const saveAi = table(
+  { name: 'save_ai' },
+  {
+    saveRowId: t.u64().primaryKey().autoInc(),
+    saveId: t.u64().index('btree'),
+    identity: t.identity(),
+    host: t.identity(),
+    difficulty: t.u8(),
+    decisionCd: t.f32(),
+    waveTimer: t.f32(),
+    phase: t.u8(),
+    scoutId: t.u64(),
+    threatTimer: t.f32(),
+    matchId: t.u64(),
+  }
+);
+
+// garrison rows have no matchId of their own — their scope is their unit's. They
+// are saved alongside so a sheltered unit (unit.garrisonedIn != 0) round-trips
+// with the slot that proves it occupies its host; without this the unit would be
+// flagged garrisoned yet count toward no host and could never be ejected.
+export const saveGarrison = table(
+  { name: 'save_garrison' },
+  {
+    saveRowId: t.u64().primaryKey().autoInc(),
+    saveId: t.u64().index('btree'),
+    slotId: t.u64(),
+    building: t.u64(),
+    unit: t.u64(),
+    owner: t.identity(),
+  }
+);
+
+export const saveMatchRow = table(
+  // name avoids the SaveMatch type the `saveMatch` reducer's args already claim.
+  { name: 'save_match_row' },
+  {
+    saveRowId: t.u64().primaryKey().autoInc(),
+    saveId: t.u64().index('btree'),
+    matchId: t.u64(),
+    name: t.string(),
+    host: t.identity(),
+    status: t.u8(),
+    seed: t.u32(),
+    preset: t.string(),
+  }
+);
+
 export const moveTimer = table(
   { name: 'move_timer', scheduled: (): any => scheduleRefs.moveUnits },
   {

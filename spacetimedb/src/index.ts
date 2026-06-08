@@ -12,6 +12,7 @@ export { default } from './schema/db.ts';
 export * from './lifecycle.ts';
 
 export * from './reducers/match.ts';
+export * from './reducers/save.ts';
 export * from './reducers/unit_commands.ts';
 export * from './reducers/build_commands.ts';
 export * from './reducers/garrison_commands.ts';

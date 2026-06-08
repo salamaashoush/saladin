@@ -24,6 +24,7 @@ const WORLD_TABLES = [
   tables.config,
   tables.shot,
   tables.research,
+  tables.saveSlot, // the caller's save slots (row-filtered to owner server-side)
 ];
 
 export function useGameSession(

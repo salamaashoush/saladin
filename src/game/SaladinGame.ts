@@ -126,6 +126,7 @@ export class SaladinGame {
 
   private myHex = '';
   private myKeepId: string | null = null;
+  private myMatchId: bigint | null = null; // local player's match; a change = load/new match
   private framed = false;
   private selectedBuildingId: string | null = null;
   private buildingSelRing?: THREE.Mesh;
@@ -452,6 +453,26 @@ export class SaladinGame {
     this.playerColors.set(hex, color);
     for (const o of this.objs.values())
       if (o.ownerHex === hex && o.tintMat) o.tintMat.color.setHex(color);
+    // The local player jumped to a different match (a load, or starting a fresh
+    // skirmish): the old match's rows are being torn down and replaced with fresh
+    // entityIds, so re-frame on the incoming keep rather than the stale one.
+    if (hex === this.myHex) {
+      const mid = (r.matchId ?? null) as bigint | null;
+      if (this.myMatchId !== null && mid !== this.myMatchId) this.resetScene();
+      this.myMatchId = mid;
+    }
+  }
+
+  // Drop the per-match framing/selection state so the next keep insert re-centres
+  // the camera. Mesh rows themselves are reconciled by the table delete/insert
+  // callbacks (loaded rows arrive with fresh entityIds), so nothing to dispose
+  // here — just forget the references tied to the previous match.
+  private resetScene() {
+    this.framed = false;
+    this.myKeepId = null;
+    this.selected.clear();
+    this.clearBuildingSel();
+    this.emitSelection();
   }
 
   private onUnitUpdate(r: any) {

@@ -21,6 +21,9 @@ export function useGameActions() {
   const garrisonUnit = useReducer(reducers.garrisonUnit);
   const ungarrisonBuilding = useReducer(reducers.ungarrisonBuilding);
   const startResearch = useReducer(reducers.startResearch);
+  const saveMatch = useReducer(reducers.saveMatch);
+  const loadMatch = useReducer(reducers.loadMatch);
+  const deleteSave = useReducer(reducers.deleteSave);
 
   const guard = (p: unknown) =>
     Promise.resolve(p).catch((e: unknown) =>
@@ -61,6 +64,9 @@ export function useGameActions() {
       guard(ungarrisonBuilding({ buildingId: BigInt(buildingId) })),
     research: (buildingId: string, tech: number) =>
       guard(startResearch({ buildingId: BigInt(buildingId), tech })),
+    saveMatch: (name: string) => guard(saveMatch({ name })),
+    loadMatch: (saveId: string) => guard(loadMatch({ saveId: BigInt(saveId) })),
+    deleteSave: (saveId: string) => guard(deleteSave({ saveId: BigInt(saveId) })),
   };
 }
 

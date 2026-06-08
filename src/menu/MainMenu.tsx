@@ -3,10 +3,12 @@ import styles from './Menu.module.css';
 export function MainMenu({
   onSkirmish,
   onMultiplayer,
+  onLoad,
   disabled,
 }: {
   onSkirmish: () => void;
   onMultiplayer: () => void;
+  onLoad: () => void;
   disabled: boolean;
 }) {
   return (
@@ -32,6 +34,13 @@ export function MainMenu({
           onClick={onMultiplayer}
         >
           🌐 Multiplayer
+        </button>
+        <button
+          className={styles.secondary}
+          disabled={disabled}
+          onClick={onLoad}
+        >
+          💾 Load Game
         </button>
         <button className={styles.secondary} disabled title="Coming soon">
           📜 Campaign — soon

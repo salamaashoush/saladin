@@ -6,8 +6,9 @@ import type { GameActions } from '../session/useGameActions';
 import { MainMenu } from './MainMenu';
 import { SkirmishSetup } from './SkirmishSetup';
 import { JoinScreen } from './JoinScreen';
+import { SaveLoadScreen } from './SaveLoadScreen';
 
-type Stage = 'title' | 'skirmish' | 'multiplayer';
+type Stage = 'title' | 'skirmish' | 'multiplayer' | 'load';
 
 export function Menu({
   actions,
@@ -36,11 +37,22 @@ export function Menu({
       />
     );
 
+  if (stage === 'load')
+    return (
+      <SaveLoadScreen
+        disabled={!ready}
+        onBack={() => setStage('title')}
+        onResume={actions.loadMatch}
+        onDelete={actions.deleteSave}
+      />
+    );
+
   return (
     <MainMenu
       disabled={!ready}
       onSkirmish={() => setStage('skirmish')}
       onMultiplayer={() => setStage('multiplayer')}
+      onLoad={() => setStage('load')}
     />
   );
 }

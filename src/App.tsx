@@ -38,6 +38,16 @@ function App() {
   const rematch = () =>
     lastSkirmish ? actions.startSkirmish(lastSkirmish) : actions.leaveGame();
 
+  // Save the current match under a player-named slot, then drop back to the menu.
+  // The save persists server-side; the player resumes it later from Load Game.
+  const saveAndQuit = async () => {
+    const name =
+      window.prompt("Name this save", match.name || "Campaign")?.trim();
+    if (!name) return;
+    await actions.saveMatch(name);
+    actions.leaveGame();
+  };
+
   return (
     <div className="game-root">
       <div className="viewport" ref={viewportRef} />
@@ -71,6 +81,7 @@ function App() {
           onUngarrison={actions.ungarrison}
           onResearch={actions.research}
           onAddAi={() => actions.addAi(1)}
+          onSaveAndQuit={saveAndQuit}
           onLeave={actions.leaveGame}
           onSetStance={(s) => game?.setSelectedStance(s)}
           onMinimapCanvas={(c) => game?.setMinimapCanvas(c)}

@@ -151,6 +151,140 @@ export const ResourceNode = __t.object("ResourceNode", {
 });
 export type ResourceNode = __Infer<typeof ResourceNode>;
 
+export const SaveAi = __t.object("SaveAi", {
+  saveRowId: __t.u64(),
+  saveId: __t.u64(),
+  identity: __t.identity(),
+  host: __t.identity(),
+  difficulty: __t.u8(),
+  decisionCd: __t.f32(),
+  waveTimer: __t.f32(),
+  phase: __t.u8(),
+  scoutId: __t.u64(),
+  threatTimer: __t.f32(),
+  matchId: __t.u64(),
+});
+export type SaveAi = __Infer<typeof SaveAi>;
+
+export const SaveBuilding = __t.object("SaveBuilding", {
+  saveRowId: __t.u64(),
+  saveId: __t.u64(),
+  entityId: __t.u64(),
+  owner: __t.identity(),
+  kind: __t.u8(),
+  hp: __t.u32(),
+  cooldown: __t.f32(),
+  rallyX: __t.f32(),
+  rallyY: __t.f32(),
+  matchId: __t.u64(),
+});
+export type SaveBuilding = __Infer<typeof SaveBuilding>;
+
+export const SaveEntity = __t.object("SaveEntity", {
+  saveRowId: __t.u64(),
+  saveId: __t.u64(),
+  entityId: __t.u64(),
+  x: __t.f32(),
+  y: __t.f32(),
+  facing: __t.f32(),
+  matchId: __t.u64(),
+});
+export type SaveEntity = __Infer<typeof SaveEntity>;
+
+export const SaveGarrison = __t.object("SaveGarrison", {
+  saveRowId: __t.u64(),
+  saveId: __t.u64(),
+  slotId: __t.u64(),
+  building: __t.u64(),
+  unit: __t.u64(),
+  owner: __t.identity(),
+});
+export type SaveGarrison = __Infer<typeof SaveGarrison>;
+
+export const SaveMatchRow = __t.object("SaveMatchRow", {
+  saveRowId: __t.u64(),
+  saveId: __t.u64(),
+  matchId: __t.u64(),
+  name: __t.string(),
+  host: __t.identity(),
+  status: __t.u8(),
+  seed: __t.u32(),
+  preset: __t.string(),
+});
+export type SaveMatchRow = __Infer<typeof SaveMatchRow>;
+
+export const SavePlayer = __t.object("SavePlayer", {
+  saveRowId: __t.u64(),
+  saveId: __t.u64(),
+  identity: __t.identity(),
+  playerId: __t.u32(),
+  name: __t.string(),
+  faction: __t.u8(),
+  wood: __t.u32(),
+  stone: __t.u32(),
+  food: __t.u32(),
+  gold: __t.u32(),
+  color: __t.u8(),
+  online: __t.bool(),
+  keepEntity: __t.u64(),
+  defeated: __t.bool(),
+  slot: __t.u8(),
+  techMask: __t.u64(),
+  matchId: __t.u64(),
+});
+export type SavePlayer = __Infer<typeof SavePlayer>;
+
+export const SaveResourceNode = __t.object("SaveResourceNode", {
+  saveRowId: __t.u64(),
+  saveId: __t.u64(),
+  entityId: __t.u64(),
+  resType: __t.u8(),
+  remaining: __t.u32(),
+  matchId: __t.u64(),
+});
+export type SaveResourceNode = __Infer<typeof SaveResourceNode>;
+
+export const SaveSlot = __t.object("SaveSlot", {
+  saveId: __t.u64(),
+  owner: __t.identity(),
+  name: __t.string(),
+  createdAt: __t.timestamp(),
+  schemaVersion: __t.u32(),
+});
+export type SaveSlot = __Infer<typeof SaveSlot>;
+
+export const SaveUnit = __t.object("SaveUnit", {
+  saveRowId: __t.u64(),
+  saveId: __t.u64(),
+  entityId: __t.u64(),
+  owner: __t.identity(),
+  kind: __t.u8(),
+  targetX: __t.f32(),
+  targetY: __t.f32(),
+  hasTarget: __t.bool(),
+  speed: __t.f32(),
+  gatherState: __t.u8(),
+  targetNode: __t.u64(),
+  carrying: __t.u32(),
+  carryType: __t.u8(),
+  harvestTimer: __t.f32(),
+  hp: __t.u32(),
+  attackTarget: __t.u64(),
+  attackCooldown: __t.f32(),
+  stance: __t.u8(),
+  morale: __t.f32(),
+  routing: __t.bool(),
+  homeX: __t.f32(),
+  homeY: __t.f32(),
+  garrisonedIn: __t.u64(),
+  get path() {
+    return __t.array(PathPoint);
+  },
+  pathIdx: __t.u32(),
+  matchId: __t.u64(),
+});
+export type SaveUnit = __Infer<typeof SaveUnit>;
+
 export const Shot = __t.object("Shot", {
   fromX: __t.f32(),
   fromY: __t.f32(),
