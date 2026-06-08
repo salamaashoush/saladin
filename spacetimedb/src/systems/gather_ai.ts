@@ -80,6 +80,9 @@ export const unitAi = spacetimedb.reducer({ timer: aiTimer.rowType }, (ctx) => {
       const def = UNIT_DEFS[u.kind as UnitKindT] ?? UNIT_DEFS[UnitKind.Peasant];
       const take = Math.min(def.carry, node.remaining);
       const rem = node.remaining - take;
+      // Stamp what we picked up from the node's own resType BEFORE the node row
+      // can be deleted — otherwise the deposit always credits the default (wood).
+      const carryType = node.resType;
       if (rem <= 0) {
         ctx.db.resourceNode.entityId.delete(node.entityId);
         ctx.db.entity.entityId.delete(node.entityId);
@@ -89,6 +92,7 @@ export const unitAi = spacetimedb.reducer({ timer: aiTimer.rowType }, (ctx) => {
       ctx.db.unit.entityId.update({
         ...u,
         carrying: take,
+        carryType,
         harvestTimer: 0,
         gatherState: GatherState.ToStockpile,
       });

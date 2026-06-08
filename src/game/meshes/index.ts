@@ -8,4 +8,10 @@ export {
   buildHouse,
   buildWallSlab,
 } from './buildings.ts';
-export { BAR_W, BAR_H, buildTree, buildSelRing, buildHpBar } from './props.ts';
+export {
+  BAR_W,
+  BAR_H,
+  buildResourceNode,
+  buildSelRing,
+  buildHpBar,
+} from './props.ts';

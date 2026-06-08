@@ -35,9 +35,21 @@ export function hasBarracks(ctx: any, owner: any): boolean {
   return false;
 }
 
-// Send every idle gatherer owned by `owner` to its nearest resource node.
-export function assignIdleGatherers(ctx: any, owner: any): void {
+// Send every idle gatherer owned by `owner` to a resource node. With `preferType`
+// set, idle gatherers head to the nearest node of that resource type (falling
+// back to any node when none of that type remain) — this lets the AI steer the
+// economy toward whatever it is short of, e.g. food when starving.
+export function assignIdleGatherers(
+  ctx: any,
+  owner: any,
+  preferType?: number
+): void {
   const nodes = buildNodes(ctx);
+  if (nodes.length === 0) return;
+  const preferred =
+    preferType === undefined
+      ? nodes
+      : nodes.filter((n) => n.resType === preferType);
   for (const u of [...ctx.db.unit.iter()]) {
     if (!u.owner.equals(owner)) continue;
     if (u.gatherState !== GatherState.Idle) continue;
@@ -45,12 +57,13 @@ export function assignIdleGatherers(ctx: any, owner: any): void {
     if (def.carry <= 0) continue;
     const e = ctx.db.entity.entityId.find(u.entityId);
     if (!e) continue;
-    const idx = nearestIndex(e.x, e.y, nodes);
+    const pool = preferred.length > 0 ? preferred : nodes;
+    const idx = nearestIndex(e.x, e.y, pool);
     if (idx < 0) continue;
     ctx.db.unit.entityId.update({
       ...u,
       gatherState: GatherState.ToResource,
-      targetNode: nodes[idx].id,
+      targetNode: pool[idx].id,
     });
   }
 }

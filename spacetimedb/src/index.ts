@@ -14,8 +14,10 @@ export * from './lifecycle.ts';
 export * from './reducers/match.ts';
 export * from './reducers/unit_commands.ts';
 export * from './reducers/build_commands.ts';
+export * from './reducers/market.ts';
 
 export * from './systems/movement.ts';
 export * from './systems/gather_ai.ts';
 export * from './systems/combat.ts';
 export * from './systems/ai_brain.ts';
+export * from './systems/economy.ts';

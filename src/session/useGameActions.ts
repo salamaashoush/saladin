@@ -17,6 +17,7 @@ export function useGameActions() {
   const trainUnit = useReducer(reducers.trainUnit);
   const demolishBuilding = useReducer(reducers.demolishBuilding);
   const autoGather = useReducer(reducers.autoGather);
+  const marketTrade = useReducer(reducers.marketTrade);
 
   const guard = (p: unknown) =>
     Promise.resolve(p).catch((e: unknown) =>
@@ -42,6 +43,8 @@ export function useGameActions() {
       guard(trainUnit({ buildingId: BigInt(buildingId), kind })),
     demolish: (id: string) => guard(demolishBuilding({ entityId: BigInt(id) })),
     gatherAll: () => guard(autoGather()),
+    trade: (resType: number, amount: number) =>
+      guard(marketTrade({ resType, amount })),
   };
 }
 

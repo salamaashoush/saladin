@@ -11,6 +11,10 @@ export interface HUDProps {
   name: string;
   faction: string;
   wood: number;
+  stone: number;
+  food: number;
+  gold: number;
+  starving: boolean;
   peasants: number;
   soldiers: number;
   pop: number;
@@ -18,6 +22,7 @@ export interface HUDProps {
   onTrain: (buildingId: string, kind: number) => void;
   onDemolish: (id: string) => void;
   onGatherAll: () => void;
+  onTrade: (resType: number, amount: number) => void;
   onAddAi: () => void;
   onLeave: () => void;
   onSetStance: (stance: number) => void;
@@ -32,6 +37,10 @@ export function HUD(props: HUDProps) {
         name={props.name}
         faction={props.faction}
         wood={props.wood}
+        stone={props.stone}
+        food={props.food}
+        gold={props.gold}
+        starving={props.starving}
         peasants={props.peasants}
         soldiers={props.soldiers}
         pop={props.pop}
@@ -57,9 +66,13 @@ export function HUD(props: HUDProps) {
         <div className={styles.barCenter}>
           <BuildBar
             wood={props.wood}
+            stone={props.stone}
+            food={props.food}
+            gold={props.gold}
             onTrain={props.onTrain}
             onDemolish={props.onDemolish}
             onGatherAll={props.onGatherAll}
+            onTrade={props.onTrade}
           />
         </div>
         <div className={styles.barRight}>

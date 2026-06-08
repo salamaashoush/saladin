@@ -5,9 +5,15 @@ import {
   refundCost,
   addResource,
   resourceField,
+  applyUpkeep,
+  marketSale,
   UNIT_DEFS,
   BUILDING_DEFS,
   ResourceType,
+  FOOD_PER_UNIT,
+  STARVE_DPS,
+  ECONOMY_DT,
+  MARKET_RATE,
   type ResourceCost,
   type Stockpile,
 } from '../shared/index.ts';
@@ -104,6 +110,74 @@ describe('resourceField', () => {
     expect(resourceField(ResourceType.Stone)).toBe('stone');
     expect(resourceField(ResourceType.Food)).toBe('food');
     expect(resourceField(ResourceType.Gold)).toBe('gold');
+  });
+});
+
+describe('applyUpkeep', () => {
+  it('eats FOOD_PER_UNIT per owned unit each tick', () => {
+    const r = applyUpkeep(100, 10);
+    expect(r.food).toBe(100 - 10 * FOOD_PER_UNIT);
+    expect(r.starving).toBe(false);
+    expect(r.hpDrain).toBe(0);
+  });
+
+  it('floors food at zero and flags starvation when the bill exceeds stock', () => {
+    const r = applyUpkeep(3, 10); // bill 10 > 3 food
+    expect(r.food).toBe(0);
+    expect(r.starving).toBe(true);
+    expect(r.hpDrain).toBe(Math.round(STARVE_DPS * ECONOMY_DT));
+  });
+
+  it('does not starve when food exactly covers the bill', () => {
+    const bill = 8 * FOOD_PER_UNIT;
+    const r = applyUpkeep(bill, 8);
+    expect(r.food).toBe(0);
+    expect(r.starving).toBe(false);
+    expect(r.hpDrain).toBe(0);
+  });
+
+  it('an army with no food and units starves; no units never starves', () => {
+    expect(applyUpkeep(0, 5).starving).toBe(true);
+    expect(applyUpkeep(0, 0).starving).toBe(false);
+    expect(applyUpkeep(0, 0).hpDrain).toBe(0);
+  });
+
+  it('hp drain scales with the supplied dt', () => {
+    const r = applyUpkeep(0, 1, 2);
+    expect(r.hpDrain).toBe(Math.round(STARVE_DPS * 2));
+  });
+});
+
+describe('marketSale', () => {
+  it('mints one gold per MARKET_RATE units sold', () => {
+    const r = marketSale(100, 2 * MARKET_RATE);
+    expect(r.ok).toBe(true);
+    expect(r.gold).toBe(2);
+    expect(r.spent).toBe(2 * MARKET_RATE);
+  });
+
+  it('rounds the sale down to whole lots — never a free or partial coin', () => {
+    // Offer one more than a clean lot: the odd unit is left unsold.
+    const r = marketSale(100, MARKET_RATE + 1);
+    expect(r.gold).toBe(1);
+    expect(r.spent).toBe(MARKET_RATE);
+  });
+
+  it('caps the sale at the available balance', () => {
+    const r = marketSale(MARKET_RATE, 1000);
+    expect(r.gold).toBe(1);
+    expect(r.spent).toBe(MARKET_RATE);
+  });
+
+  it('refuses a sale below one lot', () => {
+    expect(marketSale(MARKET_RATE - 1, 100)).toEqual({ ok: false, spent: 0, gold: 0 });
+    expect(marketSale(100, 1)).toEqual({ ok: false, spent: 0, gold: 0 });
+  });
+
+  it('refuses a non-positive amount or empty balance', () => {
+    expect(marketSale(0, 100).ok).toBe(false);
+    expect(marketSale(100, 0).ok).toBe(false);
+    expect(marketSale(100, -5).ok).toBe(false);
   });
 });
 

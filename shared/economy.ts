@@ -3,6 +3,12 @@
 // runs identically on the server (deterministic) and in tests.
 
 import { ResourceType } from './enums.ts';
+import {
+  FOOD_PER_UNIT,
+  STARVE_DPS,
+  ECONOMY_DT,
+  MARKET_RATE,
+} from './constants.ts';
 
 export interface ResourceCost {
   wood?: number;
@@ -76,4 +82,53 @@ export function addResource(
 ): Stockpile {
   const field = resourceField(resType);
   return { ...p, [field]: p[field] + amt };
+}
+
+// ── upkeep / starvation ───────────────────────────────────────────────────────
+
+export interface UpkeepResult {
+  food: number; // food balance after the tick (floored at 0)
+  starving: boolean; // true when the unit count outpaces food this tick
+  hpDrain: number; // hp each owned unit loses this tick when starving (0 otherwise)
+}
+
+// One economy tick of food upkeep for a player. Every owned unit eats
+// FOOD_PER_UNIT; when the bill exceeds the stockpile the player starves and each
+// unit bleeds STARVE_DPS over the tick. Pure: numbers in, numbers out, so the
+// module and the test agree byte-for-byte. `dt` defaults to the economy tick.
+export function applyUpkeep(
+  food: number,
+  unitCount: number,
+  dt: number = ECONOMY_DT
+): UpkeepResult {
+  const bill = unitCount * FOOD_PER_UNIT;
+  const starving = bill > food;
+  const newFood = Math.max(0, food - bill);
+  const hpDrain = starving ? Math.round(STARVE_DPS * dt) : 0;
+  return { food: newFood, starving, hpDrain };
+}
+
+// ── market ────────────────────────────────────────────────────────────────────
+
+export type Tradeable = 'wood' | 'stone';
+
+export interface TradeResult {
+  ok: boolean;
+  spent: number; // units of the input resource consumed
+  gold: number; // gold minted
+}
+
+// Sell `amount` of wood or stone for gold at MARKET_RATE input:1 gold. Rounds the
+// sale DOWN to whole lots so a player can never mint a fractional or free coin,
+// and refuses a sale it can't fully cover. Pure helper shared by the reducer.
+export function marketSale(
+  balance: number,
+  amount: number
+): TradeResult {
+  if (amount <= 0 || balance <= 0) return { ok: false, spent: 0, gold: 0 };
+  const affordable = Math.min(amount, balance);
+  const gold = Math.floor(affordable / MARKET_RATE);
+  if (gold <= 0) return { ok: false, spent: 0, gold: 0 };
+  const spent = gold * MARKET_RATE;
+  return { ok: true, spent, gold };
 }

@@ -5,10 +5,10 @@ import {
   AI_TICK_MS,
   COMBAT_TICK_MS,
   AI_BRAIN_TICK_MS,
-  TREE_COUNT,
+  ECONOMY_TICK_MS,
 } from '../../shared/constants.ts';
 import { spacetimedb } from './schema/db.ts';
-import { scatterTrees } from './world/spawn.ts';
+import { scatterNodes } from './world/spawn.ts';
 
 export const init = spacetimedb.init((ctx) => {
   const seed = ctx.random.integerInRange(1, 2_000_000_000);
@@ -20,7 +20,7 @@ export const init = spacetimedb.init((ctx) => {
     nextBotId: 1n,
   });
 
-  scatterTrees(ctx, seed, TREE_COUNT);
+  scatterNodes(ctx, seed);
 
   ctx.db.moveTimer.insert({
     scheduledId: 0n,
@@ -37,6 +37,10 @@ export const init = spacetimedb.init((ctx) => {
   ctx.db.aiBrainTimer.insert({
     scheduledId: 0n,
     scheduledAt: ScheduleAt.interval(BigInt(AI_BRAIN_TICK_MS) * 1000n),
+  });
+  ctx.db.economyTimer.insert({
+    scheduledId: 0n,
+    scheduledAt: ScheduleAt.interval(BigInt(ECONOMY_TICK_MS) * 1000n),
   });
 });
 

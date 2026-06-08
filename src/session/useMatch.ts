@@ -4,7 +4,12 @@
 import { useTable } from 'spacetimedb/react';
 import type { Identity } from 'spacetimedb';
 import { tables } from '../module_bindings';
-import { UnitKind, BUILDING_DEFS, FACTION_LABELS } from '../../shared/index.ts';
+import {
+  UnitKind,
+  BUILDING_DEFS,
+  FACTION_LABELS,
+  FOOD_PER_UNIT,
+} from '../../shared/index.ts';
 
 export type Outcome = 'victory' | 'defeat' | null;
 
@@ -13,6 +18,10 @@ export interface MatchState {
   name: string;
   faction: string;
   wood: number;
+  stone: number;
+  food: number;
+  gold: number;
+  starving: boolean;
   peasants: number;
   soldiers: number;
   pop: number;
@@ -47,11 +56,21 @@ export function useMatch(identity?: Identity): MatchState {
       ? 'victory'
       : null;
 
+  // Starving when the food bill for owned units outpaces the stockpile — the
+  // same predicate the module's upkeep system uses, so the HUD warns exactly
+  // when units will start bleeding hp.
+  const food = me?.food ?? 0;
+  const starving = !!me && myUnits.length * FOOD_PER_UNIT > food;
+
   return {
     inGame: !!me,
     name: me?.name || 'Commander',
     faction: me ? (FACTION_LABELS[me.faction as 0 | 1] ?? 'Ayyubid') : 'Ayyubid',
     wood: me?.wood ?? 0,
+    stone: me?.stone ?? 0,
+    food,
+    gold: me?.gold ?? 0,
+    starving,
     peasants,
     soldiers: myUnits.length - peasants,
     pop: myUnits.length,

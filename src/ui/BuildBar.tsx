@@ -15,10 +15,16 @@ import styles from './BuildBar.module.css';
 
 interface BuildBarProps {
   wood: number;
+  stone: number;
+  food: number;
+  gold: number;
   onTrain: (buildingId: string, kind: number) => void;
   onDemolish: (id: string) => void;
   onGatherAll: () => void;
+  onTrade: (resType: number, amount: number) => void;
 }
+
+const MARKET_LOT = 20; // resources sold per market click
 
 const BUILD_ICONS: Record<number, string> = {
   [BuildingKind.Wall]: '🧱',
@@ -85,9 +91,13 @@ function Tool({ icon, label, cost, active, disabled, cls, onClick }: ToolProps) 
 
 export function BuildBar({
   wood,
+  stone,
+  food,
+  gold,
   onTrain,
   onDemolish,
   onGatherAll,
+  onTrade,
 }: BuildBarProps) {
   const selB = useGameStore((s) => s.selectedBuilding);
   const buildMode = useGameStore((s) => s.buildMode);
@@ -96,16 +106,30 @@ export function BuildBar({
   const setDemolishMode = useGameStore((s) => s.setDemolishMode);
   const [tab, setTab] = useState(0);
 
-  // Costs this stage are wood-only; affordability checks the wood balance via the
-  // shared contract so adding stone/food/gold costs later needs no UI changes.
-  const stock = { wood, stone: 0, food: 0, gold: 0 };
+  // The player's full stockpile drives every affordability check via the shared
+  // canAfford contract — multi-resource costs (e.g. Tower's wood + stone) dim
+  // correctly when any single resource is short.
+  const stock = { wood, stone, food, gold };
 
-  // The "Orders" group is global (always available).
+  // The "Orders" group is global (always available). Market sells raw resources
+  // for gold via the shared MARKET_RATE; disabled when there is nothing to sell.
   const orders = (
     <div className={styles.group}>
       <div className={styles.groupLabel}>Orders</div>
       <div className={styles.tools}>
         <Tool icon="🪓" label="Gather" cls={styles.green} onClick={onGatherAll} />
+        <Tool
+          icon="🪙"
+          label="Sell Wood"
+          disabled={wood < MARKET_LOT}
+          onClick={() => onTrade(ResourceType.Wood, MARKET_LOT)}
+        />
+        <Tool
+          icon="🪙"
+          label="Sell Stone"
+          disabled={stone < MARKET_LOT}
+          onClick={() => onTrade(ResourceType.Stone, MARKET_LOT)}
+        />
         <Tool
           icon="⛏️"
           label="Demolish"

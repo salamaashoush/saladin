@@ -110,6 +110,56 @@ export function treeDensity(b: Biome): number {
   return 0;
 }
 
+// Stone outcrops cluster in the rocky uplands; quarries skirt the mountains.
+export function rockDensity(b: Biome): number {
+  if (b === Biome.Hills) return 0.55;
+  if (b === Biome.Mountain) return 0.4;
+  if (b === Biome.Steppe) return 0.12;
+  if (b === Biome.Grassland) return 0.05;
+  return 0;
+}
+
+// Wild game (food) grazes the open grass and steppe, never the bare desert.
+export function gameDensity(b: Biome): number {
+  if (b === Biome.Grassland) return 0.4;
+  if (b === Biome.Steppe) return 0.28;
+  if (b === Biome.Forest) return 0.12;
+  return 0;
+}
+
+// Fishing only pays off on the shoreline; the caller pairs this with isCoastal
+// so a fish node never lands out in open water or inland.
+export function fishDensity(b: Biome): number {
+  if (b === Biome.Sand) return 0.6;
+  if (b === Biome.Grassland) return 0.15;
+  if (b === Biome.Steppe) return 0.1;
+  return 0;
+}
+
+// Gold veins are mined out of the rocky uplands skirting the mountains.
+export function goldDensity(b: Biome): number {
+  if (b === Biome.Mountain) return 0.35;
+  if (b === Biome.Hills) return 0.18;
+  return 0;
+}
+
+// True when (x,y) is buildable land with open water on at least one of its four
+// orthogonal neighbours — i.e. a reachable shore. Deterministic from the seed.
+export function isCoastal(seed: number, x: number, y: number): boolean {
+  if (!isLand(seed, x, y)) return false;
+  const adj = [
+    [1, 0],
+    [-1, 0],
+    [0, 1],
+    [0, -1],
+  ];
+  for (const [dx, dy] of adj) {
+    const b = sampleTerrain(seed, x + dx, y + dy).biome;
+    if (b === Biome.DeepWater || b === Biome.ShallowWater) return true;
+  }
+  return false;
+}
+
 // Spiral outward to the nearest buildable land near (x,y).
 export function findLandNear(
   seed: number,

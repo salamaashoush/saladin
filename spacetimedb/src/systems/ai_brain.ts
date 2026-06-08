@@ -1,9 +1,10 @@
-import { AI_BRAIN_DT } from '../../../shared/constants.ts';
+import { AI_BRAIN_DT, FOOD_PER_UNIT } from '../../../shared/constants.ts';
 import { UNIT_DEFS, BUILDING_DEFS, AI_PROFILES } from '../../../shared/defs.ts';
 import { canAfford } from '../../../shared/economy.ts';
 import {
   UnitKind,
   BuildingKind,
+  ResourceType,
   GatherState,
   type UnitKind as UnitKindT,
 } from '../../../shared/enums.ts';
@@ -48,8 +49,17 @@ export const aiBrain = spacetimedb.reducer(
       ).length;
       const pop = popInfo(ctx, owner);
 
-      // Keep the economy busy every tick.
-      assignIdleGatherers(ctx, owner);
+      // Keep the economy busy every tick, steering toward what the bot is short
+      // of: food first if starvation looms (it must out-gather upkeep), then the
+      // scarcest of the raw building resources, otherwise the nearest node.
+      const upkeep = myUnits.length * FOOD_PER_UNIT;
+      const prefer =
+        p.food <= upkeep * 4
+          ? ResourceType.Food
+          : p.stone < p.wood
+            ? ResourceType.Stone
+            : undefined;
+      assignIdleGatherers(ctx, owner, prefer);
 
       // One macro action per decision window.
       let decisionCd = bot.decisionCd - AI_BRAIN_DT;

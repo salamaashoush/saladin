@@ -12,6 +12,7 @@ import {
   aiTimer,
   combatTimer,
   aiBrainTimer,
+  economyTimer,
 } from './tables.ts';
 
 export const spacetimedb = schema({
@@ -27,6 +28,7 @@ export const spacetimedb = schema({
   aiTimer,
   combatTimer,
   aiBrainTimer,
+  economyTimer,
 });
 
 export default spacetimedb;

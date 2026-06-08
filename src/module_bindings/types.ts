@@ -57,6 +57,12 @@ export const Config = __t.object("Config", {
 });
 export type Config = __Infer<typeof Config>;
 
+export const EconomyTimer = __t.object("EconomyTimer", {
+  scheduledId: __t.u64(),
+  scheduledAt: __t.scheduleAt(),
+});
+export type EconomyTimer = __Infer<typeof EconomyTimer>;
+
 export const Entity = __t.object("Entity", {
   entityId: __t.u64(),
   x: __t.f32(),

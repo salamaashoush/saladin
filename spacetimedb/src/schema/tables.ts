@@ -158,4 +158,12 @@ export const aiBrainTimer = table(
   }
 );
 
+export const economyTimer = table(
+  { name: 'economy_timer', scheduled: (): any => scheduleRefs.economySystem },
+  {
+    scheduledId: t.u64().primaryKey().autoInc(),
+    scheduledAt: t.scheduleAt(),
+  }
+);
+
 export const WallTile = t.object('WallTile', { x: t.f32(), y: t.f32() });

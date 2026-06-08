@@ -36,6 +36,10 @@ function App() {
           name={match.name}
           faction={match.faction}
           wood={match.wood}
+          stone={match.stone}
+          food={match.food}
+          gold={match.gold}
+          starving={match.starving}
           peasants={match.peasants}
           soldiers={match.soldiers}
           pop={match.pop}
@@ -43,6 +47,7 @@ function App() {
           onTrain={actions.train}
           onDemolish={actions.demolish}
           onGatherAll={actions.gatherAll}
+          onTrade={actions.trade}
           onAddAi={() => actions.addAi(1)}
           onLeave={actions.leaveGame}
           onSetStance={(s) => game?.setSelectedStance(s)}

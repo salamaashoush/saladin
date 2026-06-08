@@ -49,12 +49,14 @@ export function drawMinimap(
   for (const b of blips) {
     const px = (b.x / WORLD_SIZE) * S;
     const py = (b.z / WORLD_SIZE) * S;
+    const hex = '#' + b.color.toString(16).padStart(6, '0');
     if (b.arche === 'tree') {
-      ctx.fillStyle = '#2f5a25';
-      ctx.fillRect(px, py, 1.4, 1.4);
+      // Resource nodes: small dot tinted by resource type (color from the blip).
+      ctx.fillStyle = hex;
+      ctx.fillRect(px - 0.7, py - 0.7, 1.6, 1.6);
       continue;
     }
-    ctx.fillStyle = '#' + b.color.toString(16).padStart(6, '0');
+    ctx.fillStyle = hex;
     const sz = b.arche === 'building' ? 5 : 3;
     ctx.fillRect(px - sz / 2, py - sz / 2, sz, sz);
   }

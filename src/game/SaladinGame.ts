@@ -8,6 +8,7 @@ import {
   UNIT_DEFS,
   BUILDING_DEFS,
   PLAYER_COLORS,
+  RESOURCE_DEFS,
   UnitKind,
   BuildingKind,
   isPassable,
@@ -23,7 +24,7 @@ import {
   buildUnit,
   buildByKind,
   buildWallSlab,
-  buildTree,
+  buildResourceNode,
   buildSelRing,
   buildHpBar,
 } from './meshes/index.ts';
@@ -284,9 +285,9 @@ export class SaladinGame {
     );
     on(
       db.resourceNode,
-      (r) => this.spawnTree(r.entityId, r.remaining),
+      (r) => this.spawnNode(r.entityId, r.resType, r.remaining),
       (r) => this.removeObj(r.entityId),
-      (r) => this.scaleTree(r.entityId, r.remaining)
+      (r) => this.scaleNode(r.entityId, r.remaining)
     );
     on(
       db.player,
@@ -580,21 +581,21 @@ export class SaladinGame {
     }
   }
 
-  private spawnTree(entityId: bigint, remaining: number) {
+  private spawnNode(entityId: bigint, resType: number, remaining: number) {
     const id = entityId.toString();
     if (this.objs.has(id)) return;
     const p =
       this.pos.get(id) ?? { entityId, x: WORLD_SIZE / 2, y: WORLD_SIZE / 2, facing: 0 };
     const group = this.newGroup(id, p);
-    const body = buildTree();
+    const body = buildResourceNode(resType);
     group.add(body);
-    this.scaleTreeGroup(group, remaining);
+    this.scaleNodeGroup(group, remaining);
     this.scene.add(group);
     this.objs.set(id, {
       group,
       arche: 'tree',
       body,
-      kind: -1,
+      kind: resType, // resType drives the minimap color for nodes
       hp: 0,
       maxHp: 0,
       fromX: p.x,
@@ -607,12 +608,12 @@ export class SaladinGame {
     });
   }
 
-  private scaleTree(entityId: bigint, remaining: number) {
+  private scaleNode(entityId: bigint, remaining: number) {
     const o = this.objs.get(entityId.toString());
-    if (o) this.scaleTreeGroup(o.group, remaining);
+    if (o) this.scaleNodeGroup(o.group, remaining);
   }
 
-  private scaleTreeGroup(group: THREE.Group, remaining: number) {
+  private scaleNodeGroup(group: THREE.Group, remaining: number) {
     group.scale.setScalar(0.5 + 0.5 * Math.min(1, remaining / 120));
   }
 
@@ -1287,9 +1288,14 @@ export class SaladinGame {
         x: o.group.position.x,
         z: o.group.position.z,
         arche: o.arche,
-        color: o.ownerHex
-          ? this.playerColors.get(o.ownerHex) ?? 0xffffff
-          : 0xffffff,
+        // Resource nodes carry their resType in `kind`; color the blip by the
+        // resource so the minimap distinguishes wood/stone/food/gold.
+        color:
+          o.arche === 'tree'
+            ? RESOURCE_DEFS[o.kind as 0]?.color ?? 0x2f5a25
+            : o.ownerHex
+              ? this.playerColors.get(o.ownerHex) ?? 0xffffff
+              : 0xffffff,
       };
   }
 

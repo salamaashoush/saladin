@@ -7,6 +7,7 @@ export interface NodePos {
   id: bigint;
   x: number;
   y: number;
+  resType: number;
 }
 
 export function dist(ax: number, ay: number, bx: number, by: number): number {
@@ -32,7 +33,7 @@ export function buildNodes(ctx: any): NodePos[] {
   const nodes: NodePos[] = [];
   for (const n of [...ctx.db.resourceNode.iter()]) {
     const e = ctx.db.entity.entityId.find(n.entityId);
-    if (e) nodes.push({ id: n.entityId, x: e.x, y: e.y });
+    if (e) nodes.push({ id: n.entityId, x: e.x, y: e.y, resType: n.resType });
   }
   return nodes;
 }

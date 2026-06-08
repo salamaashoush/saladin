@@ -54,3 +54,21 @@
   text-transform: uppercase;
   letter-spacing: 0.06em;
 }
+
+.warn {
+  animation: starve-pulse 1s ease-in-out infinite;
+}
+
+.warn .label {
+  color: #e06a4a;
+}
+
+@keyframes starve-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.55;
+  }
+}

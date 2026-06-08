@@ -41,6 +41,7 @@ import DemolishBuildingReducer from "./demolish_building_reducer";
 import EnterGameReducer from "./enter_game_reducer";
 import GatherResourceReducer from "./gather_resource_reducer";
 import LeaveGameReducer from "./leave_game_reducer";
+import MarketTradeReducer from "./market_trade_reducer";
 import MoveUnitReducer from "./move_unit_reducer";
 import PlaceBuildingReducer from "./place_building_reducer";
 import PlaceWallReducer from "./place_wall_reducer";
@@ -174,6 +175,7 @@ const reducersSchema = __reducers(
   __reducerSchema("enter_game", EnterGameReducer),
   __reducerSchema("gather_resource", GatherResourceReducer),
   __reducerSchema("leave_game", LeaveGameReducer),
+  __reducerSchema("market_trade", MarketTradeReducer),
   __reducerSchema("move_unit", MoveUnitReducer),
   __reducerSchema("place_building", PlaceBuildingReducer),
   __reducerSchema("place_wall", PlaceWallReducer),

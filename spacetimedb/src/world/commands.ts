@@ -1,7 +1,6 @@
-import { TREE_COUNT } from '../../../shared/constants.ts';
 import { BuildingKind } from '../../../shared/enums.ts';
 import { dist, getSeed } from './util.ts';
-import { scatterTrees } from './spawn.ts';
+import { scatterNodes } from './spawn.ts';
 
 // Remove everything belonging to `owner`: units, buildings, their entity rows,
 // the ai row (if a bot) and the player row. Used to tear down a match cleanly.
@@ -46,7 +45,7 @@ export function resetMatch(ctx: any, caller: any): void {
       ctx.db.resourceNode.entityId.delete(n.entityId);
       ctx.db.entity.entityId.delete(n.entityId);
     }
-    scatterTrees(ctx, getSeed(ctx), TREE_COUNT);
+    scatterNodes(ctx, getSeed(ctx));
   }
 }
 

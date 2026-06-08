@@ -1,7 +1,26 @@
 // Data-driven content: unit/building/resource stats + presentation. New unit
 // types, buildings, factions slot in here without touching systems code.
 
-import { WORLD_SIZE, SPAWN_MARGIN } from './constants.ts';
+import {
+  WORLD_SIZE,
+  SPAWN_MARGIN,
+  TREE_COUNT,
+  TREE_WOOD,
+  STONE_NODES,
+  STONE_YIELD,
+  FOOD_NODES,
+  FOOD_YIELD,
+  GOLD_NODES,
+  GOLD_YIELD,
+} from './constants.ts';
+import {
+  type Biome,
+  treeDensity,
+  rockDensity,
+  gameDensity,
+  fishDensity,
+  goldDensity,
+} from './terrain.ts';
 import {
   UnitKind,
   BuildingKind,
@@ -146,17 +165,17 @@ export const BUILDING_DEFS: Record<BuildingKind, BuildingDef> = {
     pop: 8,
     trains: [UnitKind.Peasant],
   }),
-  [BuildingKind.Barracks]: B('Barracks', 2, 1.4, { wood: 80 }, 500, true, {
+  [BuildingKind.Barracks]: B('Barracks', 2, 1.4, { wood: 70, stone: 20 }, 500, true, {
     trains: [UnitKind.Spearman, UnitKind.Archer, UnitKind.Knight],
     armorClass: ArmorClass.Leather, // timber hall — chops faster than stone
   }),
-  [BuildingKind.Tower]: B('Tower', 1, 2.6, { wood: 60 }, 400, true, {
+  [BuildingKind.Tower]: B('Tower', 1, 2.6, { wood: 40, stone: 30 }, 400, true, {
     attack: 9,
     range: 7,
     attackRate: 0.9,
   }),
-  [BuildingKind.Wall]: B('Wall', 1, 1.2, { wood: 12 }, 300, true),
-  [BuildingKind.Gatehouse]: B('Gatehouse', 1, 1.5, { wood: 25 }, 400, true, {
+  [BuildingKind.Wall]: B('Wall', 1, 1.2, { wood: 6, stone: 6 }, 300, true),
+  [BuildingKind.Gatehouse]: B('Gatehouse', 1, 1.5, { wood: 15, stone: 15 }, 400, true, {
     passable: true,
   }),
   [BuildingKind.House]: B('House', 2, 1.2, { wood: 40 }, 250, true, {
@@ -187,6 +206,32 @@ export const RESOURCE_DEFS: Record<ResourceType, ResourceDef> = {
   [ResourceType.Food]: { label: 'Food', color: 0xc9a227, icon: '🍞' },
   [ResourceType.Gold]: { label: 'Gold', color: 0xffd24a, icon: '🪙' },
 };
+
+// One scatter rule per resource node kind: how many to place, how much each
+// holds, the per-biome density used as a PRNG accept-probability, and whether
+// the node may only sit on the coast (fish). Data-driven so scatterNodes loops
+// these — adding a node kind never touches the placement code.
+export interface NodeKindDef {
+  resType: ResourceType;
+  count: number;
+  yield: number;
+  density: (b: Biome) => number;
+  coastalOnly: boolean;
+}
+
+// Food comes from two sources sharing one balance: game grazing inland and fish
+// on the shore (coastal-only so they stay reachable). The split keeps fish from
+// crowding out land-locked maps.
+const FOOD_FISH = Math.round(FOOD_NODES * 0.4);
+const FOOD_GAME = FOOD_NODES - FOOD_FISH;
+
+export const NODE_KINDS: NodeKindDef[] = [
+  { resType: ResourceType.Wood, count: TREE_COUNT, yield: TREE_WOOD, density: treeDensity, coastalOnly: false },
+  { resType: ResourceType.Stone, count: STONE_NODES, yield: STONE_YIELD, density: rockDensity, coastalOnly: false },
+  { resType: ResourceType.Food, count: FOOD_GAME, yield: FOOD_YIELD, density: gameDensity, coastalOnly: false },
+  { resType: ResourceType.Food, count: FOOD_FISH, yield: FOOD_YIELD, density: fishDensity, coastalOnly: true },
+  { resType: ResourceType.Gold, count: GOLD_NODES, yield: GOLD_YIELD, density: goldDensity, coastalOnly: false },
+];
 
 export const FACTION_LABELS: Record<Faction, string> = {
   0: 'Ayyubid',
