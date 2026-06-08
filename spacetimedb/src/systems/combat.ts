@@ -41,6 +41,7 @@ import { dist, getSeed } from '../world/util.ts';
 import { movePatch } from '../world/placement.ts';
 import { markDefeated } from '../world/spawn.ts';
 import { activeMatchIds } from '../world/scope.ts';
+import { bumpCombatTick } from '../world/tick_count.ts';
 import {
   occupantFireProfile,
   garrisonRangeRate,
@@ -159,6 +160,7 @@ function routDestination(
 export const combatTick = spacetimedb.reducer(
   { timer: combatTimer.rowType },
   (ctx) => {
+    bumpCombatTick(ctx);
     const seed = getSeed(ctx);
     const active = activeMatchIds(ctx);
     // Only units in Active matches fight or are fought over this tick — a paused

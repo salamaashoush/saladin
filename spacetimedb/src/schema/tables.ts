@@ -155,6 +155,20 @@ export const ai = table(
   }
 );
 
+// Monotonic tick counters, one singleton row (id=0). moveUnits bumps moveTicks
+// and combatTick bumps combatTicks once per run — a single cheap update/tick. Poll
+// this row twice over a wall-clock window and divide the delta by the elapsed
+// seconds to read the ACHIEVED tick rate (target 20Hz move / 5Hz combat); when a
+// tick's cost exceeds its interval the achieved rate falls below target (drift).
+export const tickCount = table(
+  { name: 'tick_count', public: true },
+  {
+    id: t.u32().primaryKey(),
+    moveTicks: t.u64(),
+    combatTicks: t.u64(),
+  }
+);
+
 export const config = table(
   { name: 'config', public: true },
   {

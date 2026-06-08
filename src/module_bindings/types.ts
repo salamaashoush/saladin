@@ -293,6 +293,13 @@ export const Shot = __t.object("Shot", {
 });
 export type Shot = __Infer<typeof Shot>;
 
+export const TickCount = __t.object("TickCount", {
+  id: __t.u32(),
+  moveTicks: __t.u64(),
+  combatTicks: __t.u64(),
+});
+export type TickCount = __Infer<typeof TickCount>;
+
 export const Unit = __t.object("Unit", {
   entityId: __t.u64(),
   owner: __t.identity(),

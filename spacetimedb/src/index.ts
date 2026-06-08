@@ -18,6 +18,7 @@ export * from './reducers/build_commands.ts';
 export * from './reducers/garrison_commands.ts';
 export * from './reducers/market.ts';
 export * from './reducers/research.ts';
+export * from './reducers/debug.ts';
 
 export * from './systems/movement.ts';
 export * from './systems/gather_ai.ts';

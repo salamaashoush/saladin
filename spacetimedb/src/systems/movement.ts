@@ -4,12 +4,14 @@ import { spacetimedb } from '../schema/db.ts';
 import { moveTimer } from '../schema/tables.ts';
 import { scheduleRefs } from '../schema/schedule_refs.ts';
 import { activeMatchIds } from '../world/scope.ts';
+import { bumpMoveTick } from '../world/tick_count.ts';
 
 // Movement integration — runs every MOVE_TICK_MS. Only touches movers in Active
 // matches (a Paused/Ended match's units freeze in place).
 export const moveUnits = spacetimedb.reducer(
   { timer: moveTimer.rowType },
   (ctx) => {
+    bumpMoveTick(ctx);
     const active = activeMatchIds(ctx);
     for (const u of [...ctx.db.unit.iter()]) {
       if (!active.has(u.matchId)) continue; // paused/ended match — frozen

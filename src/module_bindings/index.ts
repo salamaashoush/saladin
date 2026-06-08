@@ -37,6 +37,8 @@ import {
 import AddAiReducer from "./add_ai_reducer";
 import AttackUnitReducer from "./attack_unit_reducer";
 import AutoGatherReducer from "./auto_gather_reducer";
+import DebugStressReducer from "./debug_stress_reducer";
+import DebugStressClearReducer from "./debug_stress_clear_reducer";
 import DeleteSaveReducer from "./delete_save_reducer";
 import DemolishBuildingReducer from "./demolish_building_reducer";
 import EnterGameReducer from "./enter_game_reducer";
@@ -72,6 +74,7 @@ import ResearchRow from "./research_table";
 import ResourceNodeRow from "./resource_node_table";
 import SaveSlotRow from "./save_slot_table";
 import ShotRow from "./shot_table";
+import TickCountRow from "./tick_count_table";
 import UnitRow from "./unit_table";
 
 /** Type-only namespace exports for generated type groups. */
@@ -241,6 +244,17 @@ const tablesSchema = __schema({
     ],
     event: true,
   }, ShotRow),
+  tickCount: __table({
+    name: 'tick_count',
+    indexes: [
+      { accessor: 'id', name: 'tick_count_id_idx_btree', algorithm: 'btree', columns: [
+        'id',
+      ] },
+    ],
+    constraints: [
+      { name: 'tick_count_id_key', constraint: 'unique', columns: ['id'] },
+    ],
+  }, TickCountRow),
   unit: __table({
     name: 'unit',
     indexes: [
@@ -265,6 +279,8 @@ const reducersSchema = __reducers(
   __reducerSchema("add_ai", AddAiReducer),
   __reducerSchema("attack_unit", AttackUnitReducer),
   __reducerSchema("auto_gather", AutoGatherReducer),
+  __reducerSchema("debug_stress", DebugStressReducer),
+  __reducerSchema("debug_stress_clear", DebugStressClearReducer),
   __reducerSchema("delete_save", DeleteSaveReducer),
   __reducerSchema("demolish_building", DemolishBuildingReducer),
   __reducerSchema("enter_game", EnterGameReducer),
