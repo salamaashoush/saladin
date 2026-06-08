@@ -163,6 +163,15 @@ export class SaladinGame {
   private last = 0;
   private disposed = false;
 
+  // ── perf instrumentation ────────────────────────────────────────────────────
+  // Rolling frame-time average (EMA) + per-frame renderer counters, surfaced to
+  // window.__perf and an on-screen overlay so the as-is curve can be read back
+  // (by a browser driver or by eye) against the live on-screen unit count.
+  private fps = 0; // smoothed frames/sec
+  private frameMs = 0; // smoothed frame time (ms)
+  private perfAccum = 0; // seconds since last overlay/console flush
+  private perfOverlay?: HTMLDivElement;
+
   constructor(container: HTMLElement) {
     this.container = container;
     const w = container.clientWidth || 800;
@@ -227,11 +236,111 @@ export class SaladinGame {
     });
 
     this.bindEvents();
+    this.initPerfOverlay();
     this.last = performance.now();
     this.loop();
 
     if (import.meta.env?.DEV)
       (window as unknown as { __saladin: SaladinGame }).__saladin = this;
+  }
+
+  // A self-contained perf HUD (no React coupling) so FPS + draw calls are visible
+  // and machine-readable regardless of which screen the app is on. Toggled with
+  // F3; shown by default in DEV and when ?perf is in the URL.
+  private initPerfOverlay() {
+    const wantPerf =
+      (typeof location !== 'undefined' &&
+        /[?&]perf\b/.test(location.search)) ||
+      !!import.meta.env?.DEV;
+    const el = document.createElement('div');
+    el.style.cssText =
+      'position:absolute;top:6px;left:6px;z-index:50;font:11px/1.35 ui-monospace,Menlo,Consolas,monospace;' +
+      'color:#9bf06b;background:rgba(0,0,0,0.62);padding:5px 7px;border-radius:4px;' +
+      'pointer-events:none;white-space:pre;text-shadow:0 1px 1px #000;';
+    el.style.display = wantPerf ? 'block' : 'none';
+    el.textContent = 'perf…';
+    this.container.appendChild(el);
+    this.perfOverlay = el;
+    window.addEventListener('keydown', this.onPerfToggle);
+  }
+
+  private onPerfToggle = (e: KeyboardEvent) => {
+    if (e.key === 'F3' && this.perfOverlay) {
+      this.perfOverlay.style.display =
+        this.perfOverlay.style.display === 'none' ? 'block' : 'none';
+    }
+  };
+
+  // Count units whose mesh is actually drawn this frame (visible + roughly inside
+  // the orthographic frustum). This is the load number the FPS curve is read
+  // against — garrisoned/off-screen units don't cost draw calls.
+  private onScreenUnitCount(): number {
+    let n = 0;
+    const cam = this.camera;
+    for (const o of this.objs.values()) {
+      if (o.arche !== 'unit' || !o.group.visible) continue;
+      const v = o.group.position.clone().project(cam);
+      if (v.x < -1.05 || v.x > 1.05 || v.y < -1.05 || v.y > 1.05) continue;
+      if (v.z < -1 || v.z > 1) continue;
+      n++;
+    }
+    return n;
+  }
+
+  // Per-frame perf sample: smooth FPS/frame-time, read the renderer's draw-call +
+  // triangle counters for the frame just rendered, publish to window.__perf, and
+  // flush the overlay + a console line a few times a second.
+  private samplePerf(dt: number) {
+    const ms = dt * 1000;
+    // EMA smoothing (~0.5s window) keeps the number stable enough to read.
+    const a = 0.1;
+    this.frameMs = this.frameMs ? this.frameMs + a * (ms - this.frameMs) : ms;
+    const instFps = dt > 0 ? 1 / dt : 0;
+    this.fps = this.fps ? this.fps + a * (instFps - this.fps) : instFps;
+
+    const r = this.renderer.info.render;
+    const calls = r.calls;
+    const tris = r.triangles;
+    let units = 0;
+    let buildings = 0;
+    let trees = 0;
+    for (const o of this.objs.values()) {
+      if (o.arche === 'unit') units++;
+      else if (o.arche === 'building') buildings++;
+      else trees++;
+    }
+    const onScreen = this.onScreenUnitCount();
+
+    const perf = {
+      fps: Math.round(this.fps),
+      frameMs: +this.frameMs.toFixed(2),
+      drawCalls: calls,
+      triangles: tris,
+      units,
+      buildings,
+      trees,
+      onScreenUnits: onScreen,
+      programs: this.renderer.info.programs?.length ?? 0,
+      geometries: this.renderer.info.memory.geometries,
+      textures: this.renderer.info.memory.textures,
+    };
+    (window as unknown as { __perf: typeof perf }).__perf = perf;
+
+    this.perfAccum += dt;
+    if (this.perfAccum >= 0.25) {
+      this.perfAccum = 0;
+      if (this.perfOverlay && this.perfOverlay.style.display !== 'none') {
+        this.perfOverlay.textContent =
+          `FPS ${perf.fps}  (${perf.frameMs}ms)\n` +
+          `draws ${perf.drawCalls.toLocaleString()}  tris ${perf.triangles.toLocaleString()}\n` +
+          `units ${perf.units} (on-screen ${perf.onScreenUnits})\n` +
+          `bld ${perf.buildings}  trees ${perf.trees}  progs ${perf.programs}`;
+      }
+      if (import.meta.env?.DEV)
+        console.log(
+          `[perf] fps=${perf.fps} ms=${perf.frameMs} draws=${perf.drawCalls} tris=${perf.triangles} units=${perf.units} onScreen=${perf.onScreenUnits} bld=${perf.buildings} trees=${perf.trees}`
+        );
+    }
   }
 
   setIdentity(hex: string) {
@@ -1588,6 +1697,7 @@ export class SaladinGame {
     }
 
     this.renderer.render(this.scene, this.camera);
+    this.samplePerf(dt);
   };
 
   private panCamera(dt: number) {
@@ -1611,6 +1721,8 @@ export class SaladinGame {
     window.removeEventListener('resize', this.onResize);
     window.removeEventListener('keydown', this.onKey);
     window.removeEventListener('keyup', this.onKey);
+    window.removeEventListener('keydown', this.onPerfToggle);
+    this.perfOverlay?.remove();
     this.renderer.domElement.removeEventListener('pointerdown', this.onPointerDown);
     this.renderer.domElement.removeEventListener('wheel', this.onWheel);
     if (this.vegetation) this.disposeTree(this.vegetation);
@@ -1633,6 +1745,22 @@ export class SaladinGame {
       selected: this.selected.size,
       framed: this.framed,
       attached: !!this.conn,
+      fps: Math.round(this.fps),
+      frameMs: +this.frameMs.toFixed(2),
+      drawCalls: this.renderer.info.render.calls,
+      triangles: this.renderer.info.render.triangles,
+      onScreenUnits: this.onScreenUnitCount(),
     };
+  }
+
+  // Move the camera to a world tile and frame there — used by the perf harness to
+  // park the view over the stress armies (which spawn at the map centre).
+  perfFocus(x: number, y: number, viewSize?: number) {
+    this.framed = true; // suppress keep auto-framing once we've parked manually
+    if (viewSize !== undefined) {
+      this.viewSize = viewSize;
+      this.updateProjection();
+    }
+    this.focusOn(x, y);
   }
 }
