@@ -259,6 +259,10 @@
   display: flex;
   flex-direction: column;
   gap: 8px;
+  /* Up to MAX_AI_OPPONENTS (7) rivals — cap the list and scroll inside it so the
+     Begin Battle button never gets pushed out of reach in a full free-for-all. */
+  max-height: 38vh;
+  overflow-y: auto;
 }
 
 .opponent {

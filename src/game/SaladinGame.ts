@@ -29,11 +29,11 @@ import {
   BAR_H,
   buildByKind,
   buildWallSlab,
-  buildResourceNode,
   buildSelRing,
   buildHpBar,
 } from "./meshes/index.ts";
 import { InstancedUnits } from "./meshes/InstancedUnits.ts";
+import { InstancedNodes } from "./meshes/InstancedNodes.ts";
 import { InstancedHpBars } from "./meshes/InstancedHpBars.ts";
 import { placeCamera, applyProjection, panCamera } from "./camera.ts";
 import { drawMinimap, type Minimap } from "./minimap.ts";
@@ -124,6 +124,9 @@ export class SaladinGame {
   // All unit bodies are drawn through here — one InstancedMesh (+ LOD impostor)
   // per UnitKind, so draw calls stay ~constant in unit count.
   private readonly instancedUnits = new InstancedUnits(this.scene);
+  // Resource nodes drawn through here — one InstancedMesh per ResourceType
+  // (tree/rock/forage/gold-vein), so the ~800 static nodes collapse to ~4 draws.
+  private readonly instancedNodes = new InstancedNodes(this.scene);
   // Damaged-unit HP bars batched into two draws (backing + fill) rather than two
   // sprites per unit, so they stay off the draw-call curve at scale.
   private readonly instancedHpBars = new InstancedHpBars(this.scene);
@@ -502,11 +505,16 @@ export class SaladinGame {
     if (this.mini) this.mini.bg = undefined;
 
     // Re-seat everything on the freshly amplified heightmap.
-    for (const o of this.objs.values())
+    for (const [id, o] of this.objs) {
       o.group.position.y = this.heightAt(
         o.group.position.x,
         o.group.position.z,
       );
+      // Static nodes carry their transform in the instance buffer, not the group,
+      // so push the new ground height into the instanced matrix too.
+      if (o.arche === "tree")
+        this.instancedNodes.setHeight(o.kind, id, o.group.position.y);
+    }
   }
 
   private disposeTree(root: THREE.Object3D) {
@@ -868,15 +876,23 @@ export class SaladinGame {
       y: WORLD_SIZE / 2,
       facing: 0,
     };
+    // The body is drawn by the per-resType InstancedMesh; the group is kept only
+    // as a lightweight anchor (position for the minimap + node bookkeeping). It
+    // carries no mesh, so it costs no draw call.
     const group = this.newGroup(id, p);
-    const body = buildResourceNode(resType);
-    group.add(body);
-    this.scaleNodeGroup(group, remaining);
+    group.position.y = this.heightAt(p.x, p.y);
     this.scene.add(group);
+    this.instancedNodes.add(
+      resType,
+      id,
+      group.position.x,
+      group.position.y,
+      group.position.z,
+      this.nodeScale(remaining),
+    );
     this.objs.set(id, {
       group,
       arche: "tree",
-      body,
       kind: resType, // resType drives the minimap color for nodes
       hp: 0,
       maxHp: 0,
@@ -893,12 +909,13 @@ export class SaladinGame {
   }
 
   private scaleNode(entityId: bigint, remaining: number) {
-    const o = this.objs.get(entityId.toString());
-    if (o) this.scaleNodeGroup(o.group, remaining);
+    const id = entityId.toString();
+    const o = this.objs.get(id);
+    if (o) this.instancedNodes.setScale(o.kind, id, this.nodeScale(remaining));
   }
 
-  private scaleNodeGroup(group: THREE.Group, remaining: number) {
-    group.scale.setScalar(0.5 + 0.5 * Math.min(1, remaining / 120));
+  private nodeScale(remaining: number): number {
+    return 0.5 + 0.5 * Math.min(1, remaining / 120);
   }
 
   private removeObj(entityId: bigint) {
@@ -916,6 +933,7 @@ export class SaladinGame {
       this.instancedUnits.remove(o.kind, id);
       this.instancedHpBars.remove(id);
     }
+    if (o.arche === "tree") this.instancedNodes.remove(o.kind, id);
     this.scene.remove(o.group);
     o.group.traverse((c) => {
       const m = c as THREE.Mesh;
@@ -1060,9 +1078,10 @@ export class SaladinGame {
   private pickList(): THREE.Object3D[] {
     const list: THREE.Object3D[] = [this.terrain];
     for (const o of this.objs.values()) list.push(o.group);
-    // Unit bodies live in per-kind InstancedMeshes, not in their groups — include
-    // them so a click resolves to the instance under the cursor.
+    // Unit bodies + resource-node bodies live in InstancedMeshes, not in their
+    // groups — include them so a click resolves to the instance under the cursor.
     for (const m of this.instancedUnits.pickMeshes()) list.push(m);
+    for (const m of this.instancedNodes.pickMeshes()) list.push(m);
     return list;
   }
 
@@ -1078,6 +1097,10 @@ export class SaladinGame {
     if (hit.object.userData.instKind !== undefined)
       return (
         this.instancedUnits.resolveHit(hit.object, hit.instanceId) ?? undefined
+      );
+    if (hit.object.userData.instNode !== undefined)
+      return (
+        this.instancedNodes.resolveHit(hit.object, hit.instanceId) ?? undefined
       );
     return this.findRoot(hit.object)?.userData.rid as string | undefined;
   }
@@ -1769,6 +1792,7 @@ export class SaladinGame {
       }
     }
     this.instancedUnits.flush();
+    this.instancedNodes.flush(); // no-op unless a node was added/removed/scaled
     this.instancedHpBars.update(this.camera);
 
     for (let i = this.arrows.length - 1; i >= 0; i--) {
@@ -1828,6 +1852,7 @@ export class SaladinGame {
     );
     this.renderer.domElement.removeEventListener("wheel", this.onWheel);
     this.instancedUnits.dispose();
+    this.instancedNodes.dispose();
     this.instancedHpBars.dispose();
     if (this.vegetation) this.disposeTree(this.vegetation);
     this.disposeTree(this.terrain);

@@ -1,5 +1,11 @@
 import { describe, it, expect } from 'vitest';
-import { spawnCorner, UNIT_DEFS, UnitKind, WORLD_SIZE } from '../shared/index.ts';
+import {
+  spawnCorner,
+  UNIT_DEFS,
+  UnitKind,
+  WORLD_SIZE,
+  MAX_PLAYERS,
+} from '../shared/index.ts';
 
 describe('shared sim data', () => {
   it('assigns distinct spawn corners per player index', () => {
@@ -14,8 +20,8 @@ describe('shared sim data', () => {
     }
   });
 
-  it('wraps spawn corners after the 4th player', () => {
-    expect(spawnCorner(4)).toEqual(spawnCorner(0));
+  it(`wraps spawn corners after the ${MAX_PLAYERS}th player`, () => {
+    expect(spawnCorner(MAX_PLAYERS)).toEqual(spawnCorner(0));
   });
 
   it('defines peasant stats used by the module and renderer', () => {

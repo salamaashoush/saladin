@@ -132,6 +132,20 @@ export function bakeGroup(
   return { geometry, height: maxY };
 }
 
+// A plain vertex-colour MeshStandardMaterial for instanced meshes whose parts are
+// never recoloured per instance (e.g. resource nodes — every tree/rock keeps its
+// baked colours). Same flat-shaded look as the per-part build, one draw per kind.
+// No instanceColor / tintable shader patch: the baked vertex colours render as-is.
+export function instancedVertexColorMaterial(
+  opts: THREE.MeshStandardMaterialParameters = {},
+): THREE.MeshStandardMaterial {
+  return new THREE.MeshStandardMaterial({
+    vertexColors: true,
+    flatShading: true,
+    ...opts,
+  });
+}
+
 // A vertex-colour-aware MeshStandardMaterial whose tintable vertices (tintable=1)
 // are multiplied by the per-instance instanceColor, while fixed parts keep their
 // baked vertex colour. One material per draw, shared across all instances of a

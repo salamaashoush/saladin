@@ -52,6 +52,6 @@ export const START_FOOD = 100;
 export const START_GOLD = 0;
 export const PEASANT_COST = 20;
 
-export const MAX_PLAYERS = 4;
+export const MAX_PLAYERS = 8;
 export const SPAWN_MARGIN = 24; // scales with WORLD_SIZE — keeps keeps off the coast
 export const SPAWN_CLUSTER = 2.2;

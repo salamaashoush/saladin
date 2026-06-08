@@ -217,8 +217,26 @@ export function tacticalTuning(prof: AiProfile): import('./ai.ts').TacticalTunin
 
 // Themed commanders per faction, assigned to AIs in join order.
 export const AI_NAMES_BY_FACTION: Record<Faction, string[]> = {
-  0: ['Al-Afdal', 'Al-Adil', 'Taqi al-Din', 'Gökböri'],
-  1: ['Reynald de Châtillon', 'Guy de Lusignan', 'Raymond of Tripoli', 'Conrad of Montferrat'],
+  0: [
+    'Al-Afdal',
+    'Al-Adil',
+    'Taqi al-Din',
+    'Gökböri',
+    'Al-Mashtub',
+    'Qaymaz al-Najmi',
+    'Husam al-Din',
+    'Badr al-Din',
+  ],
+  1: [
+    'Reynald de Châtillon',
+    'Guy de Lusignan',
+    'Raymond of Tripoli',
+    'Conrad of Montferrat',
+    'Balian of Ibelin',
+    'Gérard de Ridefort',
+    'Humphrey of Toron',
+    'Joscelin of Courtenay',
+  ],
 };
 
 export function aiName(faction: Faction, index: number): string {
@@ -243,11 +261,36 @@ export const MATCH_PRESETS: MatchPreset[] = [
   { id: 'duel', label: 'Duel', description: '1 v 1 — a single rival keep.', enemies: [AiDifficulty.Normal] },
   { id: 'skirmish', label: 'Skirmish', description: '1 v 2 — outnumbered on open ground.', enemies: [AiDifficulty.Normal, AiDifficulty.Easy] },
   { id: 'last-stand', label: 'Last Stand', description: '1 v 3 — every corner against you.', enemies: [AiDifficulty.Hard, AiDifficulty.Normal, AiDifficulty.Easy] },
+  {
+    id: 'free-for-all',
+    label: 'Free-for-All',
+    description: '1 v 7 — the whole map against you.',
+    enemies: [
+      AiDifficulty.Hard,
+      AiDifficulty.Hard,
+      AiDifficulty.Normal,
+      AiDifficulty.Normal,
+      AiDifficulty.Normal,
+      AiDifficulty.Easy,
+      AiDifficulty.Easy,
+    ],
+  },
 ];
 
-export const MAX_AI_OPPONENTS = 3; // 4 corners total, one is the player
+export const MAX_AI_OPPONENTS = 7; // 8 starts total, one is the player
 
-export const PLAYER_COLORS = [0x2e7d32, 0xb71c1c, 0x1565c0, 0x6a1b9a];
+// One distinct team colour per spawn slot (up to MAX_PLAYERS). Spaced around the
+// hue wheel so all eight read apart at a glance on the minimap and unit tints.
+export const PLAYER_COLORS = [
+  0x2e7d32, // green
+  0xb71c1c, // red
+  0x1565c0, // blue
+  0x6a1b9a, // purple
+  0xef6c00, // orange
+  0x00838f, // teal
+  0xf9a825, // yellow
+  0xad1457, // magenta
+];
 
 // Lowest free slot in [0, max) not present in `used`, else -1. Used to assign a
 // STABLE spawn corner per player so a leaver freeing a slot never causes two
@@ -258,7 +301,12 @@ export function allocSlot(used: ReadonlyArray<number>, max: number): number {
   return -1;
 }
 
-// Deterministic spawn corner per joining player index.
+// Deterministic spawn anchor per joining player index, for up to MAX_PLAYERS (8).
+// Eight well-spread starts on the WORLD_SIZE map: the four corners followed by the
+// four edge midpoints, so adjacent players are always ~half a map-side apart. The
+// order interleaves so the FIRST few joiners (the common 1v1 / 1v2 / 1v3 case) take
+// opposite corners, not neighbours. Each anchor sits inside SPAWN_MARGIN; the
+// non-buildable ones are snapped onto land by findBuildableNear in foundPlayer.
 export function spawnCorner(
   index: number,
   world = WORLD_SIZE,
@@ -266,11 +314,16 @@ export function spawnCorner(
 ): Vec2 {
   const lo = margin;
   const hi = world - margin;
-  const corners: Vec2[] = [
-    { x: lo, y: lo },
-    { x: hi, y: hi },
-    { x: hi, y: lo },
-    { x: lo, y: hi },
+  const mid = world / 2;
+  const anchors: Vec2[] = [
+    { x: lo, y: lo }, // 0 — corner SW
+    { x: hi, y: hi }, // 1 — corner NE (opposite 0)
+    { x: hi, y: lo }, // 2 — corner SE
+    { x: lo, y: hi }, // 3 — corner NW (opposite 2)
+    { x: mid, y: lo }, // 4 — edge S
+    { x: mid, y: hi }, // 5 — edge N (opposite 4)
+    { x: lo, y: mid }, // 6 — edge W
+    { x: hi, y: mid }, // 7 — edge E (opposite 6)
   ];
-  return corners[index % corners.length];
+  return anchors[index % anchors.length];
 }
