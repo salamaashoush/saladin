@@ -10,6 +10,7 @@ import type { ResourceCost } from './economy.ts';
 
 export interface BuildingDef {
   label: string;
+  icon: string; // emoji shown in the build UI
   footprint: number; // tiles per side (integer)
   height: number;
   cost: ResourceCost;
@@ -39,6 +40,7 @@ const B = (
   extra: Partial<BuildingDef> = {}
 ): BuildingDef => ({
   label,
+  icon: '🏗️',
   footprint,
   height,
   cost,
@@ -57,52 +59,63 @@ const B = (
 
 export const BUILDING_DEFS: Record<BuildingKind, BuildingDef> = {
   [BuildingKind.Keep]: B('Keep', 3, 1.8, { wood: 0 }, 1500, false, {
+    icon: '🏰',
     pop: 8,
     trains: [UnitKind.Peasant],
   }),
   [BuildingKind.Barracks]: B('Barracks', 2, 1.4, { wood: 70, stone: 20 }, 500, true, {
+    icon: '🏛️',
     trains: [UnitKind.Spearman, UnitKind.Archer, UnitKind.Crossbowman],
     armorClass: ArmorClass.Leather, // timber hall — chops faster than stone
   }),
   [BuildingKind.Tower]: B('Tower', 1, 2.6, { wood: 40, stone: 30 }, 400, true, {
+    icon: '🗼',
     attack: 9,
     range: 7,
     attackRate: 0.9,
   }),
-  [BuildingKind.Wall]: B('Wall', 1, 1.2, { wood: 6, stone: 6 }, 300, true),
+  [BuildingKind.Wall]: B('Wall', 1, 1.2, { wood: 6, stone: 6 }, 300, true, { icon: '🧱' }),
   [BuildingKind.Gatehouse]: B('Gatehouse', 1, 1.5, { wood: 15, stone: 15 }, 400, true, {
+    icon: '🚪',
     passable: true,
   }),
   [BuildingKind.House]: B('House', 2, 1.2, { wood: 40 }, 250, true, {
+    icon: '🏠',
     pop: 6,
     armorClass: ArmorClass.Leather,
   }),
   [BuildingKind.Stable]: B('Stable', 2, 1.4, { wood: 80, stone: 20 }, 500, true, {
+    icon: '🐴',
     trains: [UnitKind.Knight, UnitKind.HorseArcher, UnitKind.Mamluk],
     armorClass: ArmorClass.Leather,
     requires: BuildingKind.Barracks,
   }),
   [BuildingKind.Blacksmith]: B('Blacksmith', 2, 1.5, { wood: 60, stone: 40 }, 550, true, {
+    icon: '⚒️',
     requires: BuildingKind.Barracks,
   }),
   [BuildingKind.Market]: B('Market', 2, 1.3, { wood: 60, stone: 20 }, 450, true, {
+    icon: '🏪',
     armorClass: ArmorClass.Leather,
     enablesTrade: true,
     requires: BuildingKind.Keep,
   }),
   [BuildingKind.Granary]: B('Granary', 2, 1.3, { wood: 50, stone: 10 }, 400, true, {
+    icon: '🌾',
     pop: 4, // simple data-driven effect: extra population headroom
     armorClass: ArmorClass.Leather,
     foodDropoff: true,
     requires: BuildingKind.Keep,
   }),
   [BuildingKind.FishingHut]: B('Fishing Hut', 1, 1.0, { wood: 35 }, 250, true, {
+    icon: '🎣',
     armorClass: ArmorClass.Leather,
     foodDropoff: true, // alternate food deposit point on the shore
     requiresWater: true,
     requires: BuildingKind.Keep,
   }),
   [BuildingKind.SiegeWorkshop]: B('Siege Workshop', 2, 1.5, { wood: 100, stone: 40 }, 600, true, {
+    icon: '🛠️',
     trains: [UnitKind.Ram, UnitKind.Mangonel],
     armorClass: ArmorClass.Leather,
     requires: BuildingKind.Blacksmith,
@@ -128,11 +141,21 @@ export const BUILD_CATEGORIES: { label: string; icon: string; kinds: BuildingKin
   {
     label: 'Military',
     icon: '⚔️',
-    kinds: [
-      BuildingKind.Barracks,
-      BuildingKind.Stable,
-      BuildingKind.Blacksmith,
-      BuildingKind.SiegeWorkshop,
-    ],
+    kinds: [BuildingKind.Barracks],
+  },
+  {
+    label: 'Cavalry',
+    icon: '🐴',
+    kinds: [BuildingKind.Stable],
+  },
+  {
+    label: 'Siege',
+    icon: '🛠️',
+    kinds: [BuildingKind.SiegeWorkshop],
+  },
+  {
+    label: 'Tech',
+    icon: '⚒️',
+    kinds: [BuildingKind.Blacksmith],
   },
 ];

@@ -13,6 +13,7 @@ import type { ResourceCost } from './economy.ts';
 
 export interface UnitDef {
   label: string;
+  icon: string; // emoji shown in the train/selection UI
   speed: number; // world units / second
   carry: number; // wood per gather trip (0 = non-gatherer)
   radius: number;
@@ -34,6 +35,7 @@ export interface UnitDef {
 export const UNIT_DEFS: Record<UnitKind, UnitDef> = {
   [UnitKind.Peasant]: {
     label: 'Peasant',
+    icon: '🧑‍🌾',
     speed: 2.5,
     carry: 8,
     radius: 0.22,
@@ -49,6 +51,7 @@ export const UNIT_DEFS: Record<UnitKind, UnitDef> = {
   },
   [UnitKind.Spearman]: {
     label: 'Spearman',
+    icon: '🛡️',
     speed: 2.2,
     carry: 0,
     radius: 0.26,
@@ -66,6 +69,7 @@ export const UNIT_DEFS: Record<UnitKind, UnitDef> = {
   },
   [UnitKind.Archer]: {
     label: 'Archer',
+    icon: '🏹',
     speed: 2.4,
     carry: 0,
     radius: 0.24,
@@ -82,6 +86,7 @@ export const UNIT_DEFS: Record<UnitKind, UnitDef> = {
   },
   [UnitKind.Knight]: {
     label: 'Knight',
+    icon: '🐎',
     speed: 3.4, // fast — runs down archers
     carry: 0,
     radius: 0.3,
@@ -99,6 +104,7 @@ export const UNIT_DEFS: Record<UnitKind, UnitDef> = {
   },
   [UnitKind.HorseArcher]: {
     label: 'Horse Archer',
+    icon: '🏇',
     speed: 4.0, // fastest on the field — kites everything
     carry: 0,
     radius: 0.28,
@@ -116,6 +122,7 @@ export const UNIT_DEFS: Record<UnitKind, UnitDef> = {
   },
   [UnitKind.Mamluk]: {
     label: 'Mamluk',
+    icon: '🗡️',
     speed: 3.6,
     carry: 0,
     radius: 0.31,
@@ -134,6 +141,7 @@ export const UNIT_DEFS: Record<UnitKind, UnitDef> = {
   },
   [UnitKind.Crossbowman]: {
     label: 'Crossbowman',
+    icon: '🎯',
     speed: 2.0, // slow, heavy
     carry: 0,
     radius: 0.25,
@@ -151,6 +159,7 @@ export const UNIT_DEFS: Record<UnitKind, UnitDef> = {
   },
   [UnitKind.Ram]: {
     label: 'Battering Ram',
+    icon: '🪵',
     speed: 1.2, // crawls
     carry: 0,
     radius: 0.5,
@@ -169,6 +178,7 @@ export const UNIT_DEFS: Record<UnitKind, UnitDef> = {
   },
   [UnitKind.Mangonel]: {
     label: 'Mangonel',
+    icon: '💥',
     speed: 1.0,
     carry: 0,
     radius: 0.45,

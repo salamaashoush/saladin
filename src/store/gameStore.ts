@@ -6,10 +6,8 @@ import type { SkirmishConfig } from '../session/types';
 
 export interface SelectionSummary {
   total: number;
-  peasants: number;
-  spearmen: number;
-  archers: number;
-  knights: number;
+  byKind: Record<number, number>; // UnitKind -> count; new units appear automatically
+  hasCombat: boolean; // any selected unit can attack (gates the stance buttons)
   avgHp: number; // 0..1
 }
 
@@ -39,10 +37,8 @@ interface GameUIState {
 
 const EMPTY_SELECTION: SelectionSummary = {
   total: 0,
-  peasants: 0,
-  spearmen: 0,
-  archers: 0,
-  knights: 0,
+  byKind: {},
+  hasCombat: false,
   avgHp: 1,
 };
 

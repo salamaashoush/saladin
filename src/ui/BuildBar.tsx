@@ -6,7 +6,6 @@ import {
   RESOURCE_DEFS,
   ResourceType,
   BuildingKind,
-  UnitKind,
   canAfford,
   hasPrereq,
   type ResourceCost,
@@ -26,32 +25,6 @@ interface BuildBarProps {
 }
 
 const MARKET_LOT = 20; // resources sold per market click
-
-const BUILD_ICONS: Record<number, string> = {
-  [BuildingKind.Wall]: '🧱',
-  [BuildingKind.Gatehouse]: '🚪',
-  [BuildingKind.Tower]: '🗼',
-  [BuildingKind.House]: '🏠',
-  [BuildingKind.Barracks]: '🏛️',
-  [BuildingKind.Stable]: '🐴',
-  [BuildingKind.Blacksmith]: '⚒️',
-  [BuildingKind.Market]: '🏪',
-  [BuildingKind.Granary]: '🌾',
-  [BuildingKind.FishingHut]: '🎣',
-  [BuildingKind.SiegeWorkshop]: '🛠️',
-};
-
-const UNIT_ICONS: Record<number, string> = {
-  [UnitKind.Peasant]: '🧑‍🌾',
-  [UnitKind.Spearman]: '🛡️',
-  [UnitKind.Archer]: '🏹',
-  [UnitKind.Knight]: '🐎',
-  [UnitKind.HorseArcher]: '🐎',
-  [UnitKind.Mamluk]: '🗡️',
-  [UnitKind.Crossbowman]: '🎯',
-  [UnitKind.Ram]: '🪵',
-  [UnitKind.Mangonel]: '💥',
-};
 
 interface ToolProps {
   icon: string;
@@ -181,7 +154,7 @@ export function BuildBar({
               return (
                 <Tool
                   key={kind}
-                  icon={UNIT_ICONS[kind]}
+                  icon={u.icon}
                   label={u.label}
                   cost={u.cost}
                   disabled={!canAfford(stock, u.cost)}
@@ -229,7 +202,7 @@ export function BuildBar({
             return (
               <Tool
                 key={kind}
-                icon={BUILD_ICONS[kind]}
+                icon={d.icon}
                 label={d.label}
                 cost={d.cost}
                 active={active}

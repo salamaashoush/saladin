@@ -1,4 +1,4 @@
-import { Stance } from '../../shared/index.ts';
+import { Stance, UNIT_DEFS, type UnitKind } from '../../shared/index.ts';
 import { useGameStore } from '../store/gameStore';
 import styles from './CommandCard.module.css';
 
@@ -19,16 +19,12 @@ export function CommandCard({
   const hpColor =
     sel.avgHp > 0.5 ? '#5b8a3a' : sel.avgHp > 0.25 ? '#c9a227' : '#b6402f';
 
-  const rows: Array<[string, number]> = (
-    [
-      ['🧑‍🌾 Peasants', sel.peasants],
-      ['🛡️ Spearmen', sel.spearmen],
-      ['🏹 Archers', sel.archers],
-      ['🐎 Knights', sel.knights],
-    ] as Array<[string, number]>
-  ).filter(([, n]) => n > 0);
-
-  const soldiers = sel.spearmen + sel.archers + sel.knights;
+  // One row per selected UnitKind, ordered by the roster enum, labelled and
+  // iconed straight from UNIT_DEFS — new units appear with no edits here.
+  const rows = Object.entries(sel.byKind)
+    .map(([kind, count]) => ({ kind: Number(kind) as UnitKind, count }))
+    .filter((r) => r.count > 0 && UNIT_DEFS[r.kind])
+    .sort((a, b) => a.kind - b.kind);
 
   return (
     <div className={styles.card}>
@@ -37,14 +33,19 @@ export function CommandCard({
         {sel.total} unit{sel.total > 1 ? 's' : ''}
       </div>
       <div className={styles.rows}>
-        {rows.map(([k, v]) => (
-          <div className={styles.row} key={k}>
-            <span className={styles.k}>{k}</span>
-            <span className={styles.v}>{v}</span>
-          </div>
-        ))}
+        {rows.map(({ kind, count }) => {
+          const def = UNIT_DEFS[kind];
+          return (
+            <div className={styles.row} key={kind}>
+              <span className={styles.k}>
+                {def.icon} {def.label}
+              </span>
+              <span className={styles.v}>{count}</span>
+            </div>
+          );
+        })}
       </div>
-      {soldiers > 0 && (
+      {sel.hasCombat && (
         <div className={styles.stances}>
           {STANCES.map(([s, icon, label]) => (
             <button

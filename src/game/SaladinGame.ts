@@ -727,36 +727,19 @@ export class SaladinGame {
   // ── selection + commands ────────────────────────────────────────────────────
 
   private emitSelection() {
-    let peasants = 0;
-    let spearmen = 0;
-    let archers = 0;
-    let knights = 0;
+    // Tally per UnitKind so the card stays data-driven: any new roster entry
+    // shows up with its own label/icon without touching this loop.
+    const byKind: Record<number, number> = {};
+    let hasCombat = false;
     let hpSum = 0;
     let n = 0;
     for (const [id, o] of this.objs) {
       const sel = this.selected.has(id);
       if (o.selRing) o.selRing.visible = sel;
       if (!sel) continue;
-      // Bucket the expanded roster into the card's four rows by role so new
-      // units never get miscounted as peasants: ranged → archers, cavalry/siege
-      // → knights, other melee → spearmen, non-combatants → peasants.
+      byKind[o.kind] = (byKind[o.kind] ?? 0) + 1;
       const def = UNIT_DEFS[o.kind as UnitKind];
-      if (o.kind === UnitKind.Spearman) spearmen++;
-      else if (
-        o.kind === UnitKind.Archer ||
-        o.kind === UnitKind.Crossbowman ||
-        o.kind === UnitKind.HorseArcher
-      )
-        archers++;
-      else if (
-        o.kind === UnitKind.Knight ||
-        o.kind === UnitKind.Mamluk ||
-        o.kind === UnitKind.Ram ||
-        o.kind === UnitKind.Mangonel
-      )
-        knights++;
-      else if (def && def.attack > 0) spearmen++;
-      else peasants++;
+      if (def && def.attack > 0) hasCombat = true;
       if (o.maxHp > 0) {
         hpSum += o.hp / o.maxHp;
         n++;
@@ -764,10 +747,8 @@ export class SaladinGame {
     }
     useGameStore.getState().setSelection({
       total: this.selected.size,
-      peasants,
-      spearmen,
-      archers,
-      knights,
+      byKind,
+      hasCombat,
       avgHp: n > 0 ? hpSum / n : 1,
     });
   }
