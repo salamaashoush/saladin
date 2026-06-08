@@ -5,7 +5,7 @@ import * as THREE from 'three';
 import {
   WORLD_SIZE,
   sampleTerrain,
-  elevation,
+  renderHeight,
   BIOME_COLOR,
 } from '../../shared/index.ts';
 
@@ -16,7 +16,7 @@ export interface TerrainBuild {
 const CHUNK = 24; // tiles per chunk side
 
 export function terrainHeight(seed: number, x: number, z: number): number {
-  return elevation(sampleTerrain(seed, x, z).height);
+  return renderHeight(sampleTerrain(seed, x, z).height);
 }
 
 function buildChunk(
@@ -38,7 +38,7 @@ function buildChunk(
       const s = sampleTerrain(seed, x, z);
       const idx = (j * V + i) * 3;
       positions[idx] = x;
-      positions[idx + 1] = elevation(s.height);
+      positions[idx + 1] = renderHeight(s.height);
       positions[idx + 2] = z;
       c.setHex(BIOME_COLOR[s.biome]);
       colors[idx] = c.r;

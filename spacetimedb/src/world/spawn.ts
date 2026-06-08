@@ -1,6 +1,5 @@
 import { Identity } from 'spacetimedb';
 import {
-  WORLD_SIZE,
   START_PEASANTS,
   START_WOOD,
   START_STONE,
@@ -15,12 +14,11 @@ import {
   PLAYER_COLORS,
   AI_PROFILES,
   NODE_KINDS,
-  type NodeKindDef,
   aiName,
   spawnCorner,
   allocSlot,
 } from '../../../shared/defs.ts';
-import { sampleTerrain, isLand, isCoastal } from '../../../shared/terrain.ts';
+import { scatterNodes as scatterNodesPure } from '../../../shared/terrain.ts';
 import { findBuildableNear } from '../../../shared/buildings.ts';
 import {
   UnitKind,
@@ -102,32 +100,14 @@ function spawnNode(
   ctx.db.resourceNode.insert({ entityId: e.entityId, resType, remaining });
 }
 
-// Rejection-sample one node kind across the map by its per-biome density. Nodes
-// only land on reachable ground: coastal-only kinds (fish) hug the shore, every
-// other kind sits on passable land so a harvester can always reach it.
-function scatterKind(ctx: any, seed: number, def: NodeKindDef): void {
-  let placed = 0;
-  let attempts = 0;
-  const budget = Math.max(60, def.count) * 80;
-  while (placed < def.count && attempts < budget) {
-    attempts++;
-    const x = 3 + ctx.random() * (WORLD_SIZE - 6);
-    const y = 3 + ctx.random() * (WORLD_SIZE - 6);
-    const reachable = def.coastalOnly
-      ? isCoastal(seed, x, y)
-      : isLand(seed, x, y);
-    if (!reachable) continue;
-    if (ctx.random() < def.density(sampleTerrain(seed, x, y).biome)) {
-      spawnNode(ctx, x, y, def.resType, def.yield);
-      placed++;
-    }
-  }
-}
-
 // Scatter every resource node kind across the map. Shared by init and match
-// reset. Data-driven from NODE_KINDS — new node kinds need no code here.
+// reset. Positions come from the seeded pure worldgen (shared/terrain.ts) — NOT
+// ctx.random — so they are reproducible across restarts and the client could
+// recompute them. Data-driven from NODE_KINDS: new node kinds need no code here.
 export function scatterNodes(ctx: any, seed: number): void {
-  for (const def of NODE_KINDS) scatterKind(ctx, seed, def);
+  for (const n of scatterNodesPure(seed, NODE_KINDS)) {
+    spawnNode(ctx, n.x, n.y, n.resType, n.yield);
+  }
 }
 
 // Found a new base for `owner`: keep at the next free corner, starting peasants

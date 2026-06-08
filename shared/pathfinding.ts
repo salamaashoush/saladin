@@ -15,6 +15,12 @@ export type Passable = (tx: number, ty: number) => boolean;
 const W = WORLD_SIZE;
 const SQRT2 = 1.4142135623730951;
 
+// Worst-case A* expansions: a long route forced to detour around water can touch
+// most of the grid before reaching the goal. Cap at the full tile count so a
+// valid long path on the 144² map is never abandoned mid-search. (At 96² this
+// was a hard-coded 6000, which is below the 20 736 tiles a 144² map holds.)
+const MAX_EXPANSIONS = W * W;
+
 // ── terrain-backed wrappers ───────────────────────────────────────────────────
 
 export function isPassable(seed: number, tx: number, ty: number): boolean {
@@ -32,7 +38,7 @@ export function findPath(
   sy: number,
   tx: number,
   ty: number,
-  maxExpansions = 6000
+  maxExpansions = MAX_EXPANSIONS
 ): PathPoint[] {
   return findPathGrid(
     (px, py) => isPassable(seed, px, py),
@@ -140,7 +146,7 @@ export function findPathGrid(
   sy: number,
   tx: number,
   ty: number,
-  maxExpansions = 6000
+  maxExpansions = MAX_EXPANSIONS
 ): PathPoint[] {
   const s = nearestPassableGrid(passable, sx, sy);
   const goal = nearestPassableGrid(passable, tx, ty);

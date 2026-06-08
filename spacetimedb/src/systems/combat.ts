@@ -17,10 +17,15 @@ import {
   combatAction,
   DEFENSIVE_LEASH,
 } from '../../../shared/combat.ts';
+import {
+  elevation,
+  elevationRangeBonus,
+  ELEV_BONUS_MAX,
+} from '../../../shared/elevation.ts';
 import { spacetimedb } from '../schema/db.ts';
 import { combatTimer } from '../schema/tables.ts';
 import { scheduleRefs } from '../schema/schedule_refs.ts';
-import { dist } from '../world/util.ts';
+import { dist, getSeed } from '../world/util.ts';
 import { movePatch } from '../world/placement.ts';
 import { markDefeated } from '../world/spawn.ts';
 
@@ -48,6 +53,7 @@ function enemyUnitsAround(
 export const combatTick = spacetimedb.reducer(
   { timer: combatTimer.rowType },
   (ctx) => {
+    const seed = getSeed(ctx);
     const units = [...ctx.db.unit.iter()];
     for (const snap of units) {
       // Re-fetch every iteration: a unit (or its target) killed earlier this
@@ -90,7 +96,13 @@ export const combatTick = spacetimedb.reducer(
         ? (BUILDING_DEFS[tb.kind as BuildingKindT]?.footprint ?? 1) / 2
         : 0;
       const d = dist(e.x, e.y, te.x, te.y);
-      if (d <= def.range + targetR) {
+      // High ground extends a ranged unit's reach (and shortens it shooting
+      // uphill). Melee reach (range ~1) is barely affected; archers gain the most.
+      const elevMul = elevationRangeBonus(
+        elevation(seed, e.x, e.y),
+        elevation(seed, te.x, te.y)
+      );
+      if (d <= def.range * elevMul + targetR) {
         if (cd > 0) {
           ctx.db.unit.entityId.update({
             ...u,
@@ -172,8 +184,15 @@ export const combatTick = spacetimedb.reducer(
       if (!be) continue;
       const cd = Math.max(0, b.cooldown - COMBAT_DT);
       const enemies = enemyUnitsAround(ctx, units, b.owner, 0n);
-      const near = nearestWithin(be.x, be.y, enemies, bdef.range);
-      const fresh = near ? ctx.db.unit.entityId.find(near.id) : null;
+      // Search out to the best-case elevation reach, then confirm the chosen
+      // target is within this tower's range adjusted for THIS target's elevation.
+      const towerElev = elevation(seed, be.x, be.y);
+      const near = nearestWithin(be.x, be.y, enemies, bdef.range * (1 + ELEV_BONUS_MAX));
+      const inElevRange =
+        near != null &&
+        dist(be.x, be.y, near.x, near.y) <=
+          bdef.range * elevationRangeBonus(towerElev, elevation(seed, near.x, near.y));
+      const fresh = near && inElevRange ? ctx.db.unit.entityId.find(near.id) : null;
       if (near && fresh && cd <= 0) {
         ctx.db.shot.insert({ fromX: be.x, fromY: be.y, toX: near.x, toY: near.y });
         const newHp = applyDamage(

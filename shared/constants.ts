@@ -1,7 +1,7 @@
 // Single source of truth for sim + render. Imported by the SpacetimeDB module
 // (authoritative) and the Three.js client (render/interpolation).
 
-export const WORLD_SIZE = 96; // world units == grid tiles (TILE = 1)
+export const WORLD_SIZE = 144; // world units == grid tiles (TILE = 1)
 export const TILE = 1;
 
 // Two scheduled reducers at different rates: smooth movement, slower AI.
@@ -23,14 +23,15 @@ export const HARVEST_TIME = 1.2; // seconds to fill one carry load
 
 // Resource node counts scattered per map, and how much each node holds. Wood is
 // the staple (forests), the rest sparser. Yields feed scatterNodes + the client
-// scale curve.
-export const TREE_COUNT = 240;
+// scale curve. Counts scale ~with map area (144²/96² ≈ 2.25×) so density stays
+// roughly constant as the map grows.
+export const TREE_COUNT = 540;
 export const TREE_WOOD = 120;
-export const STONE_NODES = 60;
+export const STONE_NODES = 135;
 export const STONE_YIELD = 200;
-export const GOLD_NODES = 18;
+export const GOLD_NODES = 40;
 export const GOLD_YIELD = 140;
-export const FOOD_NODES = 40;
+export const FOOD_NODES = 90;
 export const FOOD_YIELD = 160;
 
 // Food economy: every owned unit eats FOOD_PER_UNIT per economy tick. When the
@@ -50,5 +51,5 @@ export const START_GOLD = 0;
 export const PEASANT_COST = 20;
 
 export const MAX_PLAYERS = 4;
-export const SPAWN_MARGIN = 16;
+export const SPAWN_MARGIN = 24; // scales with WORLD_SIZE — keeps keeps off the coast
 export const SPAWN_CLUSTER = 2.2;
