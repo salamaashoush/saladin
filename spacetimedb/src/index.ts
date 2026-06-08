@@ -57,6 +57,7 @@ import {
   nearestWithin,
   type Located,
 } from '../../shared/sim.ts';
+import { effectiveDamage } from '../../shared/combat.ts';
 import { sampleTerrain, treeDensity } from '../../shared/terrain.ts';
 import {
   isPassable,
@@ -1180,7 +1181,13 @@ export const combatTick = spacetimedb.reducer(
           });
           continue;
         }
-        const newHp = applyDamage(tu ? tu.hp : tb!.hp, def.attack);
+        const targetArmor = tu
+          ? UNIT_DEFS[tu.kind as UnitKindT].armorClass
+          : BUILDING_DEFS[tb!.kind as BuildingKindT].armorClass;
+        const newHp = applyDamage(
+          tu ? tu.hp : tb!.hp,
+          effectiveDamage(def, targetArmor)
+        );
         if (newHp <= 0) {
           if (tu) ctx.db.unit.entityId.delete(targetId);
           else {
@@ -1233,7 +1240,13 @@ export const combatTick = spacetimedb.reducer(
       const fresh = near ? ctx.db.unit.entityId.find(near.id) : null;
       if (near && fresh && cd <= 0) {
         ctx.db.shot.insert({ fromX: be.x, fromY: be.y, toX: near.x, toY: near.y });
-        const newHp = applyDamage(fresh.hp, bdef.attack);
+        const newHp = applyDamage(
+          fresh.hp,
+          effectiveDamage(
+            { attack: bdef.attack, damageType: bdef.damageType },
+            UNIT_DEFS[fresh.kind as UnitKindT].armorClass
+          )
+        );
         if (newHp <= 0) {
           ctx.db.unit.entityId.delete(fresh.entityId);
           ctx.db.entity.entityId.delete(fresh.entityId);
@@ -1308,8 +1321,13 @@ export const aiBrain = spacetimedb.reducer(
           soldiers.length < prof.armyTarget &&
           pop.pop < pop.cap
         ) {
+          const roll = ctx.random();
           const kind =
-            ctx.random() < prof.archerRatio ? UnitKind.Archer : UnitKind.Spearman;
+            roll < prof.knightRatio
+              ? UnitKind.Knight
+              : roll < prof.knightRatio + prof.archerRatio
+                ? UnitKind.Archer
+                : UnitKind.Spearman;
           trainFrom(ctx, owner, barracks, kind);
         } else if (
           towers < prof.maxTowers &&

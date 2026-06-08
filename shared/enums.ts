@@ -1,7 +1,15 @@
 // Numeric enums stored as u8 columns in the module, shared with the client.
 
-export const UnitKind = { Peasant: 0, Spearman: 1, Archer: 2 } as const;
+export const UnitKind = { Peasant: 0, Spearman: 1, Archer: 2, Knight: 3 } as const;
 export type UnitKind = (typeof UnitKind)[keyof typeof UnitKind];
+
+// How an attack interacts with armor. The damage matrix turns these into the
+// rock-paper-scissors of the battlefield.
+export const DamageType = { Slash: 0, Pierce: 1, Blunt: 2, Siege: 3 } as const;
+export type DamageType = (typeof DamageType)[keyof typeof DamageType];
+
+export const ArmorClass = { Unarmored: 0, Leather: 1, Mail: 2, Stone: 3 } as const;
+export type ArmorClass = (typeof ArmorClass)[keyof typeof ArmorClass];
 
 export const BuildingKind = {
   Keep: 0,

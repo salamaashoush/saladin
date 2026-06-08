@@ -6,6 +6,8 @@ import {
   UnitKind,
   BuildingKind,
   ResourceType,
+  DamageType,
+  ArmorClass,
   type Faction,
 } from './enums.ts';
 import type { Vec2 } from './sim.ts';
@@ -17,7 +19,10 @@ export interface UnitDef {
   radius: number;
   height: number;
   maxHp: number;
-  attack: number; // damage per hit (0 = non-combatant)
+  attack: number; // base damage per hit (0 = non-combatant)
+  damageType: DamageType;
+  armorClass: ArmorClass;
+  bonusVsArmor?: Partial<Record<ArmorClass, number>>; // specialist counter
   range: number; // attack reach in world units
   attackRate: number; // seconds between hits
   aggroRange: number; // auto-acquire enemies within (0 = never auto-aggro)
@@ -34,6 +39,8 @@ export const UNIT_DEFS: Record<UnitKind, UnitDef> = {
     height: 0.7,
     maxHp: 30,
     attack: 0,
+    damageType: DamageType.Blunt,
+    armorClass: ArmorClass.Unarmored,
     range: 0.8,
     attackRate: 1.2,
     aggroRange: 0,
@@ -47,7 +54,10 @@ export const UNIT_DEFS: Record<UnitKind, UnitDef> = {
     height: 0.85,
     maxHp: 70,
     attack: 12,
-    range: 1.0,
+    damageType: DamageType.Pierce,
+    armorClass: ArmorClass.Leather,
+    bonusVsArmor: { [ArmorClass.Mail]: 2.6 }, // braced against mailed cavalry
+    range: 1.2, // long reach — outranges a knight's blade
     attackRate: 1.0,
     aggroRange: 6,
     cost: 35,
@@ -61,11 +71,29 @@ export const UNIT_DEFS: Record<UnitKind, UnitDef> = {
     height: 0.8,
     maxHp: 45,
     attack: 9,
+    damageType: DamageType.Pierce,
+    armorClass: ArmorClass.Leather,
     range: 5,
     attackRate: 1.4,
     aggroRange: 7,
     cost: 45,
     tint: 0x5a3a1a,
+  },
+  [UnitKind.Knight]: {
+    label: 'Knight',
+    speed: 3.4, // fast — runs down archers
+    carry: 0,
+    radius: 0.3,
+    height: 1.0,
+    maxHp: 130,
+    attack: 17,
+    damageType: DamageType.Slash, // shreds unarmored/leather, glances mail
+    armorClass: ArmorClass.Mail, // shrugs off arrows, but spears punch through
+    range: 1.0,
+    attackRate: 1.1,
+    aggroRange: 7,
+    cost: 90,
+    tint: 0x9a8050,
   },
 };
 
@@ -78,6 +106,8 @@ export interface BuildingDef {
   buildable: boolean;
   pop: number; // population capacity provided
   attack: number; // tower fire damage (0 = not a shooter)
+  damageType: DamageType; // tower fire type
+  armorClass: ArmorClass; // how the structure resists damage
   range: number; // tower fire range
   attackRate: number; // seconds between shots
   passable: boolean; // units may walk through (gatehouse)
@@ -101,6 +131,8 @@ const B = (
   buildable,
   pop: 0,
   attack: 0,
+  damageType: DamageType.Pierce,
+  armorClass: ArmorClass.Stone,
   range: 0,
   attackRate: 0,
   passable: false,
@@ -114,7 +146,8 @@ export const BUILDING_DEFS: Record<BuildingKind, BuildingDef> = {
     trains: [UnitKind.Peasant],
   }),
   [BuildingKind.Barracks]: B('Barracks', 2, 1.4, 80, 500, true, {
-    trains: [UnitKind.Spearman, UnitKind.Archer],
+    trains: [UnitKind.Spearman, UnitKind.Archer, UnitKind.Knight],
+    armorClass: ArmorClass.Leather, // timber hall — chops faster than stone
   }),
   [BuildingKind.Tower]: B('Tower', 1, 2.6, 60, 400, true, {
     attack: 9,
@@ -125,7 +158,10 @@ export const BUILDING_DEFS: Record<BuildingKind, BuildingDef> = {
   [BuildingKind.Gatehouse]: B('Gatehouse', 1, 1.5, 25, 400, true, {
     passable: true,
   }),
-  [BuildingKind.House]: B('House', 2, 1.2, 40, 250, true, { pop: 6 }),
+  [BuildingKind.House]: B('House', 2, 1.2, 40, 250, true, {
+    pop: 6,
+    armorClass: ArmorClass.Leather,
+  }),
 };
 
 export const BUILD_CATEGORIES: { label: string; icon: string; kinds: BuildingKind[] }[] = [
@@ -167,14 +203,15 @@ export interface AiProfile {
   maxTowers: number; // defensive towers near the keep
   woodBuffer: number; // reserve kept before optional (tower) spends
   archerRatio: number; // 0..1 share of soldiers trained as archers
+  knightRatio: number; // 0..1 share trained as (expensive) knights
 }
 
 export const AiDifficulty = { Easy: 0, Normal: 1, Hard: 2 } as const;
 
 export const AI_PROFILES: Record<number, AiProfile> = {
-  0: { label: 'Easy', peasantTarget: 6, armyTarget: 6, waveSize: 4, waveInterval: 45, firstWaveDelay: 60, maxTowers: 1, woodBuffer: 30, archerRatio: 0.3 },
-  1: { label: 'Normal', peasantTarget: 8, armyTarget: 10, waveSize: 6, waveInterval: 35, firstWaveDelay: 45, maxTowers: 2, woodBuffer: 40, archerRatio: 0.4 },
-  2: { label: 'Hard', peasantTarget: 10, armyTarget: 14, waveSize: 8, waveInterval: 25, firstWaveDelay: 30, maxTowers: 3, woodBuffer: 50, archerRatio: 0.5 },
+  0: { label: 'Easy', peasantTarget: 6, armyTarget: 6, waveSize: 4, waveInterval: 45, firstWaveDelay: 60, maxTowers: 1, woodBuffer: 30, archerRatio: 0.3, knightRatio: 0.0 },
+  1: { label: 'Normal', peasantTarget: 8, armyTarget: 10, waveSize: 6, waveInterval: 35, firstWaveDelay: 45, maxTowers: 2, woodBuffer: 40, archerRatio: 0.35, knightRatio: 0.2 },
+  2: { label: 'Hard', peasantTarget: 10, armyTarget: 14, waveSize: 8, waveInterval: 25, firstWaveDelay: 30, maxTowers: 3, woodBuffer: 50, archerRatio: 0.4, knightRatio: 0.3 },
 };
 
 // Themed commanders per faction, assigned to AIs in join order.

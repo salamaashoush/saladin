@@ -735,6 +735,57 @@ export class SaladinGame {
       quiver.position.set(r * 0.6, h * 0.95, -r * 0.4);
       quiver.rotation.x = 0.35;
       pivot.add(quiver);
+    } else if (kind === UnitKind.Knight) {
+      const horse = new THREE.MeshStandardMaterial({
+        color: 0x5a4632,
+        flatShading: true,
+      });
+      const body = new THREE.Mesh(
+        new THREE.BoxGeometry(r * 0.9, h * 0.4, h * 1.1),
+        horse
+      );
+      body.position.set(0, h * 0.3, 0);
+      body.castShadow = true;
+      pivot.add(body);
+      const neck = new THREE.Mesh(
+        new THREE.BoxGeometry(r * 0.5, h * 0.45, r * 0.5),
+        horse
+      );
+      neck.position.set(0, h * 0.52, h * 0.48);
+      neck.rotation.x = -0.5;
+      pivot.add(neck);
+      const hhead = new THREE.Mesh(
+        new THREE.BoxGeometry(r * 0.45, r * 0.5, h * 0.4),
+        horse
+      );
+      hhead.position.set(0, h * 0.68, h * 0.66);
+      pivot.add(hhead);
+      for (const sx of [-1, 1] as const)
+        for (const sz of [-1, 1] as const) {
+          const leg = new THREE.Mesh(
+            new THREE.CylinderGeometry(r * 0.12, r * 0.12, h * 0.34, 5),
+            horse
+          );
+          leg.position.set(sx * r * 0.32, h * 0.12, sz * h * 0.42);
+          pivot.add(leg);
+        }
+      const helm = new THREE.Mesh(
+        new THREE.ConeGeometry(r * 0.7, r * 0.7, 8),
+        metal
+      );
+      helm.position.y = h * 1.26;
+      pivot.add(helm);
+      const lance = new THREE.Mesh(
+        new THREE.CylinderGeometry(0.035, 0.035, h * 2.8, 5),
+        wood
+      );
+      lance.position.set(r * 1.0, h * 1.05, h * 0.2);
+      lance.rotation.x = 0.18;
+      pivot.add(lance);
+      const ltip = new THREE.Mesh(new THREE.ConeGeometry(0.08, 0.3, 6), metal);
+      ltip.position.set(r * 1.0, h * 1.05, h * 1.55);
+      ltip.rotation.x = Math.PI / 2;
+      pivot.add(ltip);
     } else {
       const cap = new THREE.Mesh(new THREE.ConeGeometry(r * 0.72, r * 0.55, 7), wood);
       cap.position.y = h * 1.2;

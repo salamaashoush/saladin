@@ -28,6 +28,7 @@ const UNIT_ICONS: Record<number, string> = {
   [UnitKind.Peasant]: '🧑‍🌾',
   [UnitKind.Spearman]: '🛡️',
   [UnitKind.Archer]: '🏹',
+  [UnitKind.Knight]: '🐎',
 };
 
 interface ToolProps {
