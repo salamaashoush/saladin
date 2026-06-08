@@ -12,6 +12,7 @@ import {
 
 export const Ai = __t.object("Ai", {
   identity: __t.identity(),
+  host: __t.identity(),
   difficulty: __t.u8(),
   decisionCd: __t.f32(),
   waveTimer: __t.f32(),
@@ -52,6 +53,7 @@ export const Config = __t.object("Config", {
   worldSize: __t.u32(),
   seed: __t.u32(),
   initialized: __t.bool(),
+  nextBotId: __t.u64(),
 });
 export type Config = __Infer<typeof Config>;
 
@@ -85,6 +87,7 @@ export const Player = __t.object("Player", {
   online: __t.bool(),
   keepEntity: __t.u64(),
   defeated: __t.bool(),
+  slot: __t.u8(),
 });
 export type Player = __Infer<typeof Player>;
 
@@ -124,4 +127,10 @@ export const Unit = __t.object("Unit", {
   pathIdx: __t.u32(),
 });
 export type Unit = __Infer<typeof Unit>;
+
+export const WallTile = __t.object("WallTile", {
+  x: __t.f32(),
+  y: __t.f32(),
+});
+export type WallTile = __Infer<typeof WallTile>;
 

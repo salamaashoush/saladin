@@ -43,6 +43,7 @@ import GatherResourceReducer from "./gather_resource_reducer";
 import LeaveGameReducer from "./leave_game_reducer";
 import MoveUnitReducer from "./move_unit_reducer";
 import PlaceBuildingReducer from "./place_building_reducer";
+import PlaceWallReducer from "./place_wall_reducer";
 import SetRallyReducer from "./set_rally_reducer";
 import StartSkirmishReducer from "./start_skirmish_reducer";
 import TrainUnitReducer from "./train_unit_reducer";
@@ -66,6 +67,9 @@ const tablesSchema = __schema({
   ai: __table({
     name: 'ai',
     indexes: [
+      { accessor: 'host', name: 'ai_host_idx_btree', algorithm: 'btree', columns: [
+        'host',
+      ] },
       { accessor: 'identity', name: 'ai_identity_idx_btree', algorithm: 'btree', columns: [
         'identity',
       ] },
@@ -171,6 +175,7 @@ const reducersSchema = __reducers(
   __reducerSchema("leave_game", LeaveGameReducer),
   __reducerSchema("move_unit", MoveUnitReducer),
   __reducerSchema("place_building", PlaceBuildingReducer),
+  __reducerSchema("place_wall", PlaceWallReducer),
   __reducerSchema("set_rally", SetRallyReducer),
   __reducerSchema("start_skirmish", StartSkirmishReducer),
   __reducerSchema("train_unit", TrainUnitReducer),

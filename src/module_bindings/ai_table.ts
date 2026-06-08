@@ -12,6 +12,7 @@ import {
 
 export default __t.row({
   identity: __t.identity().primaryKey(),
+  host: __t.identity(),
   difficulty: __t.u8(),
   decisionCd: __t.f32().name("decision_cd"),
   waveTimer: __t.f32().name("wave_timer"),

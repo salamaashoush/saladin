@@ -10,10 +10,12 @@ import {
   type Infer as __Infer,
 } from "spacetimedb";
 
-export default __t.row({
-  id: __t.u32().primaryKey(),
-  worldSize: __t.u32().name("world_size"),
-  seed: __t.u32(),
-  initialized: __t.bool(),
-  nextBotId: __t.u64().name("next_bot_id"),
-});
+import {
+  WallTile,
+} from "./types";
+
+export default {
+  get tiles() {
+    return __t.array(WallTile);
+  },
+};

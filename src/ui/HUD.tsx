@@ -19,6 +19,7 @@ export interface HUDProps {
   onDemolish: (id: string) => void;
   onGatherAll: () => void;
   onAddAi: () => void;
+  onLeave: () => void;
   onMinimapCanvas: (c: HTMLCanvasElement | null) => void;
   onMinimapClick: (x: number, y: number) => void;
 }
@@ -38,9 +39,14 @@ export function HUD(props: HUDProps) {
       <Toasts />
 
       {props.ready && (
-        <button className={styles.addAi} onClick={props.onAddAi}>
-          ⚔ Add AI Opponent
-        </button>
+        <div className={styles.topRight}>
+          <button className={styles.addAi} onClick={props.onAddAi}>
+            ⚔ Add AI Opponent
+          </button>
+          <button className={styles.leave} onClick={props.onLeave}>
+            ⮌ Leave Match
+          </button>
+        </div>
       )}
 
       <div className={styles.bottomBar}>

@@ -20,4 +20,5 @@ export default __t.row({
   online: __t.bool(),
   keepEntity: __t.u64().name("keep_entity"),
   defeated: __t.bool(),
+  slot: __t.u8(),
 });

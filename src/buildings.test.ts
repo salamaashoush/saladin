@@ -3,10 +3,14 @@ import {
   footprintTiles,
   footprintCenter,
   canPlace,
+  occupancySet,
   BuildingKind,
+  WORLD_SIZE,
   findPathGrid,
   type Passable,
 } from '../shared/index.ts';
+
+const key = (tx: number, ty: number) => ty * WORLD_SIZE + tx;
 
 describe('footprints', () => {
   it('covers 1 / 4 / 9 tiles for footprint 1 / 2 / 3', () => {
@@ -22,6 +26,33 @@ describe('footprints', () => {
   it('odd footprint centres on the tile centre', () => {
     expect(footprintCenter(3, 10.6, 10.2)).toEqual({ x: 10.5, y: 10.5 });
     expect(footprintCenter(1, 10.6, 10.2)).toEqual({ x: 10.5, y: 10.5 });
+  });
+
+  it('even footprint centres between tiles (barracks/house path)', () => {
+    // footprint 2 at clicked (10.6,10.2): tiles {9,10}, centre is the shared edge
+    expect(footprintCenter(2, 10.6, 10.2)).toEqual({ x: 10, y: 10 });
+  });
+});
+
+describe('occupancySet', () => {
+  it('stamps every footprint tile of a solid building', () => {
+    const occ = occupancySet([{ kind: BuildingKind.Keep, x: 10, y: 10 }], false);
+    // keep footprint 3 -> 9 tiles centred on (10,10): {9,10,11}^2
+    expect(occ.size).toBe(9);
+    expect(occ.has(key(10, 10))).toBe(true);
+    expect(occ.has(key(9, 9))).toBe(true);
+  });
+
+  it('excludes passable buildings (gatehouse) for pathing but not placement', () => {
+    const items = [{ kind: BuildingKind.Gatehouse, x: 5, y: 5 }];
+    expect(occupancySet(items, false).has(key(5, 5))).toBe(false); // pathable
+    expect(occupancySet(items, true).has(key(5, 5))).toBe(true); // blocks placement
+  });
+
+  it('keeps solid buildings blocked in both modes', () => {
+    const items = [{ kind: BuildingKind.Wall, x: 7, y: 7 }];
+    expect(occupancySet(items, false).has(key(7, 7))).toBe(true);
+    expect(occupancySet(items, true).has(key(7, 7))).toBe(true);
   });
 });
 

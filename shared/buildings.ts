@@ -23,6 +23,31 @@ export function footprintTiles(footprint: number, x: number, y: number): Tile[] 
   return tiles;
 }
 
+export interface Occupant {
+  kind: BuildingKind;
+  x: number;
+  y: number;
+}
+
+// Tile keys (ty*WORLD_SIZE+tx) covered by a set of buildings. `includePassable`
+// false omits passable buildings (gatehouse) so units path through them; true
+// counts every footprint (placement: no stacking). One builder shared by the
+// module's pathing/placement occupancy and the client's ghost preview, so the
+// gatehouse rule can never diverge between them.
+export function occupancySet(
+  items: ReadonlyArray<Occupant>,
+  includePassable: boolean
+): Set<number> {
+  const s = new Set<number>();
+  for (const it of items) {
+    const def = BUILDING_DEFS[it.kind];
+    if (!includePassable && def.passable) continue;
+    for (const { tx, ty } of footprintTiles(def.footprint, it.x, it.y))
+      s.add(ty * WORLD_SIZE + tx);
+  }
+  return s;
+}
+
 // World-space centre of the footprint (average of tile centres) — where the
 // building model is placed.
 export function footprintCenter(

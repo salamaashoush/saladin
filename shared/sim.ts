@@ -44,6 +44,32 @@ export function inRange(d: number, range: number): boolean {
   return d <= range;
 }
 
+export interface Located {
+  id: bigint;
+  x: number;
+  y: number;
+}
+
+// Nearest candidate within `range` of (x,y), or null. Shared by the soldier and
+// tower target-acquisition loops so ranged/aggro selection lives in one place.
+export function nearestWithin(
+  x: number,
+  y: number,
+  candidates: ReadonlyArray<Located>,
+  range: number
+): Located | null {
+  let best: Located | null = null;
+  let bestD = Infinity;
+  for (const c of candidates) {
+    const d = Math.hypot(c.x - x, c.y - y);
+    if (d <= range && d < bestD) {
+      bestD = d;
+      best = c;
+    }
+  }
+  return best;
+}
+
 // Index of the nearest point to (px,py), or -1 if none.
 export function nearestIndex(
   px: number,

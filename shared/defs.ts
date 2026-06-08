@@ -211,6 +211,15 @@ export const MAX_AI_OPPONENTS = 3; // 4 corners total, one is the player
 
 export const PLAYER_COLORS = [0x2e7d32, 0xb71c1c, 0x1565c0, 0x6a1b9a];
 
+// Lowest free slot in [0, max) not present in `used`, else -1. Used to assign a
+// STABLE spawn corner per player so a leaver freeing a slot never causes two
+// players to share a corner (overlapping keeps).
+export function allocSlot(used: ReadonlyArray<number>, max: number): number {
+  const taken = new Set(used);
+  for (let s = 0; s < max; s++) if (!taken.has(s)) return s;
+  return -1;
+}
+
 // Deterministic spawn corner per joining player index.
 export function spawnCorner(
   index: number,

@@ -62,6 +62,7 @@ interface GameConn {
     gatherResource: (a: { entityId: bigint; nodeId: bigint }) => void;
     attackUnit: (a: { entityId: bigint; targetId: bigint }) => void;
     placeBuilding: (a: { kind: number; x: number; y: number }) => void;
+    placeWall: (a: { tiles: Array<{ x: number; y: number }> }) => void;
     demolishBuilding: (a: { entityId: bigint }) => void;
     setRally: (a: { entityId: bigint; x: number; y: number }) => void;
   };
@@ -1530,9 +1531,19 @@ export class SaladinGame {
 
   private commitBuild(hx: number, hz: number) {
     if (this.buildMode === null || !this.conn) return;
-    for (const { cx, cy } of this.buildCells(hx, hz))
-      if (this.placeValid(cx, cy))
-        this.conn.reducers.placeBuilding({ kind: this.buildMode, x: cx, y: cy });
+    const valid = this.buildCells(hx, hz).filter((c) =>
+      this.placeValid(c.cx, c.cy)
+    );
+    if (this.buildMode === BuildingKind.Wall) {
+      // One batched call for the whole dragged line — no per-tile reducer flood.
+      if (valid.length > 0)
+        this.conn.reducers.placeWall({
+          tiles: valid.map((c) => ({ x: c.cx, y: c.cy })),
+        });
+      return;
+    }
+    for (const { cx, cy } of valid)
+      this.conn.reducers.placeBuilding({ kind: this.buildMode, x: cx, y: cy });
   }
 
   private groundTile(e: PointerEvent): { hx: number; hz: number } | null {

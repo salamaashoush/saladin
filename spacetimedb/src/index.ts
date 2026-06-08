@@ -48,8 +48,15 @@ import {
   aiName,
   enemyFaction,
   spawnCorner,
+  allocSlot,
 } from '../../shared/defs.ts';
-import { stepToward, nearestIndex, applyDamage } from '../../shared/sim.ts';
+import {
+  stepToward,
+  nearestIndex,
+  applyDamage,
+  nearestWithin,
+  type Located,
+} from '../../shared/sim.ts';
 import { sampleTerrain, treeDensity } from '../../shared/terrain.ts';
 import {
   isPassable,
@@ -58,10 +65,11 @@ import {
   type Passable,
 } from '../../shared/pathfinding.ts';
 import {
-  footprintTiles,
   footprintCenter,
   canPlace,
   findBuildableNear,
+  occupancySet,
+  type Occupant,
 } from '../../shared/buildings.ts';
 import {
   UnitKind,
@@ -154,15 +162,18 @@ const player = table(
     online: t.bool(),
     keepEntity: t.u64(),
     defeated: t.bool(),
+    slot: t.u8(), // stable spawn-corner slot (0..MAX_PLAYERS-1)
   }
 );
 
 // Skirmish opponents. One row per AI player; the brain reducer iterates these.
-// decisionCd throttles macro actions; waveTimer gates assaults.
+// `host` is the human whose match this bot belongs to — teardown is scoped to it
+// so one player's reset never touches another's opponents.
 const ai = table(
   { name: 'ai', public: true },
   {
     identity: t.identity().primaryKey(),
+    host: t.identity().index('btree'),
     difficulty: t.u8(),
     decisionCd: t.f32(),
     waveTimer: t.f32(),
@@ -176,6 +187,7 @@ const config = table(
     worldSize: t.u32(),
     seed: t.u32(),
     initialized: t.bool(),
+    nextBotId: t.u64(), // monotonic source of unique bot identities
   }
 );
 
@@ -346,37 +358,25 @@ function hasBarracks(ctx: any, owner: any): boolean {
   return false;
 }
 
-// Route fields to merge into a unit update. Computes an A* path that avoids
-// water/mountains; callers spread the result. Computed only on (re)path, never
-// on the per-frame movement tick.
-// Tiles blocked by buildings (their footprints) — feeds the passability layer.
-function buildOccupancy(ctx: any): Set<number> {
-  const s = new Set<number>();
+// Resolve every building to its world position for the shared occupancy builder.
+function buildingOccupants(ctx: any): Occupant[] {
+  const items: Occupant[] = [];
   for (const b of [...ctx.db.building.iter()]) {
-    const def = BUILDING_DEFS[b.kind as BuildingKindT] ?? BUILDING_DEFS[BuildingKind.Keep];
-    if (def.passable) continue; // gatehouse — units walk through
     const e = ctx.db.entity.entityId.find(b.entityId);
-    if (!e) continue;
-    for (const { tx, ty } of footprintTiles(def.footprint, e.x, e.y))
-      s.add(ty * WORLD_SIZE + tx);
+    if (e) items.push({ kind: b.kind as BuildingKindT, x: e.x, y: e.y });
   }
-  return s;
+  return items;
 }
 
-// All building tiles incl. passable ones — used for PLACEMENT (no stacking),
-// unlike buildOccupancy which omits gatehouses so units can path through.
+// Tiles blocked for PATHING — passable buildings (gatehouse) excluded so units
+// walk through them.
+function buildOccupancy(ctx: any): Set<number> {
+  return occupancySet(buildingOccupants(ctx), false);
+}
+
+// Tiles blocked for PLACEMENT — every footprint incl. passable (no stacking).
 function allBuildingTiles(ctx: any): Set<number> {
-  const s = new Set<number>();
-  for (const b of [...ctx.db.building.iter()]) {
-    const e = ctx.db.entity.entityId.find(b.entityId);
-    if (!e) continue;
-    const f = (
-      BUILDING_DEFS[b.kind as BuildingKindT] ?? BUILDING_DEFS[BuildingKind.Keep]
-    ).footprint;
-    for (const { tx, ty } of footprintTiles(f, e.x, e.y))
-      s.add(ty * WORLD_SIZE + tx);
-  }
-  return s;
+  return occupancySet(buildingOccupants(ctx), true);
 }
 
 function passableWith(seed: number, occ: Set<number>): Passable {
@@ -440,9 +440,12 @@ function foundPlayer(
   name: string,
   faction: number
 ): bigint {
-  const index = [...ctx.db.player.iter()].length;
+  // Stable slot from the set of slots in use — survives leavers, so two players
+  // can never share a corner (overlapping keeps). Caller guards MAX_PLAYERS.
+  const used = [...ctx.db.player.iter()].map((p: any) => p.slot);
+  const slot = Math.max(0, allocSlot(used, MAX_PLAYERS));
   const seed = getSeed(ctx);
-  const corner = spawnCorner(index);
+  const corner = spawnCorner(slot);
   const base = findBuildableNear(
     seed,
     corner.x,
@@ -457,10 +460,11 @@ function foundPlayer(
     name,
     faction,
     wood: START_WOOD,
-    color: index % PLAYER_COLORS.length,
+    color: slot % PLAYER_COLORS.length,
     online: true,
     keepEntity: keepId,
     defeated: false,
+    slot,
   });
 
   const nodes = buildNodes(ctx);
@@ -491,26 +495,53 @@ function clearOwner(ctx: any, owner: any): void {
   if (ctx.db.player.identity.find(owner)) ctx.db.player.identity.delete(owner);
 }
 
-// Wipe the caller and every bot, then re-scatter a fresh forest — a blank map
-// ready for a new skirmish. Other human players (if any) are left untouched.
-function resetMatch(ctx: any, caller: any): void {
-  clearOwner(ctx, caller);
-  for (const bot of [...ctx.db.ai.iter()]) clearOwner(ctx, bot.identity);
-  for (const n of [...ctx.db.resourceNode.iter()]) {
-    ctx.db.resourceNode.entityId.delete(n.entityId);
-    ctx.db.entity.entityId.delete(n.entityId);
-  }
-  scatterTrees(ctx, getSeed(ctx), TREE_COUNT);
+// True if a human other than `caller` is in the world (bots have an ai row).
+function otherHumansPresent(ctx: any, caller: any): boolean {
+  for (const p of [...ctx.db.player.iter()])
+    if (!p.identity.equals(caller) && !ctx.db.ai.identity.find(p.identity))
+      return true;
+  return false;
 }
 
-// Spawn one bot at the next free corner with the given faction + difficulty.
-function spawnAi(ctx: any, difficulty: number, faction: Faction): void {
+// Tear down the caller's match: the caller plus only the bots they host — never
+// another human's opponents. Refresh the forest only when the caller is alone,
+// so a reset can't wipe resources out from under another human's match.
+function resetMatch(ctx: any, caller: any): void {
+  const alone = !otherHumansPresent(ctx, caller);
+  clearMatch(ctx, caller);
+  if (alone) {
+    for (const n of [...ctx.db.resourceNode.iter()]) {
+      ctx.db.resourceNode.entityId.delete(n.entityId);
+      ctx.db.entity.entityId.delete(n.entityId);
+    }
+    scatterTrees(ctx, getSeed(ctx), TREE_COUNT);
+  }
+}
+
+// The caller and the bots they host.
+function clearMatch(ctx: any, caller: any): void {
+  clearOwner(ctx, caller);
+  for (const bot of [...ctx.db.ai.iter()])
+    if (bot.host.equals(caller)) clearOwner(ctx, bot.identity);
+}
+
+// Spawn one bot for `host`'s match. Identity comes from a persistent monotonic
+// counter so it is globally unique and never reused across resets.
+function spawnAi(
+  ctx: any,
+  host: any,
+  difficulty: number,
+  faction: Faction
+): void {
   const diff = AI_PROFILES[difficulty] ? difficulty : 1;
-  const n = [...ctx.db.ai.iter()].length;
-  const botId = new Identity((1n << 255n) | BigInt(n + 1));
-  foundPlayer(ctx, botId, aiName(faction, n), faction);
+  const cfg = ctx.db.config.id.find(0);
+  const n = cfg ? cfg.nextBotId : 1n;
+  if (cfg) ctx.db.config.id.update({ ...cfg, nextBotId: n + 1n });
+  const botId = new Identity((1n << 255n) | n);
+  foundPlayer(ctx, botId, aiName(faction, Number(n)), faction);
   ctx.db.ai.insert({
     identity: botId,
+    host,
     difficulty: diff,
     decisionCd: 0,
     waveTimer: AI_PROFILES[diff].firstWaveDelay,
@@ -537,15 +568,23 @@ function trainFrom(ctx: any, owner: any, b: any, kind: number): string | null {
   const bx = be ? be.x : WORLD_SIZE / 2;
   const by = be ? be.y : WORLD_SIZE / 2;
   ctx.db.player.identity.update({ ...p, wood: p.wood - udef.cost });
-  const spawnX = clampWorld(bx + (ctx.random() - 0.5) * 2);
-  const spawnY = clampWorld(by + bdef.footprint / 2 + 0.8 + ctx.random());
-  const id = spawnUnitEntity(ctx, owner, kind, spawnX, spawnY);
+  // Snap the jittered spawn onto passable, unoccupied ground so a building hemmed
+  // in by water/walls never strands its trained units on an impassable tile.
+  const rawX = clampWorld(bx + (ctx.random() - 0.5) * 2);
+  const rawY = clampWorld(by + bdef.footprint / 2 + 0.8 + ctx.random());
+  const seed = getSeed(ctx);
+  const snap = nearestPassableGrid(
+    passableWith(seed, buildOccupancy(ctx)),
+    rawX,
+    rawY
+  );
+  const id = spawnUnitEntity(ctx, owner, kind, snap.x, snap.y);
   if (Math.hypot(b.rallyX - bx, b.rallyY - by) > 1.2) {
     const u = ctx.db.unit.entityId.find(id);
     if (u)
       ctx.db.unit.entityId.update({
         ...u,
-        ...movePatch(ctx, spawnX, spawnY, b.rallyX, b.rallyY),
+        ...movePatch(ctx, snap.x, snap.y, b.rallyX, b.rallyY),
       });
   }
   return null;
@@ -673,6 +712,7 @@ export const init = spacetimedb.init((ctx) => {
     worldSize: WORLD_SIZE,
     seed,
     initialized: true,
+    nextBotId: 1n,
   });
 
   scatterTrees(ctx, seed, TREE_COUNT);
@@ -724,6 +764,8 @@ export const enterGame = spacetimedb.reducer(
       });
       return;
     }
+    if ([...ctx.db.player.iter()].length >= MAX_PLAYERS)
+      throw new SenderError('the world is full');
     foundPlayer(ctx, ctx.sender, name || 'Amir', side);
   }
 );
@@ -739,18 +781,17 @@ export const startSkirmish = spacetimedb.reducer(
     foundPlayer(ctx, ctx.sender, name || 'Amir', human);
     const foe = enemyFaction(human as 0 | 1);
     const count = Math.min(enemies.length, MAX_AI_OPPONENTS);
-    for (let i = 0; i < count; i++) spawnAi(ctx, enemies[i], foe);
+    for (let i = 0; i < count; i++) spawnAi(ctx, ctx.sender, enemies[i], foe);
   }
 );
 
-// Leave the current match — tear down the caller and any bots, back to a clean
-// slate so the client can return to the menu.
+// Leave the current match — tear down the caller and the bots they host, back to
+// a clean slate so the client can return to the menu. Other matches untouched.
 export const leaveGame = spacetimedb.reducer((ctx) => {
-  clearOwner(ctx, ctx.sender);
-  for (const bot of [...ctx.db.ai.iter()]) clearOwner(ctx, bot.identity);
+  clearMatch(ctx, ctx.sender);
 });
 
-// Add one bot to the running match, on the side opposing the caller.
+// Add one bot to the caller's match, on the side opposing the caller.
 export const addAi = spacetimedb.reducer(
   { difficulty: t.u8() },
   (ctx, { difficulty }) => {
@@ -758,16 +799,17 @@ export const addAi = spacetimedb.reducer(
     if (!p) throw new SenderError('not in game');
     if ([...ctx.db.player.iter()].length >= MAX_PLAYERS)
       throw new SenderError('match is full');
-    spawnAi(ctx, difficulty, enemyFaction(p.faction as 0 | 1));
+    spawnAi(ctx, ctx.sender, difficulty, enemyFaction(p.faction as 0 | 1));
   }
 );
 
+// Benign stale clicks (unit died, target gone, not yours after a desync) return
+// silently — they are races, not user errors, and must not flood the error log.
 export const moveUnit = spacetimedb.reducer(
   { entityId: t.u64(), x: t.f32(), y: t.f32() },
   (ctx, { entityId, x, y }) => {
     const u = ctx.db.unit.entityId.find(entityId);
-    if (!u) throw new SenderError('no such unit');
-    if (!u.owner.equals(ctx.sender)) throw new SenderError('not your unit');
+    if (!u || !u.owner.equals(ctx.sender)) return;
     const e = ctx.db.entity.entityId.find(entityId);
     if (!e) return;
     ctx.db.unit.entityId.update({
@@ -784,12 +826,10 @@ export const gatherResource = spacetimedb.reducer(
   { entityId: t.u64(), nodeId: t.u64() },
   (ctx, { entityId, nodeId }) => {
     const u = ctx.db.unit.entityId.find(entityId);
-    if (!u) throw new SenderError('no such unit');
-    if (!u.owner.equals(ctx.sender)) throw new SenderError('not your unit');
+    if (!u || !u.owner.equals(ctx.sender)) return;
     const def = UNIT_DEFS[u.kind as UnitKindT] ?? UNIT_DEFS[UnitKind.Peasant];
-    if (def.carry <= 0) throw new SenderError('this unit cannot gather');
-    if (!ctx.db.resourceNode.entityId.find(nodeId))
-      throw new SenderError('no such resource');
+    if (def.carry <= 0) return;
+    if (!ctx.db.resourceNode.entityId.find(nodeId)) return;
     ctx.db.unit.entityId.update({
       ...u,
       gatherState: GatherState.ToResource,
@@ -804,8 +844,7 @@ export const trainUnit = spacetimedb.reducer(
   { buildingId: t.u64(), kind: t.u8() },
   (ctx, { buildingId, kind }) => {
     const b = ctx.db.building.entityId.find(buildingId);
-    if (!b) throw new SenderError('no such building');
-    if (!b.owner.equals(ctx.sender)) throw new SenderError('not your building');
+    if (!b || !b.owner.equals(ctx.sender)) return;
     const err = trainFrom(ctx, ctx.sender, b, kind);
     if (err) throw new SenderError(err);
   }
@@ -815,8 +854,7 @@ export const setRally = spacetimedb.reducer(
   { entityId: t.u64(), x: t.f32(), y: t.f32() },
   (ctx, { entityId, x, y }) => {
     const b = ctx.db.building.entityId.find(entityId);
-    if (!b) throw new SenderError('no such building');
-    if (!b.owner.equals(ctx.sender)) throw new SenderError('not your building');
+    if (!b || !b.owner.equals(ctx.sender)) return;
     ctx.db.building.entityId.update({
       ...b,
       rallyX: clampWorld(x),
@@ -829,14 +867,11 @@ export const attackUnit = spacetimedb.reducer(
   { entityId: t.u64(), targetId: t.u64() },
   (ctx, { entityId, targetId }) => {
     const u = ctx.db.unit.entityId.find(entityId);
-    if (!u) throw new SenderError('no such unit');
-    if (!u.owner.equals(ctx.sender)) throw new SenderError('not your unit');
+    if (!u || !u.owner.equals(ctx.sender)) return;
     const tu = ctx.db.unit.entityId.find(targetId);
     const tb = tu ? null : ctx.db.building.entityId.find(targetId);
     const target = tu ?? tb;
-    if (!target) throw new SenderError('no such target');
-    if (target.owner.equals(ctx.sender))
-      throw new SenderError('cannot attack your own');
+    if (!target || target.owner.equals(ctx.sender)) return;
     ctx.db.unit.entityId.update({
       ...u,
       attackTarget: targetId,
@@ -855,12 +890,48 @@ export const placeBuilding = spacetimedb.reducer(
   }
 );
 
+const WallTile = t.object('WallTile', { x: t.f32(), y: t.f32() });
+
+// Batched wall placement for a dragged line: ONE reducer call instead of one per
+// tile. Places every affordable, valid Wall tile and skips the rest silently —
+// occupancy is computed once and stamped incrementally, so it is O(line), not
+// O(line × buildings), and never floods the error log.
+export const placeWall = spacetimedb.reducer(
+  { tiles: t.array(WallTile) },
+  (ctx, { tiles }) => {
+    const p = ctx.db.player.identity.find(ctx.sender);
+    if (!p) return;
+    const def = BUILDING_DEFS[BuildingKind.Wall];
+    const seed = getSeed(ctx);
+    const occ = allBuildingTiles(ctx);
+    let wood = p.wood;
+    let placed = false;
+    for (const tile of tiles) {
+      if (wood < def.cost) break;
+      const ok = canPlace(
+        BuildingKind.Wall,
+        tile.x,
+        tile.y,
+        (tx, ty) => isPassable(seed, tx, ty),
+        (tx, ty) => occ.has(ty * WORLD_SIZE + tx)
+      );
+      if (!ok) continue;
+      const c = footprintCenter(def.footprint, tile.x, tile.y);
+      spawnBuilding(ctx, ctx.sender, BuildingKind.Wall, c.x, c.y);
+      for (const k of occupancySet([{ kind: BuildingKind.Wall, x: tile.x, y: tile.y }], true))
+        occ.add(k);
+      wood -= def.cost;
+      placed = true;
+    }
+    if (placed) ctx.db.player.identity.update({ ...p, wood });
+  }
+);
+
 export const demolishBuilding = spacetimedb.reducer(
   { entityId: t.u64() },
   (ctx, { entityId }) => {
     const b = ctx.db.building.entityId.find(entityId);
-    if (!b) throw new SenderError('no such building');
-    if (!b.owner.equals(ctx.sender)) throw new SenderError('not your building');
+    if (!b || !b.owner.equals(ctx.sender)) return;
     if (b.kind === BuildingKind.Keep)
       throw new SenderError('cannot demolish your keep');
     const def = BUILDING_DEFS[b.kind as BuildingKindT];
@@ -1033,13 +1104,36 @@ export const unitAi = spacetimedb.reducer({ timer: aiTimer.rowType }, (ctx) => {
   }
 });
 
+// Live enemy units (as Located) for target acquisition. `units` is the tick
+// snapshot; each is re-fetched so a unit already killed this tick is excluded.
+// Shared by the soldier and tower loops so acquisition logic lives in one place.
+function enemyUnitsAround(
+  ctx: any,
+  units: any[],
+  owner: any,
+  selfId: bigint
+): Located[] {
+  const out: Located[] = [];
+  for (const o of units) {
+    if (o.entityId === selfId || o.owner.equals(owner)) continue;
+    if (!ctx.db.unit.entityId.find(o.entityId)) continue; // dead this tick
+    const oe = ctx.db.entity.entityId.find(o.entityId);
+    if (oe) out.push({ id: o.entityId, x: oe.x, y: oe.y });
+  }
+  return out;
+}
+
 // Combat — runs every COMBAT_TICK_MS. Soldiers auto-acquire nearby enemies,
 // close to range, and strike on cooldown. Dead units are removed.
 export const combatTick = spacetimedb.reducer(
   { timer: combatTimer.rowType },
   (ctx) => {
     const units = [...ctx.db.unit.iter()];
-    for (const u of units) {
+    for (const snap of units) {
+      // Re-fetch every iteration: a unit (or its target) killed earlier this
+      // same tick must never act, nor be acted on, via a stale snapshot row.
+      const u = ctx.db.unit.entityId.find(snap.entityId);
+      if (!u) continue;
       const def = UNIT_DEFS[u.kind as UnitKindT] ?? UNIT_DEFS[UnitKind.Peasant];
       if (def.attack <= 0) continue; // non-combatants never fight
 
@@ -1047,34 +1141,18 @@ export const combatTick = spacetimedb.reducer(
       if (!e) continue;
 
       let targetId = u.attackTarget;
-      let tu = targetId !== 0n ? ctx.db.unit.entityId.find(targetId) : null;
-      let tb =
-        !tu && targetId !== 0n ? ctx.db.building.entityId.find(targetId) : null;
-      let te = tu || tb ? ctx.db.entity.entityId.find(targetId) : null;
-
-      // No live target: auto-acquire the nearest enemy UNIT within aggro range.
-      if (!te && def.aggroRange > 0) {
-        let bestD = Infinity;
-        let best: typeof u | null = null;
-        let bestE: typeof e | null = null;
-        for (const o of units) {
-          if (o.entityId === u.entityId || o.owner.equals(u.owner)) continue;
-          const oe = ctx.db.entity.entityId.find(o.entityId);
-          if (!oe) continue;
-          const dd = dist(e.x, e.y, oe.x, oe.y);
-          if (dd <= def.aggroRange && dd < bestD) {
-            bestD = dd;
-            best = o;
-            bestE = oe;
-          }
-        }
-        if (best && bestE) {
-          tu = best;
-          tb = null;
-          te = bestE;
-          targetId = best.entityId;
-        }
+      // No current target: auto-acquire the nearest LIVE enemy unit in range.
+      if (targetId === 0n && def.aggroRange > 0) {
+        const enemies = enemyUnitsAround(ctx, units, u.owner, u.entityId);
+        const near = nearestWithin(e.x, e.y, enemies, def.aggroRange);
+        if (near) targetId = near.id;
       }
+
+      // Resolve the target fresh — stale hp can't double-hit or "revive".
+      const tu = targetId !== 0n ? ctx.db.unit.entityId.find(targetId) : null;
+      const tb =
+        !tu && targetId !== 0n ? ctx.db.building.entityId.find(targetId) : null;
+      const te = tu || tb ? ctx.db.entity.entityId.find(targetId) : null;
 
       const cd = Math.max(0, u.attackCooldown - COMBAT_DT);
       if (!te || (!tu && !tb)) {
@@ -1150,32 +1228,11 @@ export const combatTick = spacetimedb.reducer(
       const be = ctx.db.entity.entityId.find(b.entityId);
       if (!be) continue;
       const cd = Math.max(0, b.cooldown - COMBAT_DT);
-      let best: any = null;
-      let bestE: any = null;
-      let bestD = Infinity;
-      for (const o of units) {
-        if (o.owner.equals(b.owner)) continue;
-        const oe = ctx.db.entity.entityId.find(o.entityId);
-        if (!oe) continue;
-        const d = dist(be.x, be.y, oe.x, oe.y);
-        if (d <= bdef.range && d < bestD) {
-          bestD = d;
-          best = o;
-          bestE = oe;
-        }
-      }
-      if (best && bestE && cd <= 0) {
-        const fresh = ctx.db.unit.entityId.find(best.entityId);
-        if (!fresh) {
-          ctx.db.building.entityId.update({ ...b, cooldown: cd });
-          continue;
-        }
-        ctx.db.shot.insert({
-          fromX: be.x,
-          fromY: be.y,
-          toX: bestE.x,
-          toY: bestE.y,
-        });
+      const enemies = enemyUnitsAround(ctx, units, b.owner, 0n);
+      const near = nearestWithin(be.x, be.y, enemies, bdef.range);
+      const fresh = near ? ctx.db.unit.entityId.find(near.id) : null;
+      if (near && fresh && cd <= 0) {
+        ctx.db.shot.insert({ fromX: be.x, fromY: be.y, toX: near.x, toY: near.y });
         const newHp = applyDamage(fresh.hp, bdef.attack);
         if (newHp <= 0) {
           ctx.db.unit.entityId.delete(fresh.entityId);

@@ -2,10 +2,37 @@ import { describe, it, expect } from 'vitest';
 import {
   stepToward,
   nearestIndex,
+  nearestWithin,
   dist,
   applyDamage,
   inRange,
 } from '../shared/sim.ts';
+
+describe('nearestWithin', () => {
+  const cs = [
+    { id: 1n, x: 5, y: 0 },
+    { id: 2n, x: 2, y: 0 },
+    { id: 3n, x: 9, y: 0 },
+  ];
+
+  it('returns the nearest candidate inside range', () => {
+    expect(nearestWithin(0, 0, cs, 10)?.id).toBe(2n);
+  });
+
+  it('ignores candidates beyond range', () => {
+    // only id 2 (d=2) is within range 3
+    expect(nearestWithin(0, 0, cs, 3)?.id).toBe(2n);
+  });
+
+  it('includes a candidate exactly at range (<=)', () => {
+    expect(nearestWithin(0, 0, [{ id: 7n, x: 4, y: 0 }], 4)?.id).toBe(7n);
+  });
+
+  it('returns null when nothing is in range', () => {
+    expect(nearestWithin(0, 0, cs, 1)).toBeNull();
+    expect(nearestWithin(0, 0, [], 99)).toBeNull();
+  });
+});
 
 describe('stepToward', () => {
   it('advances exactly `step` units toward a far target', () => {
