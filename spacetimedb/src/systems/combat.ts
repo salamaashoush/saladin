@@ -40,6 +40,7 @@ import { scheduleRefs } from '../schema/schedule_refs.ts';
 import { dist, getSeed } from '../world/util.ts';
 import { movePatch } from '../world/placement.ts';
 import { markDefeated } from '../world/spawn.ts';
+import { activeMatchIds } from '../world/scope.ts';
 import {
   occupantFireProfile,
   garrisonRangeRate,
@@ -53,11 +54,13 @@ function enemyUnitsAround(
   ctx: any,
   units: any[],
   owner: any,
-  selfId: bigint
+  selfId: bigint,
+  matchId: bigint
 ): Located[] {
   const out: Located[] = [];
   for (const o of units) {
     if (o.entityId === selfId || o.owner.equals(owner)) continue;
+    if (o.matchId !== matchId) continue; // a foe only exists within the same match
     const fresh = ctx.db.unit.entityId.find(o.entityId);
     if (!fresh) continue; // dead this tick
     if (fresh.garrisonedIn !== 0n) continue; // sheltered — not a field target
@@ -67,12 +70,13 @@ function enemyUnitsAround(
   return out;
 }
 
-// Live enemy buildings (as Located). Siege engines (prefersBuildings) auto-
-// acquire these so they hammer structures rather than chasing soft targets.
-function enemyBuildingsAround(ctx: any, owner: any): Located[] {
+// Live enemy buildings (as Located) IN THE SAME MATCH. Siege engines
+// (prefersBuildings) auto-acquire these so they hammer structures rather than
+// chasing soft targets. Two matches share the map, so matchId gates who is hostile.
+function enemyBuildingsAround(ctx: any, owner: any, matchId: bigint): Located[] {
   const out: Located[] = [];
   for (const b of [...ctx.db.building.iter()]) {
-    if (b.owner.equals(owner)) continue;
+    if (b.owner.equals(owner) || b.matchId !== matchId) continue;
     const be = ctx.db.entity.entityId.find(b.entityId);
     if (be) out.push({ id: b.entityId, x: be.x, y: be.y });
   }
@@ -156,7 +160,10 @@ export const combatTick = spacetimedb.reducer(
   { timer: combatTimer.rowType },
   (ctx) => {
     const seed = getSeed(ctx);
-    const units = [...ctx.db.unit.iter()];
+    const active = activeMatchIds(ctx);
+    // Only units in Active matches fight or are fought over this tick — a paused
+    // match's soldiers neither strike nor take damage, so the battle freezes.
+    const units = [...ctx.db.unit.iter()].filter((u) => active.has(u.matchId));
 
     // Per-tick tech cache: owner identity (hex) → completed techMask. Read once per
     // owner, not per pair, so the researched bonuses fold into effective stats
@@ -235,8 +242,8 @@ export const combatTick = spacetimedb.reducer(
           e.x,
           e.y,
           def.aggroRange,
-          enemyUnitsAround(ctx, units, u.owner, u.entityId),
-          def.prefersBuildings ? enemyBuildingsAround(ctx, u.owner) : [],
+          enemyUnitsAround(ctx, units, u.owner, u.entityId, u.matchId),
+          def.prefersBuildings ? enemyBuildingsAround(ctx, u.owner, u.matchId) : [],
           !!def.prefersBuildings
         );
         if (near) targetId = near.id;
@@ -352,6 +359,7 @@ export const combatTick = spacetimedb.reducer(
     // A garrisoned host's ranged occupants stack their bows onto its volley; a
     // structure that cannot shoot on its own still fires once archers man it.
     for (const b of [...ctx.db.building.iter()]) {
+      if (!active.has(b.matchId)) continue; // paused/ended match — towers hold fire
       const bdef = bldgDefOf(b) ?? BUILDING_DEFS[BuildingKind.Keep];
       const garrisonFire = garrisonFirePower(
         occupantFireProfile(ctx, b.entityId),
@@ -368,7 +376,7 @@ export const combatTick = spacetimedb.reducer(
       const be = ctx.db.entity.entityId.find(b.entityId);
       if (!be) continue;
       const cd = Math.max(0, b.cooldown - COMBAT_DT);
-      const enemies = enemyUnitsAround(ctx, units, b.owner, 0n);
+      const enemies = enemyUnitsAround(ctx, units, b.owner, 0n, b.matchId);
       // Search out to the best-case elevation reach, then confirm the chosen
       // target is within this tower's range adjusted for THIS target's elevation.
       const towerElev = elevation(seed, be.x, be.y);

@@ -18,6 +18,7 @@ export const entity = table(
     x: t.f32(),
     y: t.f32(),
     facing: t.f32(),
+    matchId: t.u64().index('btree'), // which match this row belongs to (0 = legacy/global)
   }
 );
 
@@ -49,6 +50,7 @@ export const unit = table(
     garrisonedIn: t.u64(), // host building entityId while sheltered (0 = in the field)
     path: t.array(PathPoint),
     pathIdx: t.u32(),
+    matchId: t.u64().index('btree'),
   }
 );
 
@@ -74,6 +76,7 @@ export const building = table(
     cooldown: t.f32(),
     rallyX: t.f32(),
     rallyY: t.f32(),
+    matchId: t.u64().index('btree'),
   }
 );
 
@@ -94,6 +97,7 @@ export const resourceNode = table(
     entityId: t.u64().primaryKey(),
     resType: t.u8(),
     remaining: t.u32(),
+    matchId: t.u64().index('btree'),
   }
 );
 
@@ -114,6 +118,7 @@ export const player = table(
     defeated: t.bool(),
     slot: t.u8(), // stable spawn-corner slot (0..MAX_PLAYERS-1)
     techMask: t.u64(), // completed Blacksmith techs as a bitset — combat reads one number
+    matchId: t.u64().index('btree'),
   }
 );
 
@@ -146,6 +151,7 @@ export const ai = table(
     phase: t.u8(), // current AiPhase (shared/ai.ts) — drives cadence + telemetry
     scoutId: t.u64(), // entityId of the unit sent to scout (0 = none out)
     threatTimer: t.f32(), // seconds the bot has been under threat near home
+    matchId: t.u64().index('btree'),
   }
 );
 
@@ -158,6 +164,24 @@ export const config = table(
     preset: t.string(), // map preset id — render flavor; client reads it back
     initialized: t.bool(),
     nextBotId: t.u64(), // monotonic source of unique bot identities
+    nextMatchId: t.u64(), // monotonic source of match ids (so saves never collide)
+  }
+);
+
+// A match is a first-class entity: one row per skirmish/session. Every game-object
+// row (entity/unit/building/resource_node/player/ai) carries this matchId, so a
+// save is "all rows where matchId=X" and pause/resume flips `status`. `host` is the
+// human who owns the match (teardown + UI scope to it). `seed`/`preset` snapshot the
+// worldgen used so the match can be reproduced.
+export const match = table(
+  { name: 'match', public: true },
+  {
+    matchId: t.u64().primaryKey().autoInc(),
+    name: t.string(),
+    host: t.identity().index('btree'),
+    status: t.u8(), // MatchStatus (shared/match.ts): Active / Paused / Ended
+    seed: t.u32(),
+    preset: t.string(),
   }
 );
 

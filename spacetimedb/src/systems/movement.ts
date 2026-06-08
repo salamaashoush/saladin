@@ -3,12 +3,16 @@ import { stepToward } from '../../../shared/sim.ts';
 import { spacetimedb } from '../schema/db.ts';
 import { moveTimer } from '../schema/tables.ts';
 import { scheduleRefs } from '../schema/schedule_refs.ts';
+import { activeMatchIds } from '../world/scope.ts';
 
-// Movement integration — runs every MOVE_TICK_MS. Only touches movers.
+// Movement integration — runs every MOVE_TICK_MS. Only touches movers in Active
+// matches (a Paused/Ended match's units freeze in place).
 export const moveUnits = spacetimedb.reducer(
   { timer: moveTimer.rowType },
   (ctx) => {
+    const active = activeMatchIds(ctx);
     for (const u of [...ctx.db.unit.iter()]) {
+      if (!active.has(u.matchId)) continue; // paused/ended match — frozen
       if (u.garrisonedIn !== 0n) continue; // sheltered — off the field
       if (!u.hasTarget) continue;
       const e = ctx.db.entity.entityId.find(u.entityId);

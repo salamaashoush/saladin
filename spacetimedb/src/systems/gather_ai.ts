@@ -20,18 +20,22 @@ import {
   passableWith,
 } from '../world/util.ts';
 import { movePatch, buildOccupancy } from '../world/placement.ts';
+import { activeMatchIds } from '../world/scope.ts';
 
-// Gather AI state machine — runs every AI_TICK_MS, sets movement targets.
+// Gather AI state machine — runs every AI_TICK_MS, sets movement targets. Only acts
+// on units in Active matches; a node retarget stays within the unit's own match.
 export const unitAi = spacetimedb.reducer({ timer: aiTimer.rowType }, (ctx) => {
-  const nodes = buildNodes(ctx);
+  const active = activeMatchIds(ctx);
+  const allNodes = buildNodes(ctx);
   const seed = getSeed(ctx);
   const occ = buildOccupancy(ctx);
 
-  // A gatherer whose node is gone heads to the nearest remaining node, and
-  // only idles when the whole map is exhausted. Without this, peasants freeze
-  // forever the moment their tree is chopped out.
+  // A gatherer whose node is gone heads to the nearest remaining node IN ITS OWN
+  // MATCH, and only idles when its match's forest is exhausted. Without this,
+  // peasants freeze forever the moment their tree is chopped out.
   const retarget = (u: any, e: any, skipNode: bigint = 0n) => {
-    const pool = skipNode ? nodes.filter((n) => n.id !== skipNode) : nodes;
+    const own = allNodes.filter((n) => n.matchId === u.matchId);
+    const pool = skipNode ? own.filter((n) => n.id !== skipNode) : own;
     const idx = nearestIndex(e.x, e.y, pool);
     if (idx < 0) {
       ctx.db.unit.entityId.update({
@@ -51,6 +55,7 @@ export const unitAi = spacetimedb.reducer({ timer: aiTimer.rowType }, (ctx) => {
   };
 
   for (const u of [...ctx.db.unit.iter()]) {
+    if (!active.has(u.matchId)) continue; // paused/ended match — frozen
     if (u.garrisonedIn !== 0n) continue; // sheltered — off the field
     if (u.gatherState === GatherState.Idle) continue;
     const e = ctx.db.entity.entityId.find(u.entityId);

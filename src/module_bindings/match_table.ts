@@ -11,11 +11,10 @@ import {
 } from "spacetimedb";
 
 export default __t.row({
-  id: __t.u32().primaryKey(),
-  worldSize: __t.u32().name("world_size"),
+  matchId: __t.u64().primaryKey().name("match_id"),
+  name: __t.string(),
+  host: __t.identity(),
+  status: __t.u8(),
   seed: __t.u32(),
   preset: __t.string(),
-  initialized: __t.bool(),
-  nextBotId: __t.u64().name("next_bot_id"),
-  nextMatchId: __t.u64().name("next_match_id"),
 });

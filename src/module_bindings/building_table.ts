@@ -18,4 +18,5 @@ export default __t.row({
   cooldown: __t.f32(),
   rallyX: __t.f32().name("rally_x"),
   rallyY: __t.f32().name("rally_y"),
+  matchId: __t.u64().name("match_id"),
 });

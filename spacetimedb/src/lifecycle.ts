@@ -9,10 +9,12 @@ import {
   RESEARCH_TICK_MS,
 } from '../../shared/constants.ts';
 import { spacetimedb } from './schema/db.ts';
-import { scatterNodes } from './world/spawn.ts';
 
 export const init = spacetimedb.init((ctx) => {
   const seed = ctx.random.integerInRange(1, 2_000_000_000);
+  // The map terrain seed is global (shared by every concurrent match); resource
+  // nodes are per-match and scattered when a match is founded, so init seeds no
+  // nodes — a fresh DB has an empty world until the first match is created.
   ctx.db.config.insert({
     id: 0,
     worldSize: WORLD_SIZE,
@@ -20,9 +22,8 @@ export const init = spacetimedb.init((ctx) => {
     preset: 'continental',
     initialized: true,
     nextBotId: 1n,
+    nextMatchId: 1n,
   });
-
-  scatterNodes(ctx, seed);
 
   ctx.db.moveTimer.insert({
     scheduledId: 0n,

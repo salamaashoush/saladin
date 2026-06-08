@@ -41,6 +41,7 @@ import { startResearchFor } from '../world/research.ts';
 import { aiFindSpot, placeFor, movePatch } from '../world/placement.ts';
 import { nearestEnemyKeep, assaultIntel } from '../world/commands.ts';
 import { dist } from '../world/util.ts';
+import { activeMatchIds } from '../world/scope.ts';
 
 const isCombat = (kind: number): boolean =>
   (UNIT_DEFS[kind as UnitKindT]?.attack ?? 0) > 0;
@@ -61,7 +62,9 @@ const HOME_RADIUS = 18; // own combat units this close to a building count as "h
 export const aiBrain = spacetimedb.reducer(
   { timer: aiBrainTimer.rowType },
   (ctx) => {
-    const bots = [...ctx.db.ai.iter()];
+    const active = activeMatchIds(ctx);
+    // Only bots in Active matches think this tick; a paused match's AI is frozen.
+    const bots = [...ctx.db.ai.iter()].filter((b) => active.has(b.matchId));
     if (bots.length === 0) return;
 
     // ── one snapshot per tick, hoisted out of the bot loop ──────────────────
@@ -72,10 +75,15 @@ export const aiBrain = spacetimedb.reducer(
     // Owner identity (hex) → faction, so the per-bot enemy census never re-scans
     // the player table per unit/building.
     const factionOf = new Map<string, number>();
-    for (const pl of [...ctx.db.player.iter()])
+    const matchOf = new Map<string, bigint>();
+    for (const pl of [...ctx.db.player.iter()]) {
       factionOf.set(pl.identity.toHexString(), pl.faction);
+      matchOf.set(pl.identity.toHexString(), pl.matchId);
+    }
     const facOf = (id: any): number | undefined =>
       factionOf.get(id.toHexString());
+    const matchOfOwner = (id: any): bigint | undefined =>
+      matchOf.get(id.toHexString());
 
     for (const bot of bots) {
       const p = ctx.db.player.identity.find(bot.identity);
@@ -139,7 +147,7 @@ export const aiBrain = spacetimedb.reducer(
         return false;
       };
       for (const u of allUnits) {
-        if (u.owner.equals(owner)) continue;
+        if (u.owner.equals(owner) || u.matchId !== bot.matchId) continue;
         const fac = facOf(u.owner);
         if (fac === undefined || fac === p.faction) continue;
         if (!isCombat(u.kind)) continue;
@@ -149,7 +157,7 @@ export const aiBrain = spacetimedb.reducer(
       }
       let enemyHasWalls = false;
       for (const b of allBuildings) {
-        if (b.owner.equals(owner)) continue;
+        if (b.owner.equals(owner) || b.matchId !== bot.matchId) continue;
         const fac = facOf(b.owner);
         if (fac === undefined || fac === p.faction) continue;
         if (b.kind === BuildingKind.Wall || b.kind === BuildingKind.Gatehouse) {
@@ -393,7 +401,11 @@ export const aiBrain = spacetimedb.reducer(
       if (wantsAssault) {
         const isEnemy = (id: any): boolean => {
           const fac = facOf(id);
-          return fac !== undefined && fac !== p.faction;
+          return (
+            fac !== undefined &&
+            fac !== p.faction &&
+            matchOfOwner(id) === bot.matchId // foes live only within the bot's match
+          );
         };
         const intel: AssaultIntel = assaultIntel(
           allUnits,
@@ -450,7 +462,7 @@ export const aiBrain = spacetimedb.reducer(
       let scoutId = bot.scoutId;
       const scoutAlive = scoutId !== 0n && ctx.db.unit.entityId.find(scoutId);
       if (tac.scouts && !scoutAlive && !launched) {
-        const target = nearestEnemyKeep(ctx, owner, ke.x, ke.y);
+        const target = nearestEnemyKeep(ctx, owner, ke.x, ke.y, bot.matchId);
         if (target) {
           let best: any = null;
           for (const u of myUnits) {

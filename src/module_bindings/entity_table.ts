@@ -15,4 +15,5 @@ export default __t.row({
   x: __t.f32(),
   y: __t.f32(),
   facing: __t.f32(),
+  matchId: __t.u64().name("match_id"),
 });

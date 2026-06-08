@@ -5,6 +5,7 @@ import { spacetimedb } from '../schema/db.ts';
 import { economyTimer } from '../schema/tables.ts';
 import { scheduleRefs } from '../schema/schedule_refs.ts';
 import { removeUnit } from '../world/garrison.ts';
+import { activeMatchIds } from '../world/scope.ts';
 
 // Economy upkeep — runs every ECONOMY_TICK_MS. Only COMBAT units draw rations;
 // peasants and imams feed themselves, so a worker-only opening never starves and
@@ -15,7 +16,9 @@ import { removeUnit } from '../world/garrison.ts';
 export const economySystem = spacetimedb.reducer(
   { timer: economyTimer.rowType },
   (ctx) => {
+    const active = activeMatchIds(ctx);
     for (const p of [...ctx.db.player.iter()]) {
+      if (!active.has(p.matchId)) continue; // paused/ended match — no upkeep drain
       if (p.defeated) continue;
       const eaters = [...ctx.db.unit.iter()].filter(
         (u) =>

@@ -19,6 +19,7 @@ export const Ai = __t.object("Ai", {
   phase: __t.u8(),
   scoutId: __t.u64(),
   threatTimer: __t.f32(),
+  matchId: __t.u64(),
 });
 export type Ai = __Infer<typeof Ai>;
 
@@ -42,6 +43,7 @@ export const Building = __t.object("Building", {
   cooldown: __t.f32(),
   rallyX: __t.f32(),
   rallyY: __t.f32(),
+  matchId: __t.u64(),
 });
 export type Building = __Infer<typeof Building>;
 
@@ -58,6 +60,7 @@ export const Config = __t.object("Config", {
   preset: __t.string(),
   initialized: __t.bool(),
   nextBotId: __t.u64(),
+  nextMatchId: __t.u64(),
 });
 export type Config = __Infer<typeof Config>;
 
@@ -72,6 +75,7 @@ export const Entity = __t.object("Entity", {
   x: __t.f32(),
   y: __t.f32(),
   facing: __t.f32(),
+  matchId: __t.u64(),
 });
 export type Entity = __Infer<typeof Entity>;
 
@@ -82,6 +86,16 @@ export const Garrison = __t.object("Garrison", {
   owner: __t.identity(),
 });
 export type Garrison = __Infer<typeof Garrison>;
+
+export const Match = __t.object("Match", {
+  matchId: __t.u64(),
+  name: __t.string(),
+  host: __t.identity(),
+  status: __t.u8(),
+  seed: __t.u32(),
+  preset: __t.string(),
+});
+export type Match = __Infer<typeof Match>;
 
 export const MoveTimer = __t.object("MoveTimer", {
   scheduledId: __t.u64(),
@@ -110,6 +124,7 @@ export const Player = __t.object("Player", {
   defeated: __t.bool(),
   slot: __t.u8(),
   techMask: __t.u64(),
+  matchId: __t.u64(),
 });
 export type Player = __Infer<typeof Player>;
 
@@ -132,6 +147,7 @@ export const ResourceNode = __t.object("ResourceNode", {
   entityId: __t.u64(),
   resType: __t.u8(),
   remaining: __t.u32(),
+  matchId: __t.u64(),
 });
 export type ResourceNode = __Infer<typeof ResourceNode>;
 
@@ -169,6 +185,7 @@ export const Unit = __t.object("Unit", {
     return __t.array(PathPoint);
   },
   pathIdx: __t.u32(),
+  matchId: __t.u64(),
 });
 export type Unit = __Infer<typeof Unit>;
 

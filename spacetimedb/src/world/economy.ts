@@ -51,7 +51,10 @@ export function assignIdleGatherers(
   owner: any,
   preferType?: number
 ): void {
-  const nodes = buildNodes(ctx);
+  // Only this owner's own match's nodes — a gatherer must not eye another match's
+  // forest. The owner's match comes from its player row (0 for legacy/global).
+  const matchId = ctx.db.player.identity.find(owner)?.matchId ?? 0n;
+  const nodes = buildNodes(ctx, matchId);
   const idle = [...ctx.db.unit.iter()].filter((u) => {
     if (!u.owner.equals(owner) || u.gatherState !== GatherState.Idle) return false;
     const def = UNIT_DEFS[u.kind as UnitKindT] ?? UNIT_DEFS[UnitKind.Peasant];
@@ -97,7 +100,7 @@ export function trainFrom(
     rawX,
     rawY
   );
-  const id = spawnUnitEntity(ctx, owner, kind, snap.x, snap.y);
+  const id = spawnUnitEntity(ctx, owner, kind, snap.x, snap.y, p.matchId);
   if (Math.hypot(b.rallyX - bx, b.rallyY - by) > 1.2) {
     const u = ctx.db.unit.entityId.find(id);
     if (u)

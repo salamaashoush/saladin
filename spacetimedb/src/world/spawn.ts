@@ -46,18 +46,21 @@ import { clampWorld, getSeed, buildNodes, assignGatherBalanced } from './util.ts
 function ownerTechMask(ctx: any, owner: any): bigint {
   return ctx.db.player.identity.find(owner)?.techMask ?? 0n;
 }
+// Every spawned row is stamped with the match it belongs to (matchId), on BOTH the
+// shared entity row and its table row, so per-match teardown/save can sweep by id.
 export function spawnUnitEntity(
   ctx: any,
   owner: any,
   kind: number,
   x: number,
-  y: number
+  y: number,
+  matchId: bigint
 ): bigint {
   const base = UNIT_DEFS[kind as UnitKindT] ?? UNIT_DEFS[UnitKind.Peasant];
   // Fold the owner's researched techs so a new unit starts at its EFFECTIVE hp
   // (e.g. Conscription/Plate). speed is unchanged by tech — read from base.
   const def = effectiveUnitDef(kind, ownerTechMask(ctx, owner)) ?? base;
-  const e = ctx.db.entity.insert({ entityId: 0n, x, y, facing: 0 });
+  const e = ctx.db.entity.insert({ entityId: 0n, x, y, facing: 0, matchId });
   ctx.db.unit.insert({
     entityId: e.entityId,
     owner,
@@ -82,6 +85,7 @@ export function spawnUnitEntity(
     garrisonedIn: 0n,
     path: [],
     pathIdx: 0,
+    matchId,
   });
   return e.entityId;
 }
@@ -91,12 +95,13 @@ export function spawnBuilding(
   owner: any,
   kind: number,
   x: number,
-  y: number
+  y: number,
+  matchId: bigint
 ): bigint {
   const def =
     effectiveBuildingDef(kind, ownerTechMask(ctx, owner)) ??
     BUILDING_DEFS[BuildingKind.Keep];
-  const e = ctx.db.entity.insert({ entityId: 0n, x, y, facing: 0 });
+  const e = ctx.db.entity.insert({ entityId: 0n, x, y, facing: 0, matchId });
   ctx.db.building.insert({
     entityId: e.entityId,
     owner,
@@ -105,6 +110,7 @@ export function spawnBuilding(
     cooldown: 0,
     rallyX: x,
     rallyY: y,
+    matchId,
   });
   return e.entityId;
 }
@@ -114,34 +120,41 @@ function spawnNode(
   x: number,
   y: number,
   resType: number,
-  remaining: number
+  remaining: number,
+  matchId: bigint
 ): void {
-  const e = ctx.db.entity.insert({ entityId: 0n, x, y, facing: 0 });
-  ctx.db.resourceNode.insert({ entityId: e.entityId, resType, remaining });
+  const e = ctx.db.entity.insert({ entityId: 0n, x, y, facing: 0, matchId });
+  ctx.db.resourceNode.insert({ entityId: e.entityId, resType, remaining, matchId });
 }
 
-// Scatter every resource node kind across the map. Shared by init and match
-// reset. Positions come from the seeded pure worldgen (shared/terrain.ts) — NOT
-// ctx.random — so they are reproducible across restarts and the client could
+// Scatter every resource node kind across the map for `matchId`. Shared by init
+// and match reset. Positions come from the seeded pure worldgen (shared/terrain.ts)
+// — NOT ctx.random — so they are reproducible across restarts and the client could
 // recompute them. Data-driven from NODE_KINDS: new node kinds need no code here.
-export function scatterNodes(ctx: any, seed: number): void {
+export function scatterNodes(ctx: any, seed: number, matchId: bigint): void {
   for (const n of scatterNodesPure(seed, NODE_KINDS)) {
-    spawnNode(ctx, n.x, n.y, n.resType, n.yield);
+    spawnNode(ctx, n.x, n.y, n.resType, n.yield, matchId);
   }
 }
 
-// Found a new base for `owner`: keep at the next free corner, starting peasants
-// already gathering. Shared by enterGame (human) and addAi (skirmish bot) so both
-// sides start identically. Returns the keep entity id.
+// Found a new base for `owner` in `matchId`: keep at the next free corner, starting
+// peasants already gathering. Shared by enterGame (human) and addAi (skirmish bot)
+// so both sides start identically. Slot allocation and resource targeting are scoped
+// to the match, so two concurrent matches never share corners or nodes. Returns the
+// keep entity id.
 export function foundPlayer(
   ctx: any,
   owner: any,
   name: string,
-  faction: number
+  faction: number,
+  matchId: bigint
 ): bigint {
-  // Stable slot from the set of slots in use — survives leavers, so two players
-  // can never share a corner (overlapping keeps). Caller guards MAX_PLAYERS.
-  const used = [...ctx.db.player.iter()].map((p: any) => p.slot);
+  // Stable slot from the set of slots in use IN THIS MATCH — survives leavers, so two
+  // players in the same match can never share a corner (overlapping keeps), while a
+  // separate match reuses the same corners on its own copy of the map.
+  const used = [...ctx.db.player.iter()]
+    .filter((p: any) => p.matchId === matchId)
+    .map((p: any) => p.slot);
   const slot = Math.max(0, allocSlot(used, MAX_PLAYERS));
   const seed = getSeed(ctx);
   const corner = spawnCorner(slot);
@@ -151,7 +164,7 @@ export function foundPlayer(
     corner.y,
     BUILDING_DEFS[BuildingKind.Keep].footprint
   );
-  const keepId = spawnBuilding(ctx, owner, BuildingKind.Keep, base.x, base.y);
+  const keepId = spawnBuilding(ctx, owner, BuildingKind.Keep, base.x, base.y, matchId);
 
   ctx.db.player.insert({
     identity: owner,
@@ -168,15 +181,16 @@ export function foundPlayer(
     defeated: false,
     slot,
     techMask: 0n,
+    matchId,
   });
 
-  const nodes = buildNodes(ctx);
+  const nodes = buildNodes(ctx, matchId);
   const fresh: any[] = [];
   for (let i = 0; i < START_PEASANTS; i++) {
     const a = (i / START_PEASANTS) * Math.PI * 2;
     const px = clampWorld(base.x + Math.cos(a) * SPAWN_CLUSTER);
     const py = clampWorld(base.y + Math.sin(a) * SPAWN_CLUSTER);
-    const id = spawnUnitEntity(ctx, owner, UnitKind.Peasant, px, py);
+    const id = spawnUnitEntity(ctx, owner, UnitKind.Peasant, px, py, matchId);
     const u = ctx.db.unit.entityId.find(id);
     if (u) fresh.push(u);
   }
@@ -185,20 +199,21 @@ export function foundPlayer(
   return keepId;
 }
 
-// Spawn one bot for `host`'s match. Identity comes from a persistent monotonic
-// counter so it is globally unique and never reused across resets.
+// Spawn one bot for `host`'s match (`matchId`). Identity comes from a persistent
+// monotonic counter so it is globally unique and never reused across resets.
 export function spawnAi(
   ctx: any,
   host: any,
   difficulty: number,
-  faction: Faction
+  faction: Faction,
+  matchId: bigint
 ): void {
   const diff = AI_PROFILES[difficulty] ? difficulty : 1;
   const cfg = ctx.db.config.id.find(0);
   const n = cfg ? cfg.nextBotId : 1n;
   if (cfg) ctx.db.config.id.update({ ...cfg, nextBotId: n + 1n });
   const botId = new Identity((1n << 255n) | n);
-  foundPlayer(ctx, botId, aiName(faction, Number(n)), faction);
+  foundPlayer(ctx, botId, aiName(faction, Number(n)), faction, matchId);
   ctx.db.ai.insert({
     identity: botId,
     host,
@@ -208,6 +223,7 @@ export function spawnAi(
     phase: AiPhase.Boot,
     scoutId: 0n,
     threatTimer: 0,
+    matchId,
   });
 }
 

@@ -44,8 +44,10 @@ import GatherResourceReducer from "./gather_resource_reducer";
 import LeaveGameReducer from "./leave_game_reducer";
 import MarketTradeReducer from "./market_trade_reducer";
 import MoveUnitReducer from "./move_unit_reducer";
+import PauseMatchReducer from "./pause_match_reducer";
 import PlaceBuildingReducer from "./place_building_reducer";
 import PlaceWallReducer from "./place_wall_reducer";
+import ResumeMatchReducer from "./resume_match_reducer";
 import SetRallyReducer from "./set_rally_reducer";
 import SetStanceReducer from "./set_stance_reducer";
 import StartResearchReducer from "./start_research_reducer";
@@ -61,6 +63,7 @@ import BuildingRow from "./building_table";
 import ConfigRow from "./config_table";
 import EntityRow from "./entity_table";
 import GarrisonRow from "./garrison_table";
+import MatchRow from "./match_table";
 import PlayerRow from "./player_table";
 import ResearchRow from "./research_table";
 import ResourceNodeRow from "./resource_node_table";
@@ -80,6 +83,9 @@ const tablesSchema = __schema({
       { accessor: 'identity', name: 'ai_identity_idx_btree', algorithm: 'btree', columns: [
         'identity',
       ] },
+      { accessor: 'matchId', name: 'ai_match_id_idx_btree', algorithm: 'btree', columns: [
+        'matchId',
+      ] },
     ],
     constraints: [
       { name: 'ai_identity_key', constraint: 'unique', columns: ['identity'] },
@@ -90,6 +96,9 @@ const tablesSchema = __schema({
     indexes: [
       { accessor: 'entityId', name: 'building_entity_id_idx_btree', algorithm: 'btree', columns: [
         'entityId',
+      ] },
+      { accessor: 'matchId', name: 'building_match_id_idx_btree', algorithm: 'btree', columns: [
+        'matchId',
       ] },
       { accessor: 'owner', name: 'building_owner_idx_btree', algorithm: 'btree', columns: [
         'owner',
@@ -116,6 +125,9 @@ const tablesSchema = __schema({
       { accessor: 'entityId', name: 'entity_entity_id_idx_btree', algorithm: 'btree', columns: [
         'entityId',
       ] },
+      { accessor: 'matchId', name: 'entity_match_id_idx_btree', algorithm: 'btree', columns: [
+        'matchId',
+      ] },
     ],
     constraints: [
       { name: 'entity_entity_id_key', constraint: 'unique', columns: ['entityId'] },
@@ -139,11 +151,28 @@ const tablesSchema = __schema({
       { name: 'garrison_unit_key', constraint: 'unique', columns: ['unit'] },
     ],
   }, GarrisonRow),
+  match: __table({
+    name: 'match',
+    indexes: [
+      { accessor: 'host', name: 'match_host_idx_btree', algorithm: 'btree', columns: [
+        'host',
+      ] },
+      { accessor: 'matchId', name: 'match_match_id_idx_btree', algorithm: 'btree', columns: [
+        'matchId',
+      ] },
+    ],
+    constraints: [
+      { name: 'match_match_id_key', constraint: 'unique', columns: ['matchId'] },
+    ],
+  }, MatchRow),
   player: __table({
     name: 'player',
     indexes: [
       { accessor: 'identity', name: 'player_identity_idx_btree', algorithm: 'btree', columns: [
         'identity',
+      ] },
+      { accessor: 'matchId', name: 'player_match_id_idx_btree', algorithm: 'btree', columns: [
+        'matchId',
       ] },
       { accessor: 'playerId', name: 'player_player_id_idx_btree', algorithm: 'btree', columns: [
         'playerId',
@@ -174,6 +203,9 @@ const tablesSchema = __schema({
       { accessor: 'entityId', name: 'resource_node_entity_id_idx_btree', algorithm: 'btree', columns: [
         'entityId',
       ] },
+      { accessor: 'matchId', name: 'resource_node_match_id_idx_btree', algorithm: 'btree', columns: [
+        'matchId',
+      ] },
     ],
     constraints: [
       { name: 'resource_node_entity_id_key', constraint: 'unique', columns: ['entityId'] },
@@ -192,6 +224,9 @@ const tablesSchema = __schema({
     indexes: [
       { accessor: 'entityId', name: 'unit_entity_id_idx_btree', algorithm: 'btree', columns: [
         'entityId',
+      ] },
+      { accessor: 'matchId', name: 'unit_match_id_idx_btree', algorithm: 'btree', columns: [
+        'matchId',
       ] },
       { accessor: 'owner', name: 'unit_owner_idx_btree', algorithm: 'btree', columns: [
         'owner',
@@ -215,8 +250,10 @@ const reducersSchema = __reducers(
   __reducerSchema("leave_game", LeaveGameReducer),
   __reducerSchema("market_trade", MarketTradeReducer),
   __reducerSchema("move_unit", MoveUnitReducer),
+  __reducerSchema("pause_match", PauseMatchReducer),
   __reducerSchema("place_building", PlaceBuildingReducer),
   __reducerSchema("place_wall", PlaceWallReducer),
+  __reducerSchema("resume_match", ResumeMatchReducer),
   __reducerSchema("set_rally", SetRallyReducer),
   __reducerSchema("set_stance", SetStanceReducer),
   __reducerSchema("start_research", StartResearchReducer),

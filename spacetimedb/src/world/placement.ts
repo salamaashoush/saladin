@@ -109,7 +109,7 @@ export function placeFor(
 
   const c = footprintCenter(def.footprint, x, y);
   ctx.db.player.identity.update({ ...p, ...payCost(p, def.cost) });
-  spawnBuilding(ctx, owner, kind, c.x, c.y);
+  spawnBuilding(ctx, owner, kind, c.x, c.y, p.matchId);
   return null;
 }
 

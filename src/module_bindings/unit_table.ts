@@ -40,4 +40,5 @@ export default __t.row({
     return __t.array(PathPoint);
   },
   pathIdx: __t.u32().name("path_idx"),
+  matchId: __t.u64().name("match_id"),
 });

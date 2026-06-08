@@ -20,6 +20,7 @@ export interface NodePos {
   x: number;
   y: number;
   resType: number;
+  matchId: bigint;
 }
 
 export function dist(ax: number, ay: number, bx: number, by: number): number {
@@ -99,11 +100,22 @@ export function dropoffApproach(
   );
 }
 
-export function buildNodes(ctx: any): NodePos[] {
+// Resource nodes as positions. With `matchId` given, only that match's nodes are
+// returned — a gatherer must never walk to another match's forest. Omit it (or pass
+// undefined) only when scanning globally is intended.
+export function buildNodes(ctx: any, matchId?: bigint): NodePos[] {
   const nodes: NodePos[] = [];
   for (const n of [...ctx.db.resourceNode.iter()]) {
+    if (matchId !== undefined && n.matchId !== matchId) continue;
     const e = ctx.db.entity.entityId.find(n.entityId);
-    if (e) nodes.push({ id: n.entityId, x: e.x, y: e.y, resType: n.resType });
+    if (e)
+      nodes.push({
+        id: n.entityId,
+        x: e.x,
+        y: e.y,
+        resType: n.resType,
+        matchId: n.matchId,
+      });
   }
   return nodes;
 }

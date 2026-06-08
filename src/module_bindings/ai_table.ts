@@ -19,4 +19,5 @@ export default __t.row({
   phase: __t.u8(),
   scoutId: __t.u64().name("scout_id"),
   threatTimer: __t.f32().name("threat_timer"),
+  matchId: __t.u64().name("match_id"),
 });

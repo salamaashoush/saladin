@@ -25,4 +25,5 @@ export default __t.row({
   defeated: __t.bool(),
   slot: __t.u8(),
   techMask: __t.u64().name("tech_mask"),
+  matchId: __t.u64().name("match_id"),
 });

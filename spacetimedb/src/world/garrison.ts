@@ -118,13 +118,6 @@ export function evacuateOnDeath(ctx: any, host: any, hostEntity: any): void {
   }
 }
 
-// Drop every garrison slot belonging to `owner` (match teardown). The unit/entity
-// rows are cleared separately by clearOwner; this just keeps the table clean.
-export function clearGarrisonsOf(ctx: any, owner: any): void {
-  for (const g of [...ctx.db.garrison.iter()])
-    if (g.owner.equals(owner)) ctx.db.garrison.slotId.delete(g.slotId);
-}
-
 // Remove one unit completely: its garrison slot (if sheltered), its unit row, and
 // its entity row — leaving nothing orphaned. Used when a unit dies OUTSIDE the
 // combat loop (e.g. starves to death), so it stops drawing upkeep instead of

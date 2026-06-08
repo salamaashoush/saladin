@@ -61,7 +61,7 @@ export const placeWall = spacetimedb.reducer(
       );
       if (!ok) continue;
       const c = footprintCenter(def.footprint, tile.x, tile.y);
-      spawnBuilding(ctx, ctx.sender, BuildingKind.Wall, c.x, c.y);
+      spawnBuilding(ctx, ctx.sender, BuildingKind.Wall, c.x, c.y, p.matchId);
       for (const k of occupancySet([{ kind: BuildingKind.Wall, x: tile.x, y: tile.y }], true))
         occ.add(k);
       bal = payCost(bal, def.cost);

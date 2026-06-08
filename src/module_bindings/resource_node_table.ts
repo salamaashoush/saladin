@@ -14,4 +14,5 @@ export default __t.row({
   entityId: __t.u64().primaryKey().name("entity_id"),
   resType: __t.u8().name("res_type"),
   remaining: __t.u32(),
+  matchId: __t.u64().name("match_id"),
 });
