@@ -35,6 +35,7 @@ import {
   Stance,
   type UnitKind as UnitKindT,
 } from '../../../shared/enums.ts';
+import { cellOf } from '../../../shared/spatial.ts';
 import { clampWorld, getSeed, buildNodes, assignGatherBalanced } from './util.ts';
 
 // ctx is typed inside reducers; helpers take `any` to avoid threading the schema
@@ -60,7 +61,7 @@ export function spawnUnitEntity(
   // Fold the owner's researched techs so a new unit starts at its EFFECTIVE hp
   // (e.g. Conscription/Plate). speed is unchanged by tech — read from base.
   const def = effectiveUnitDef(kind, ownerTechMask(ctx, owner)) ?? base;
-  const e = ctx.db.entity.insert({ entityId: 0n, x, y, facing: 0, matchId });
+  const e = ctx.db.entity.insert({ entityId: 0n, x, y, facing: 0, matchId, cell: cellOf(x, y) });
   ctx.db.unit.insert({
     entityId: e.entityId,
     owner,
@@ -101,7 +102,7 @@ export function spawnBuilding(
   const def =
     effectiveBuildingDef(kind, ownerTechMask(ctx, owner)) ??
     BUILDING_DEFS[BuildingKind.Keep];
-  const e = ctx.db.entity.insert({ entityId: 0n, x, y, facing: 0, matchId });
+  const e = ctx.db.entity.insert({ entityId: 0n, x, y, facing: 0, matchId, cell: cellOf(x, y) });
   ctx.db.building.insert({
     entityId: e.entityId,
     owner,
@@ -123,7 +124,7 @@ function spawnNode(
   remaining: number,
   matchId: bigint
 ): void {
-  const e = ctx.db.entity.insert({ entityId: 0n, x, y, facing: 0, matchId });
+  const e = ctx.db.entity.insert({ entityId: 0n, x, y, facing: 0, matchId, cell: cellOf(x, y) });
   ctx.db.resourceNode.insert({ entityId: e.entityId, resType, remaining, matchId });
 }
 

@@ -8,11 +8,14 @@
 // module. The actual table reads/writes live in the reducer.
 
 import { MATCH_SCOPED_TABLES } from "./match.ts";
+import { cellOf } from "./spatial.ts";
 
 // Bump when a mirror table's column set changes in a way older saves can't be
 // rehydrated verbatim. loadMatch reads save_slot.schemaVersion and runs the
 // backfill ladder up to SAVE_SCHEMA_VERSION before rehydrating.
-export const SAVE_SCHEMA_VERSION = 1;
+// v2 added entity.cell (the spatial-grid index column); v1 saves backfill it from
+// the row's x/y in backfillRow.
+export const SAVE_SCHEMA_VERSION = 2;
 
 // The live tables a save copies, in dependency order: `entity` first (positions
 // the others reference), then the typed rows. Drives the snapshot loop and the
@@ -36,7 +39,7 @@ export type SavedTable = (typeof SAVED_TABLES)[number];
 // SAVE_SCHEMA_VERSION. `garrison` is included because it is saved too (scoped via
 // its unit) even though it is not match-scoped.
 export const LIVE_COLUMNS: Record<string, readonly string[]> = {
-  entity: ["entityId", "x", "y", "facing", "matchId"],
+  entity: ["entityId", "x", "y", "facing", "matchId", "cell"],
   unit: [
     "entityId",
     "owner",
@@ -237,10 +240,9 @@ export function backfillRow(
   version: number,
 ): Record<string, unknown> {
   const out: Record<string, unknown> = { ...row };
-  // v1 is the first versioned schema; every current column already exists in it,
-  // so there is nothing to backfill yet. The ladder below is where future
-  // `if (version < N) { … }` blocks go, newest last.
-  void version;
-  void table;
+  // v2 added entity.cell (spatial-grid column). A v1 save's entity rows have no
+  // cell; recompute it from the saved x/y so a loaded world indexes correctly.
+  if (version < 2 && table === "entity" && out.cell === undefined)
+    out.cell = cellOf(out.x as number, out.y as number);
   return out;
 }

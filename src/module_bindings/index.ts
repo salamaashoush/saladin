@@ -129,6 +129,9 @@ const tablesSchema = __schema({
   entity: __table({
     name: 'entity',
     indexes: [
+      { accessor: 'cell', name: 'entity_cell_idx_btree', algorithm: 'btree', columns: [
+        'cell',
+      ] },
       { accessor: 'entityId', name: 'entity_entity_id_idx_btree', algorithm: 'btree', columns: [
         'entityId',
       ] },

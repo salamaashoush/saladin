@@ -17,12 +17,14 @@ export const economySystem = spacetimedb.reducer(
   { timer: economyTimer.rowType },
   (ctx) => {
     const active = activeMatchIds(ctx);
-    for (const p of [...ctx.db.player.iter()]) {
-      if (!active.has(p.matchId)) continue; // paused/ended match — no upkeep drain
+    // Players by match index (Rank 1) and each player's eaters by the owner index —
+    // O(players × that player's units), not O(players × all units in all matches)
+    // (docs/STDB_PERF.md §3 Rank 1).
+    for (const mid of active)
+    for (const p of ctx.db.player.matchId.filter(mid)) {
       if (p.defeated) continue;
-      const eaters = [...ctx.db.unit.iter()].filter(
-        (u) =>
-          u.owner.equals(p.identity) && (UNIT_DEFS[u.kind as 0]?.attack ?? 0) > 0
+      const eaters = [...ctx.db.unit.owner.filter(p.identity)].filter(
+        (u) => (UNIT_DEFS[u.kind as 0]?.attack ?? 0) > 0
       );
       const { food, starving, hpDrain } = applyUpkeep(
         p.food,

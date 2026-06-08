@@ -48,15 +48,20 @@ export function allBuildingTiles(ctx: any): Set<number> {
   return occupancySet(buildingOccupants(ctx), true);
 }
 
+// `occ` is the pathing-blocked tile set. Pass a per-tick prebuilt one (Rank 3a,
+// docs/STDB_PERF.md §3) so a hot system doesn't rebuild occupancy — a full
+// building.iter() + per-building .find() — on EVERY path request. When omitted it
+// rebuilds (kept for one-off callers like reducers outside the tick loop).
 export function movePatch(
   ctx: any,
   ex: number,
   ey: number,
   tx: number,
-  ty: number
+  ty: number,
+  occ?: Set<number>
 ): any {
   const seed = getSeed(ctx);
-  const passable = passableWith(seed, buildOccupancy(ctx));
+  const passable = passableWith(seed, occ ?? buildOccupancy(ctx));
   // Snap the destination to the passable tile nearest the target that is in the
   // mover's OWN connected region. The plain nearest-passable tile can be a pocket
   // cut off by water/walls (common on coastal keeps); routing there returns no

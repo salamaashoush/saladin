@@ -53,6 +53,20 @@ describe('findPathGrid', () => {
     // reachable around, but never via the illegal diagonal corner-cut
     expect(p.length).toBeGreaterThan(1);
   });
+
+  // ── LoS fast path (Rank 3) — corner-safe, behaviour-equivalent to full A* ──
+  it('fast-path returns a single direct waypoint on a fully open diagonal', () => {
+    const p = findPathGrid(open, 1.5, 1.5, 40.5, 40.5);
+    expect(p).toEqual([{ x: 40.5, y: 40.5 }]);
+  });
+
+  it('fast-path still detours when even one tile blocks the straight line', () => {
+    // a single blocker squarely on the straight diagonal forces the A* route
+    const blockMid: Passable = (x, y) => !(x === 20 && y === 20);
+    const p = findPathGrid(blockMid, 1.5, 1.5, 40.5, 40.5);
+    expect(p.length).toBeGreaterThan(1);
+    expect(p[p.length - 1]).toEqual({ x: 40.5, y: 40.5 });
+  });
 });
 
 describe('nearestPassableGrid', () => {

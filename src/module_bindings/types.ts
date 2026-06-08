@@ -76,6 +76,7 @@ export const Entity = __t.object("Entity", {
   y: __t.f32(),
   facing: __t.f32(),
   matchId: __t.u64(),
+  cell: __t.u32(),
 });
 export type Entity = __Infer<typeof Entity>;
 
@@ -188,6 +189,7 @@ export const SaveEntity = __t.object("SaveEntity", {
   y: __t.f32(),
   facing: __t.f32(),
   matchId: __t.u64(),
+  cell: __t.u32(),
 });
 export type SaveEntity = __Infer<typeof SaveEntity>;
 

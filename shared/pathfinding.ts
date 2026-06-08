@@ -22,11 +22,30 @@ const ORTHO = [
   [0, -1],
 ];
 
-// Worst-case A* expansions: a long route forced to detour around water can touch
-// most of the grid before reaching the goal. Cap at the full tile count so a
-// valid long path on the 144² map is never abandoned mid-search. (At 96² this
-// was a hard-coded 6000, which is below the 20 736 tiles a 144² map holds.)
+// A* expansion ceiling (docs/STDB_PERF.md §3 Rank 3c). A typical RTS route is found
+// in ~O(path-length) expansions thanks to the octile heuristic — the ceiling only
+// bites on a pathological detour (a near-full wall forcing exploration of most of
+// the grid). Kept at the full tile count so a VALID long route is never silently
+// abandoned (that would strand units): the real per-call A* win comes from 3a
+// (occupancy cached per tick, not rebuilt per call), 3b (working buffers reused,
+// not reallocated per call), and 3c's re-path throttle (units with a live path are
+// never re-pathed — every movePatch caller guards on `!hasTarget`), not from a low
+// cap that trades correctness for a bound 3a/3b already deliver.
 const MAX_EXPANSIONS = W * W;
+
+// Reusable A* working buffers (Rank 3b). findPathGrid allocated 4 typed arrays of
+// W*W cells (~330 KB+) on EVERY call; at scale that allocation + GC churn dominated.
+// A reducer instance is single-threaded, so a module-level scratch reused per call
+// is safe — exactly how the SDK reuses LEAF_BUF/BINARY_WRITER. Reset per call via a
+// cheap version stamp (gen[]) instead of re-zeroing 20 736 floats each time: a cell
+// whose stamp != the current generation is treated as fresh (g=∞, came=-1, open).
+const N_CELLS = W * W;
+const SCRATCH_G = new Float64Array(N_CELLS);
+const SCRATCH_F = new Float64Array(N_CELLS);
+const SCRATCH_CAME = new Int32Array(N_CELLS);
+const SCRATCH_GEN = new Int32Array(N_CELLS); // "touched this search" stamp (g/came valid)
+const SCRATCH_CLOSED = new Int32Array(N_CELLS); // "closed this search" stamp
+let scratchGen = 0; // bumped each search; a cell is fresh iff its stamp != scratchGen
 
 // ── terrain-backed wrappers ───────────────────────────────────────────────────
 
@@ -137,7 +156,7 @@ export function nearestReachablePassableGrid(
   return { x: bestX + 0.5, y: bestY + 0.5 };
 }
 
-function lineOfSight(
+export function lineOfSight(
   passable: Passable,
   ax: number,
   ay: number,
@@ -150,6 +169,64 @@ function lineOfSight(
     const t = i / steps;
     if (!passable(Math.floor(ax + (bx - ax) * t), Math.floor(ay + (by - ay) * t)))
       return false;
+  }
+  return true;
+}
+
+// Corner-safe straight-line clearance: true iff a unit can walk the segment
+// (ax,ay)→(bx,by) without entering a blocked tile AND without slipping diagonally
+// between two blocked tiles (the same corner-cut rule A* enforces with its
+// `passable(cx+dx,cy) && passable(cx,cy+dy)` guard on diagonal edges). Used only by
+// the findPathGrid fast path, where a plain LoS is NOT sufficient — sampling can
+// skip the pinched corner cells (see the "diagonal pinch" test). Walks every tile
+// the segment crosses via a DDA grid traversal and checks the shared edge at each
+// diagonal step.
+function clearStraightLine(
+  passable: Passable,
+  ax: number,
+  ay: number,
+  bx: number,
+  by: number
+): boolean {
+  let cx = Math.floor(ax);
+  let cy = Math.floor(ay);
+  const ex = Math.floor(bx);
+  const ey = Math.floor(by);
+  const dx = bx - ax;
+  const dy = by - ay;
+  const stepX = dx > 0 ? 1 : -1;
+  const stepY = dy > 0 ? 1 : -1;
+  // distance (in t along the segment) to the next vertical / horizontal grid line
+  const tDeltaX = dx !== 0 ? Math.abs(1 / dx) : Infinity;
+  const tDeltaY = dy !== 0 ? Math.abs(1 / dy) : Infinity;
+  let tMaxX =
+    dx !== 0
+      ? (dx > 0 ? Math.floor(ax) + 1 - ax : ax - Math.floor(ax)) * tDeltaX
+      : Infinity;
+  let tMaxY =
+    dy !== 0
+      ? (dy > 0 ? Math.floor(ay) + 1 - ay : ay - Math.floor(ay)) * tDeltaY
+      : Infinity;
+  if (!passable(cx, cy)) return false;
+  let guard = 0;
+  const maxSteps = Math.abs(ex - cx) + Math.abs(ey - cy) + 2;
+  while ((cx !== ex || cy !== ey) && guard++ <= maxSteps) {
+    if (tMaxX < tMaxY) {
+      cx += stepX;
+      tMaxX += tDeltaX;
+    } else if (tMaxY < tMaxX) {
+      cy += stepY;
+      tMaxY += tDeltaY;
+    } else {
+      // exact diagonal crossing through a grid corner — both orthogonal neighbours
+      // must be open or the move cuts the corner (A*'s diagonal rule).
+      if (!passable(cx + stepX, cy) || !passable(cx, cy + stepY)) return false;
+      cx += stepX;
+      cy += stepY;
+      tMaxX += tDeltaX;
+      tMaxY += tDeltaY;
+    }
+    if (!passable(cx, cy)) return false;
   }
   return true;
 }
@@ -224,11 +301,34 @@ export function findPathGrid(
   if (sxT === gxT && syT === gyT) return [{ x: tx, y: ty }];
   if (!passable(sxT, syT) || !passable(gxT, gyT)) return [];
 
-  const N = W * W;
-  const g = new Float64Array(N).fill(Infinity);
-  const f = new Float64Array(N);
-  const came = new Int32Array(N).fill(-1);
-  const closed = new Uint8Array(N);
+  // Fast path (Rank 3, docs/STDB_PERF.md §3): if the corner-safe straight line
+  // start→goal is clear, skip the A* grid search entirely and return the direct
+  // waypoint — the common open-field case (a soldier closing on an enemy with no
+  // wall between them). Behaviour-equivalent: A* would find this same clear route
+  // and the string-pull below would collapse it to the straight line. Uses the
+  // corner-safe check (not plain LoS) so it never green-lights a corner-cut A*
+  // would have refused.
+  if (clearStraightLine(passable, s.x, s.y, goal.x, goal.y))
+    return [{ x: tx, y: ty }];
+
+  // Reuse the module-level scratch (Rank 3b): bump the generation so every cell's
+  // stale stamp now reads as "fresh" — g=∞ / came=-1 / not-closed — without zeroing
+  // 20 736 cells. A cell is only meaningful this search once its GEN stamp is set.
+  scratchGen++;
+  const g = SCRATCH_G;
+  const f = SCRATCH_F;
+  const came = SCRATCH_CAME;
+  const gen = SCRATCH_GEN;
+  const closedGen = SCRATCH_CLOSED;
+  const cur_gen = scratchGen;
+  const gAt = (i: number): number => (gen[i] === cur_gen ? g[i] : Infinity);
+  const isClosed = (i: number): boolean => closedGen[i] === cur_gen;
+  const touch = (i: number, gVal: number, fVal: number, from: number) => {
+    gen[i] = cur_gen;
+    g[i] = gVal;
+    f[i] = fVal;
+    came[i] = from;
+  };
 
   const idx = (x: number, y: number) => y * W + x;
   const h = (x: number, y: number) => {
@@ -239,8 +339,7 @@ export function findPathGrid(
 
   const start = idx(sxT, syT);
   const goalI = idx(gxT, gyT);
-  g[start] = 0;
-  f[start] = h(sxT, syT);
+  touch(start, 0, h(sxT, syT), -1);
   const open = new Heap(f);
   open.push(start);
 
@@ -248,8 +347,8 @@ export function findPathGrid(
   while (open.size > 0 && expansions < maxExpansions) {
     const cur = open.pop();
     if (cur === goalI) break;
-    if (closed[cur]) continue;
-    closed[cur] = 1;
+    if (isClosed(cur)) continue;
+    closedGen[cur] = cur_gen;
     expansions++;
     const cx = cur % W;
     const cy = (cur / W) | 0;
@@ -263,18 +362,17 @@ export function findPathGrid(
         if (!passable(cx + dx, cy) || !passable(cx, cy + dy)) continue;
       }
       const ni = idx(nx, ny);
-      if (closed[ni]) continue;
+      if (isClosed(ni)) continue;
       const tentative = g[cur] + cost;
-      if (tentative < g[ni]) {
-        came[ni] = cur;
-        g[ni] = tentative;
-        f[ni] = tentative + h(nx, ny);
+      if (tentative < gAt(ni)) {
+        touch(ni, tentative, tentative + h(nx, ny), cur);
         open.push(ni);
       }
     }
   }
 
-  if (came[goalI] === -1) return [];
+  // goal never reached (unreachable, or cut off by the expansion cap).
+  if (gen[goalI] !== cur_gen || came[goalI] === -1) return [];
 
   const tiles: PathPoint[] = [];
   let c = goalI;

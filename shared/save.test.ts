@@ -49,7 +49,7 @@ describe("save schema descriptors", () => {
 // every live column is mirrored plus exactly the save bookkeeping columns — so a
 // new live column can't silently drop out of a save.
 const MIRROR_COLUMNS: Record<string, string[]> = {
-  entity: ["saveRowId", "saveId", "entityId", "x", "y", "facing", "matchId"],
+  entity: ["saveRowId", "saveId", "entityId", "x", "y", "facing", "matchId", "cell"],
   unit: [
     "saveRowId",
     "saveId",

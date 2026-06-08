@@ -19,6 +19,12 @@ export const entity = table(
     y: t.f32(),
     facing: t.f32(),
     matchId: t.u64().index('btree'), // which match this row belongs to (0 = legacy/global)
+    // Manual spatial grid (BitCraft chunk_index pattern, see docs/STDB_PERF.md §3
+    // Rank 2): the id of the CELL_SIZE-grid square at (x,y). btree-indexed so a
+    // neighbourhood query is a 3×3 block of point scans (entity.cell.filter) rather
+    // than an O(N²) table scan. Updated by moveUnits only when a unit crosses a cell
+    // boundary, so most move ticks add no extra write.
+    cell: t.u32().index('btree'),
   }
 );
 
@@ -241,6 +247,7 @@ export const saveEntity = table(
     y: t.f32(),
     facing: t.f32(),
     matchId: t.u64(),
+    cell: t.u32(),
   }
 );
 

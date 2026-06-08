@@ -38,7 +38,7 @@ import { aiBrainTimer } from '../schema/tables.ts';
 import { scheduleRefs } from '../schema/schedule_refs.ts';
 import { assignIdleGatherers, trainFrom } from '../world/economy.ts';
 import { startResearchFor } from '../world/research.ts';
-import { aiFindSpot, placeFor, movePatch } from '../world/placement.ts';
+import { aiFindSpot, placeFor, movePatch, buildOccupancy } from '../world/placement.ts';
 import { nearestEnemyKeep, assaultIntel } from '../world/commands.ts';
 import { dist } from '../world/util.ts';
 import { activeMatchIds } from '../world/scope.ts';
@@ -68,22 +68,32 @@ export const aiBrain = spacetimedb.reducer(
     if (bots.length === 0) return;
 
     // ── one snapshot per tick, hoisted out of the bot loop ──────────────────
+    // Built off the matchId btree index over active matches only (Rank 1,
+    // docs/STDB_PERF.md §3): a multi-match server no longer decodes every row in
+    // every match (including paused/ended ones) on each 1Hz brain tick.
     const pos = new Map<bigint, { x: number; y: number }>();
-    for (const e of [...ctx.db.entity.iter()]) pos.set(e.entityId, e);
-    const allUnits = [...ctx.db.unit.iter()];
-    const allBuildings = [...ctx.db.building.iter()];
-    // Owner identity (hex) → faction, so the per-bot enemy census never re-scans
-    // the player table per unit/building.
+    const allUnits: any[] = [];
+    const allBuildings: any[] = [];
     const factionOf = new Map<string, number>();
     const matchOf = new Map<string, bigint>();
-    for (const pl of [...ctx.db.player.iter()]) {
-      factionOf.set(pl.identity.toHexString(), pl.faction);
-      matchOf.set(pl.identity.toHexString(), pl.matchId);
+    for (const mid of active) {
+      for (const e of ctx.db.entity.matchId.filter(mid)) pos.set(e.entityId, e);
+      for (const u of ctx.db.unit.matchId.filter(mid)) allUnits.push(u);
+      for (const b of ctx.db.building.matchId.filter(mid)) allBuildings.push(b);
+      for (const pl of ctx.db.player.matchId.filter(mid)) {
+        factionOf.set(pl.identity.toHexString(), pl.faction);
+        matchOf.set(pl.identity.toHexString(), pl.matchId);
+      }
     }
     const facOf = (id: any): number | undefined =>
       factionOf.get(id.toHexString());
     const matchOfOwner = (id: any): bigint | undefined =>
       matchOf.get(id.toHexString());
+
+    // Pathing occupancy built ONCE per tick (Rank 3a, docs/STDB_PERF.md §3): the
+    // army-move / recall / scout movePatch calls below reuse it instead of each
+    // rebuilding building.iter()+per-building .find().
+    const occ = buildOccupancy(ctx);
 
     for (const bot of bots) {
       const p = ctx.db.player.identity.find(bot.identity);
@@ -358,7 +368,7 @@ export const aiBrain = spacetimedb.reducer(
           targetNode: 0n,
           homeX: ke.x,
           homeY: ke.y,
-          ...movePatch(ctx, fu.x, fu.y, ke.x, ke.y),
+          ...movePatch(ctx, fu.x, fu.y, ke.x, ke.y, occ),
         });
       };
 
@@ -447,7 +457,7 @@ export const aiBrain = spacetimedb.reducer(
               stance: Stance.Aggressive,
               gatherState: GatherState.Idle,
               targetNode: 0n,
-              ...movePatch(ctx, fu.x, fu.y, target.x, target.y),
+              ...movePatch(ctx, fu.x, fu.y, target.x, target.y, occ),
             });
           }
           waveTimer = prof.waveInterval;
@@ -477,7 +487,7 @@ export const aiBrain = spacetimedb.reducer(
                 ...su,
                 gatherState: GatherState.Idle,
                 targetNode: 0n,
-                ...movePatch(ctx, se.x, se.y, target.x, target.y),
+                ...movePatch(ctx, se.x, se.y, target.x, target.y, occ),
               });
               scoutId = best.entityId;
             }

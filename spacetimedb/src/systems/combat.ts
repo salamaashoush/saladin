@@ -34,11 +34,12 @@ import {
   ELEV_BONUS_MAX,
 } from '../../../shared/elevation.ts';
 import { garrisonFirePower } from '../../../shared/garrison.ts';
+import { cellOf, cellsInRadius } from '../../../shared/spatial.ts';
 import { spacetimedb } from '../schema/db.ts';
 import { combatTimer } from '../schema/tables.ts';
 import { scheduleRefs } from '../schema/schedule_refs.ts';
 import { dist, getSeed } from '../world/util.ts';
-import { movePatch } from '../world/placement.ts';
+import { movePatch, buildOccupancy } from '../world/placement.ts';
 import { markDefeated } from '../world/spawn.ts';
 import { activeMatchIds } from '../world/scope.ts';
 import { bumpCombatTick } from '../world/tick_count.ts';
@@ -48,26 +49,48 @@ import {
   evacuateOnDeath,
 } from '../world/garrison.ts';
 
-// Live enemy units (as Located) for target acquisition. `units` is the tick
-// snapshot; each is re-fetched so a unit already killed this tick is excluded.
-// Shared by the soldier and tower loops so acquisition logic lives in one place.
+// Walk the live ENTITY rows in the spatial-grid block of Chebyshev cell-radius `r`
+// around (x,y) and hand each (id, entity) to `visit`. This is the Rank 2
+// neighbourhood query (docs/STDB_PERF.md §3): `entity.cell.filter(cellId)` is an
+// index point scan, so the block touches ≤(2r+1)² point scans regardless of total
+// unit count — turning the old O(N²) acquisition into O(N × units-in-block).
+// r=1 (the 3×3 block) covers any candidate within CELL_SIZE (8) of the unit, which
+// exceeds every soldier aggro/ally/aura radius (≤8). Towers use r=2 because their
+// elevation-extended fire reach (up to ~11) spans more than one cell.
+function forEachEntityNear(
+  ctx: any,
+  x: number,
+  y: number,
+  r: number,
+  visit: (id: bigint, ex: number, ey: number) => void
+): void {
+  for (const cell of cellsInRadius(cellOf(x, y), r))
+    for (const e of ctx.db.entity.cell.filter(cell)) visit(e.entityId, e.x, e.y);
+}
+
+// Live enemy units (as Located) within the cell block (radius `r`) around (x,y),
+// in the same match. Each is re-fetched so a unit killed earlier this tick is
+// excluded. Approximation vs the old whole-match scan (documented): acquisition is
+// now nearest-enemy-in-block, which equals the old result for any target within
+// the block's covered radius (≥ aggro/fire range for the chosen r).
 function enemyUnitsAround(
   ctx: any,
-  units: any[],
+  x: number,
+  y: number,
   owner: any,
   selfId: bigint,
-  matchId: bigint
+  matchId: bigint,
+  r = 1
 ): Located[] {
   const out: Located[] = [];
-  for (const o of units) {
-    if (o.entityId === selfId || o.owner.equals(owner)) continue;
-    if (o.matchId !== matchId) continue; // a foe only exists within the same match
-    const fresh = ctx.db.unit.entityId.find(o.entityId);
-    if (!fresh) continue; // dead this tick
-    if (fresh.garrisonedIn !== 0n) continue; // sheltered — not a field target
-    const oe = ctx.db.entity.entityId.find(o.entityId);
-    if (oe) out.push({ id: o.entityId, x: oe.x, y: oe.y });
-  }
+  forEachEntityNear(ctx, x, y, r, (id, ex, ey) => {
+    if (id === selfId) return;
+    const o = ctx.db.unit.entityId.find(id);
+    if (!o) return; // not a unit (building/node), or dead this tick
+    if (o.owner.equals(owner) || o.matchId !== matchId) return;
+    if (o.garrisonedIn !== 0n) return; // sheltered — not a field target
+    out.push({ id, x: ex, y: ey });
+  });
   return out;
 }
 
@@ -87,50 +110,54 @@ function enemyBuildingsAround(ctx: any, owner: any, matchId: bigint): Located[] 
 // Radius within which own units count as "nearby allies" for morale recovery.
 const ALLY_RADIUS = 5;
 
-// Count own LIVE units (excluding self) within ALLY_RADIUS of (x,y). Steadies a
-// unit's morale — soldiers hold the line better in formation than in isolation.
+// Count own LIVE units (excluding self) within ALLY_RADIUS of (x,y), scanning only
+// the 3×3 cell block (Rank 2). Steadies a unit's morale — soldiers hold the line
+// better in formation than in isolation. ALLY_RADIUS (5) < CELL_SIZE so the block
+// covers every ally within range.
 function nearbyAllies(
   ctx: any,
-  units: any[],
   owner: any,
   selfId: bigint,
   x: number,
   y: number
 ): number {
   let n = 0;
-  for (const o of units) {
-    if (o.entityId === selfId || !o.owner.equals(owner)) continue;
-    const fresh = ctx.db.unit.entityId.find(o.entityId);
-    if (!fresh || fresh.garrisonedIn !== 0n) continue; // dead or sheltered
-    const oe = ctx.db.entity.entityId.find(o.entityId);
-    if (oe && dist(x, y, oe.x, oe.y) <= ALLY_RADIUS) n++;
-  }
+  forEachEntityNear(ctx, x, y, 1, (id, ex, ey) => {
+    if (id === selfId) return;
+    if (dist(x, y, ex, ey) > ALLY_RADIUS) return;
+    const o = ctx.db.unit.entityId.find(id);
+    if (!o || !o.owner.equals(owner) || o.garrisonedIn !== 0n) return; // not own/dead/sheltered
+    n++;
+  });
   return n;
 }
 
 // True if (x,y) is within an own keep's steadying presence or an allied Imam's
 // morale aura — both let nearby troops recover morale and resist rout faster.
-function nearSupport(
-  ctx: any,
-  units: any[],
-  owner: any,
-  x: number,
-  y: number
-): boolean {
-  for (const b of [...ctx.db.building.iter()]) {
-    if (b.kind !== BuildingKind.Keep || !b.owner.equals(owner)) continue;
-    const be = ctx.db.entity.entityId.find(b.entityId);
-    if (be && dist(x, y, be.x, be.y) <= ALLY_RADIUS) return true;
-  }
-  for (const o of units) {
+// Scans the 3×3 cell block (Rank 2): keep presence and Imam aura radii (≤7) are
+// within CELL_SIZE, so the block covers every supporter.
+function nearSupport(ctx: any, owner: any, x: number, y: number): boolean {
+  let found = false;
+  forEachEntityNear(ctx, x, y, 1, (id, ex, ey) => {
+    if (found) return;
+    // a Keep building in steadying range
+    const b = ctx.db.building.entityId.find(id);
+    if (b) {
+      if (
+        b.kind === BuildingKind.Keep &&
+        b.owner.equals(owner) &&
+        dist(x, y, ex, ey) <= ALLY_RADIUS
+      )
+        found = true;
+      return;
+    }
+    // an own Imam (or other aura unit) whose aura reaches (x,y)
+    const o = ctx.db.unit.entityId.find(id);
+    if (!o || !o.owner.equals(owner) || o.garrisonedIn !== 0n) return;
     const aura = UNIT_DEFS[o.kind as UnitKindT]?.moraleAura ?? 0;
-    if (aura <= 0 || !o.owner.equals(owner)) continue;
-    const fresh = ctx.db.unit.entityId.find(o.entityId);
-    if (!fresh || fresh.garrisonedIn !== 0n) continue; // dead or sheltered
-    const oe = ctx.db.entity.entityId.find(o.entityId);
-    if (oe && dist(x, y, oe.x, oe.y) <= aura) return true;
-  }
-  return false;
+    if (aura > 0 && dist(x, y, ex, ey) <= aura) found = true;
+  });
+  return found;
 }
 
 // Where a routing unit flees: back toward its posted home, falling through to
@@ -142,8 +169,9 @@ function routDestination(
 ): { x: number; y: number } {
   let best: { x: number; y: number } | null = null;
   let bestD = Infinity;
-  for (const b of [...ctx.db.building.iter()]) {
-    if (b.kind !== BuildingKind.Keep || !b.owner.equals(owner)) continue;
+  // Owner btree index (Rank 1): only this owner's buildings, not every building.
+  for (const b of ctx.db.building.owner.filter(owner)) {
+    if (b.kind !== BuildingKind.Keep) continue;
     const be = ctx.db.entity.entityId.find(b.entityId);
     if (!be) continue;
     const d = dist(u.homeX, u.homeY, be.x, be.y);
@@ -164,8 +192,16 @@ export const combatTick = spacetimedb.reducer(
     const seed = getSeed(ctx);
     const active = activeMatchIds(ctx);
     // Only units in Active matches fight or are fought over this tick — a paused
-    // match's soldiers neither strike nor take damage, so the battle freezes.
-    const units = [...ctx.db.unit.iter()].filter((u) => active.has(u.matchId));
+    // match's soldiers neither strike nor take damage, so the battle freezes. Built
+    // off the matchId btree index (Rank 1, docs/STDB_PERF.md §3): only active-match
+    // units are decoded, not every unit in every match.
+    const units: any[] = [];
+    for (const mid of active)
+      for (const u of ctx.db.unit.matchId.filter(mid)) units.push(u);
+
+    // Pathing occupancy built ONCE per tick (Rank 3a): every movePatch call below
+    // reuses it instead of rebuilding building.iter()+per-building .find() per call.
+    const occ = buildOccupancy(ctx);
 
     // Per-tick tech cache: owner identity (hex) → completed techMask. Read once per
     // owner, not per pair, so the researched bonuses fold into effective stats
@@ -228,7 +264,7 @@ export const combatTick = spacetimedb.reducer(
           routing: true,
           attackTarget: 0n,
           attackCooldown: Math.max(0, u.attackCooldown - COMBAT_DT),
-          ...(u.hasTarget ? {} : movePatch(ctx, e.x, e.y, dest.x, dest.y)),
+          ...(u.hasTarget ? {} : movePatch(ctx, e.x, e.y, dest.x, dest.y, occ)),
         });
         continue;
       }
@@ -244,7 +280,7 @@ export const combatTick = spacetimedb.reducer(
           e.x,
           e.y,
           def.aggroRange,
-          enemyUnitsAround(ctx, units, u.owner, u.entityId, u.matchId),
+          enemyUnitsAround(ctx, e.x, e.y, u.owner, u.entityId, u.matchId),
           def.prefersBuildings ? enemyBuildingsAround(ctx, u.owner, u.matchId) : [],
           !!def.prefersBuildings
         );
@@ -337,14 +373,14 @@ export const combatTick = spacetimedb.reducer(
             ...u,
             attackTarget: targetId,
             attackCooldown: cd,
-            ...(u.hasTarget ? {} : movePatch(ctx, e.x, e.y, te.x, te.y)),
+            ...(u.hasTarget ? {} : movePatch(ctx, e.x, e.y, te.x, te.y, occ)),
           });
         } else if (act === 'return') {
           ctx.db.unit.entityId.update({
             ...u,
             attackTarget: 0n,
             attackCooldown: cd,
-            ...(u.hasTarget ? {} : movePatch(ctx, e.x, e.y, u.homeX, u.homeY)),
+            ...(u.hasTarget ? {} : movePatch(ctx, e.x, e.y, u.homeX, u.homeY, occ)),
           });
         } else {
           // hold: stand fast, do not chase.
@@ -360,8 +396,9 @@ export const combatTick = spacetimedb.reducer(
     // Towers (and manned walls) auto-fire at the nearest enemy unit within range.
     // A garrisoned host's ranged occupants stack their bows onto its volley; a
     // structure that cannot shoot on its own still fires once archers man it.
-    for (const b of [...ctx.db.building.iter()]) {
-      if (!active.has(b.matchId)) continue; // paused/ended match — towers hold fire
+    // Towers by match index (Rank 1): only active-match buildings are decoded.
+    for (const mid of active)
+    for (const b of ctx.db.building.matchId.filter(mid)) {
       const bdef = bldgDefOf(b) ?? BUILDING_DEFS[BuildingKind.Keep];
       const garrisonFire = garrisonFirePower(
         occupantFireProfile(ctx, b.entityId),
@@ -378,7 +415,9 @@ export const combatTick = spacetimedb.reducer(
       const be = ctx.db.entity.entityId.find(b.entityId);
       if (!be) continue;
       const cd = Math.max(0, b.cooldown - COMBAT_DT);
-      const enemies = enemyUnitsAround(ctx, units, b.owner, 0n, b.matchId);
+      // r=2: a tower's elevation-extended fire reach can exceed one cell, so scan a
+      // 5×5 block (covers ~16 world units, past the ~11 max reach).
+      const enemies = enemyUnitsAround(ctx, be.x, be.y, b.owner, 0n, b.matchId, 2);
       // Search out to the best-case elevation reach, then confirm the chosen
       // target is within this tower's range adjusted for THIS target's elevation.
       const towerElev = elevation(seed, be.x, be.y);
@@ -423,8 +462,8 @@ export const combatTick = spacetimedb.reducer(
       if (u.morale >= MORALE_MAX && !u.routing) continue; // already full + steady
       const e = ctx.db.entity.entityId.find(u.entityId);
       if (!e) continue;
-      const allies = nearbyAllies(ctx, units, u.owner, u.entityId, e.x, e.y);
-      const support = nearSupport(ctx, units, u.owner, e.x, e.y);
+      const allies = nearbyAllies(ctx, u.owner, u.entityId, e.x, e.y);
+      const support = nearSupport(ctx, u.owner, e.x, e.y);
       const morale = moraleRecover(u.morale, COMBAT_DT, allies, support);
       ctx.db.unit.entityId.update({
         ...u,

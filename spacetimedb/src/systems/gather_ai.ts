@@ -54,8 +54,10 @@ export const unitAi = spacetimedb.reducer({ timer: aiTimer.rowType }, (ctx) => {
     });
   };
 
-  for (const u of [...ctx.db.unit.iter()]) {
-    if (!active.has(u.matchId)) continue; // paused/ended match — frozen
+  // Drive off the matchId index (Rank 1, docs/STDB_PERF.md §3): only active-match
+  // gatherers are decoded, not every unit in every match.
+  for (const mid of active)
+  for (const u of ctx.db.unit.matchId.filter(mid)) {
     if (u.garrisonedIn !== 0n) continue; // sheltered — off the field
     if (u.gatherState === GatherState.Idle) continue;
     const e = ctx.db.entity.entityId.find(u.entityId);
@@ -76,7 +78,7 @@ export const unitAi = spacetimedb.reducer({ timer: aiTimer.rowType }, (ctx) => {
           hasTarget: false,
         });
       } else if (!u.hasTarget) {
-        const patch = movePatch(ctx, e.x, e.y, ne.x, ne.y);
+        const patch = movePatch(ctx, e.x, e.y, ne.x, ne.y, occ);
         // No path to this node (it sits in a region the gatherer can't reach):
         // pick the next nearest node instead of retrying the same dead end every
         // tick. retarget skips the current target so we don't relock onto it.
@@ -158,7 +160,7 @@ export const unitAi = spacetimedb.reducer({ timer: aiTimer.rowType }, (ctx) => {
       } else if (!u.hasTarget) {
         ctx.db.unit.entityId.update({
           ...u,
-          ...movePatch(ctx, e.x, e.y, drop.x, drop.y),
+          ...movePatch(ctx, e.x, e.y, drop.x, drop.y, occ),
         });
       }
     }
