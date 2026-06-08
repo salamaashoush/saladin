@@ -32,11 +32,14 @@ export function useResearch(
   stock: Stockpile,
   ownedBuildings: ReadonlySet<BuildingKind>,
 ): ResearchView {
-  const [research] = useTable(tables.research);
-
-  const mine = identity
-    ? research.filter((r) => r.owner.isEqual(identity))
-    : [];
+  // research carries no matchId; scope the subscription to the caller (owner) so
+  // it stays an index-backed point query and opens nothing at the menu.
+  const [mine] = useTable(
+    identity
+      ? tables.research.where((r) => r.owner.eq(identity))
+      : tables.research,
+    { enabled: !!identity },
+  );
 
   const rows = researchPanelState(techMask, mine, stock, ownedBuildings);
 

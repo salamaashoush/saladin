@@ -9,6 +9,7 @@ import { type Infer as __Infer } from "spacetimedb";
 import AddAiReducer from "../add_ai_reducer";
 import AttackUnitReducer from "../attack_unit_reducer";
 import AutoGatherReducer from "../auto_gather_reducer";
+import DebugBigMatchReducer from "../debug_big_match_reducer";
 import DebugStressReducer from "../debug_stress_reducer";
 import DebugStressClearReducer from "../debug_stress_clear_reducer";
 import DeleteSaveReducer from "../delete_save_reducer";
@@ -35,6 +36,7 @@ import UngarrisonBuildingReducer from "../ungarrison_building_reducer";
 export type AddAiParams = __Infer<typeof AddAiReducer>;
 export type AttackUnitParams = __Infer<typeof AttackUnitReducer>;
 export type AutoGatherParams = __Infer<typeof AutoGatherReducer>;
+export type DebugBigMatchParams = __Infer<typeof DebugBigMatchReducer>;
 export type DebugStressParams = __Infer<typeof DebugStressReducer>;
 export type DebugStressClearParams = __Infer<typeof DebugStressClearReducer>;
 export type DeleteSaveParams = __Infer<typeof DeleteSaveReducer>;
@@ -56,5 +58,6 @@ export type SetStanceParams = __Infer<typeof SetStanceReducer>;
 export type StartResearchParams = __Infer<typeof StartResearchReducer>;
 export type StartSkirmishParams = __Infer<typeof StartSkirmishReducer>;
 export type TrainUnitParams = __Infer<typeof TrainUnitReducer>;
-export type UngarrisonBuildingParams = __Infer<typeof UngarrisonBuildingReducer>;
-
+export type UngarrisonBuildingParams = __Infer<
+  typeof UngarrisonBuildingReducer
+>;

@@ -1,6 +1,11 @@
 // Derives the current player's match state from the live tables. The cache IS
 // the source of truth (TanStack-style) — no local mirrors. `inGame` and
 // `outcome` drive the top-level phase routing in App.
+//
+// Every table read here is scoped to the caller's matchId (passed in from the
+// session) so these hooks open matchId-filtered, index-backed subscriptions — not
+// the whole player/unit/building tables across every running match. At the menu
+// (matchId null) they subscribe to nothing.
 import { useTable } from "spacetimedb/react";
 import type { Identity } from "spacetimedb";
 import { tables } from "../module_bindings";
@@ -30,10 +35,25 @@ export interface MatchState {
   outcome: Outcome;
 }
 
-export function useMatch(identity?: Identity): MatchState {
-  const [players] = useTable(tables.player);
-  const [units] = useTable(tables.unit);
-  const [buildings] = useTable(tables.building);
+export function useMatch(
+  identity?: Identity,
+  matchId?: bigint | null,
+): MatchState {
+  const scoped = matchId != null;
+  const [players] = useTable(
+    scoped ? tables.player.where((r) => r.matchId.eq(matchId)) : tables.player,
+    { enabled: scoped },
+  );
+  const [units] = useTable(
+    scoped ? tables.unit.where((r) => r.matchId.eq(matchId)) : tables.unit,
+    { enabled: scoped },
+  );
+  const [buildings] = useTable(
+    scoped
+      ? tables.building.where((r) => r.matchId.eq(matchId))
+      : tables.building,
+    { enabled: scoped },
+  );
 
   const me = identity
     ? players.find((p) => p.identity.isEqual(identity))

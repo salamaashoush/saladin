@@ -15,8 +15,9 @@ import { HUD } from "./ui/HUD";
 // overlay once the match resolves). All logic lives in the session hooks.
 function App() {
   const viewportRef = useRef<HTMLDivElement>(null);
-  const { game, identity, isActive, ready } = useGameSession(viewportRef);
-  const match = useMatch(identity);
+  const { game, identity, isActive, matchId, ready, inMatch } =
+    useGameSession(viewportRef);
+  const match = useMatch(identity, matchId);
   const actions = useGameActions();
   const lastSkirmish = useGameStore((s) => s.lastSkirmish);
   const ownedBuildings = useGameStore((s) => s.ownedBuildings);
@@ -54,12 +55,12 @@ function App() {
 
       {!isActive && <div className="status">Connecting…</div>}
 
-      {isActive && !match.inGame && <Menu actions={actions} ready={ready} />}
+      {isActive && matchId === null && <Menu actions={actions} ready={ready} />}
 
-      {match.inGame && (
+      {matchId !== null && (
         <HUD
           connected={isActive}
-          ready={ready}
+          ready={inMatch}
           name={match.name}
           faction={match.faction}
           wood={match.wood}
