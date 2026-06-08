@@ -1,7 +1,7 @@
 // Three.js render + input layer. NOT authoritative — it mirrors the module's
 // tables into meshes and turns input into reducer calls. The server tick owns
 // truth; the client interpolates between the position snapshots it receives.
-import * as THREE from 'three';
+import * as THREE from "three";
 import {
   WORLD_SIZE,
   MOVE_TICK_MS,
@@ -19,32 +19,33 @@ import {
   canGarrison,
   canHostGarrison,
   garrisonFreeSlots,
-} from '../../shared/index.ts';
-import { biasOf, NEUTRAL_BIAS, type MapBias } from '../../shared/index.ts';
-import { buildTerrain, terrainHeight } from './Terrain.ts';
-import { buildVegetation } from './Vegetation.ts';
-import { buildSky, buildOcean, HORIZON } from './Environment.ts';
+} from "../../shared/index.ts";
+import { biasOf, NEUTRAL_BIAS, type MapBias } from "../../shared/index.ts";
+import { buildTerrain, terrainHeight } from "./Terrain.ts";
+import { buildVegetation } from "./Vegetation.ts";
+import { buildSky, buildOcean, HORIZON } from "./Environment.ts";
 import {
   BAR_W,
   BAR_H,
-  buildUnit,
   buildByKind,
   buildWallSlab,
   buildResourceNode,
   buildSelRing,
   buildHpBar,
-} from './meshes/index.ts';
-import { placeCamera, applyProjection, panCamera } from './camera.ts';
-import { drawMinimap, type Minimap } from './minimap.ts';
-import { lineTiles, formation } from './input.ts';
-import { useGameStore } from '../store/gameStore';
+} from "./meshes/index.ts";
+import { InstancedUnits } from "./meshes/InstancedUnits.ts";
+import { InstancedHpBars } from "./meshes/InstancedHpBars.ts";
+import { placeCamera, applyProjection, panCamera } from "./camera.ts";
+import { drawMinimap, type Minimap } from "./minimap.ts";
+import { lineTiles, formation } from "./input.ts";
+import { useGameStore } from "../store/gameStore";
 
-type Arche = 'unit' | 'building' | 'tree';
+type Arche = "unit" | "building" | "tree";
 
 interface RObj {
   group: THREE.Group;
   arche: Arche;
-  body: THREE.Object3D; // bobbed pivot for units; mesh otherwise
+  body?: THREE.Object3D; // static mesh for buildings/nodes; units render via InstancedUnits
   kind: number;
   ownerHex?: string;
   hp: number;
@@ -53,7 +54,8 @@ interface RObj {
   routing: boolean;
   tintMat?: THREE.MeshStandardMaterial;
   selRing?: THREE.Mesh;
-  hpBar?: THREE.Group;
+  hpBar?: THREE.Group; // buildings only; units use the instanced HP-bar overlay
+  hpBarY?: number; // units: world-Y offset for the instanced bar above the body
   routFlag?: THREE.Object3D; // overhead marker shown while this unit routs
   fromX: number;
   fromZ: number;
@@ -90,7 +92,7 @@ interface GameConn {
 }
 
 const INTERP_S = MOVE_TICK_MS / 1000;
-const GROUND = '#c2a06a';
+const GROUND = "#c2a06a";
 
 export class SaladinGame {
   private readonly container: HTMLElement;
@@ -104,17 +106,27 @@ export class SaladinGame {
   private readonly sky = buildSky();
   private readonly ocean = buildOcean();
   private seed = 0;
-  private presetId = 'continental';
+  private presetId = "continental";
   private bias: MapBias = NEUTRAL_BIAS;
   private readonly selBox: HTMLDivElement;
 
-  private readonly center = new THREE.Vector3(WORLD_SIZE / 2, 0, WORLD_SIZE / 2);
+  private readonly center = new THREE.Vector3(
+    WORLD_SIZE / 2,
+    0,
+    WORLD_SIZE / 2,
+  );
   // Iso vantage scaled up for the 144² map: a taller, farther offset frames the
   // larger terrain and clears the amplified mountains.
   private readonly offset = new THREE.Vector3(42, 56, 42);
   private viewSize = 22;
 
   private readonly objs = new Map<string, RObj>();
+  // All unit bodies are drawn through here — one InstancedMesh (+ LOD impostor)
+  // per UnitKind, so draw calls stay ~constant in unit count.
+  private readonly instancedUnits = new InstancedUnits(this.scene);
+  // Damaged-unit HP bars batched into two draws (backing + fill) rather than two
+  // sprites per unit, so they stay off the draw-call curve at scale.
+  private readonly instancedHpBars = new InstancedHpBars(this.scene);
   private readonly pos = new Map<string, PosRow>();
   // Garrison mirror: which building each sheltered unit is in, and the live
   // occupant tally per host. Drives mesh hiding + the selected-building panel.
@@ -124,7 +136,7 @@ export class SaladinGame {
   private readonly keys = new Set<string>();
   private readonly selected = new Set<string>();
 
-  private myHex = '';
+  private myHex = "";
   private myKeepId: string | null = null;
   private myMatchId: bigint | null = null; // local player's match; a change = load/new match
   private framed = false;
@@ -195,12 +207,12 @@ export class SaladinGame {
       this.viewSize,
       -this.viewSize,
       0.1,
-      6000
+      6000,
     );
     this.placeCamera();
 
-    this.scene.add(new THREE.HemisphereLight('#ffffff', '#6b5a3a', 0.9));
-    const sun = new THREE.DirectionalLight('#fff3d6', 1.1);
+    this.scene.add(new THREE.HemisphereLight("#ffffff", "#6b5a3a", 0.9));
+    const sun = new THREE.DirectionalLight("#fff3d6", 1.1);
     sun.position.set(40, 70, 20);
     sun.castShadow = true;
     sun.shadow.mapSize.set(2048, 2048);
@@ -215,18 +227,18 @@ export class SaladinGame {
     // Fallback flat ground for picking until the terrain chunks stream in.
     const fallback = new THREE.Mesh(
       new THREE.PlaneGeometry(WORLD_SIZE, WORLD_SIZE),
-      new THREE.MeshStandardMaterial({ color: GROUND })
+      new THREE.MeshStandardMaterial({ color: GROUND }),
     );
-    fallback.name = 'ground';
+    fallback.name = "ground";
     fallback.rotation.x = -Math.PI / 2;
     fallback.position.set(WORLD_SIZE / 2, 0, WORLD_SIZE / 2);
     fallback.receiveShadow = true;
     this.terrain = fallback;
     this.scene.add(fallback);
 
-    this.selBox = document.createElement('div');
+    this.selBox = document.createElement("div");
     this.selBox.style.cssText =
-      'position:absolute;border:1px solid #ffec80;background:rgba(255,236,128,0.15);pointer-events:none;display:none;z-index:5;';
+      "position:absolute;border:1px solid #ffec80;background:rgba(255,236,128,0.15);pointer-events:none;display:none;z-index:5;";
     container.appendChild(this.selBox);
 
     this.storeUnsub = useGameStore.subscribe((s) => {
@@ -249,25 +261,24 @@ export class SaladinGame {
   // F3; shown by default in DEV and when ?perf is in the URL.
   private initPerfOverlay() {
     const wantPerf =
-      (typeof location !== 'undefined' &&
-        /[?&]perf\b/.test(location.search)) ||
+      (typeof location !== "undefined" && /[?&]perf\b/.test(location.search)) ||
       !!import.meta.env?.DEV;
-    const el = document.createElement('div');
+    const el = document.createElement("div");
     el.style.cssText =
-      'position:absolute;top:6px;left:6px;z-index:50;font:11px/1.35 ui-monospace,Menlo,Consolas,monospace;' +
-      'color:#9bf06b;background:rgba(0,0,0,0.62);padding:5px 7px;border-radius:4px;' +
-      'pointer-events:none;white-space:pre;text-shadow:0 1px 1px #000;';
-    el.style.display = wantPerf ? 'block' : 'none';
-    el.textContent = 'perf…';
+      "position:absolute;top:6px;left:6px;z-index:50;font:11px/1.35 ui-monospace,Menlo,Consolas,monospace;" +
+      "color:#9bf06b;background:rgba(0,0,0,0.62);padding:5px 7px;border-radius:4px;" +
+      "pointer-events:none;white-space:pre;text-shadow:0 1px 1px #000;";
+    el.style.display = wantPerf ? "block" : "none";
+    el.textContent = "perf…";
     this.container.appendChild(el);
     this.perfOverlay = el;
-    window.addEventListener('keydown', this.onPerfToggle);
+    window.addEventListener("keydown", this.onPerfToggle);
   }
 
   private onPerfToggle = (e: KeyboardEvent) => {
-    if (e.key === 'F3' && this.perfOverlay) {
+    if (e.key === "F3" && this.perfOverlay) {
       this.perfOverlay.style.display =
-        this.perfOverlay.style.display === 'none' ? 'block' : 'none';
+        this.perfOverlay.style.display === "none" ? "block" : "none";
     }
   };
 
@@ -278,7 +289,7 @@ export class SaladinGame {
     let n = 0;
     const cam = this.camera;
     for (const o of this.objs.values()) {
-      if (o.arche !== 'unit' || !o.group.visible) continue;
+      if (o.arche !== "unit" || !o.group.visible) continue;
       const v = o.group.position.clone().project(cam);
       if (v.x < -1.05 || v.x > 1.05 || v.y < -1.05 || v.y > 1.05) continue;
       if (v.z < -1 || v.z > 1) continue;
@@ -305,8 +316,8 @@ export class SaladinGame {
     let buildings = 0;
     let trees = 0;
     for (const o of this.objs.values()) {
-      if (o.arche === 'unit') units++;
-      else if (o.arche === 'building') buildings++;
+      if (o.arche === "unit") units++;
+      else if (o.arche === "building") buildings++;
       else trees++;
     }
     const onScreen = this.onScreenUnitCount();
@@ -329,7 +340,7 @@ export class SaladinGame {
     this.perfAccum += dt;
     if (this.perfAccum >= 0.25) {
       this.perfAccum = 0;
-      if (this.perfOverlay && this.perfOverlay.style.display !== 'none') {
+      if (this.perfOverlay && this.perfOverlay.style.display !== "none") {
         this.perfOverlay.textContent =
           `FPS ${perf.fps}  (${perf.frameMs}ms)\n` +
           `draws ${perf.drawCalls.toLocaleString()}  tris ${perf.triangles.toLocaleString()}\n` +
@@ -338,7 +349,7 @@ export class SaladinGame {
       }
       if (import.meta.env?.DEV)
         console.log(
-          `[perf] fps=${perf.fps} ms=${perf.frameMs} draws=${perf.drawCalls} tris=${perf.triangles} units=${perf.units} onScreen=${perf.onScreenUnits} bld=${perf.buildings} trees=${perf.trees}`
+          `[perf] fps=${perf.fps} ms=${perf.frameMs} draws=${perf.drawCalls} tris=${perf.triangles} units=${perf.units} onScreen=${perf.onScreenUnits} bld=${perf.buildings} trees=${perf.trees}`,
         );
     }
   }
@@ -352,7 +363,7 @@ export class SaladinGame {
       this.mini = undefined;
       return;
     }
-    const ctx = c.getContext('2d');
+    const ctx = c.getContext("2d");
     if (ctx) this.mini = { canvas: c, ctx };
   }
 
@@ -371,7 +382,7 @@ export class SaladinGame {
       table: any,
       ins: (r: any) => void,
       del: (r: any) => void,
-      upd?: (r: any) => void
+      upd?: (r: any) => void,
     ) => {
       const fi = (_c: any, r: any) => ins(r);
       const fd = (_c: any, r: any) => del(r);
@@ -390,7 +401,7 @@ export class SaladinGame {
       db.entity,
       (r) => this.onPos(r),
       (r) => this.onPosDelete(r),
-      (r) => this.onPos(r)
+      (r) => this.onPos(r),
     );
     on(
       db.unit,
@@ -401,10 +412,10 @@ export class SaladinGame {
           r.hp,
           r.owner?.toHexString?.(),
           r.morale,
-          r.routing
+          r.routing,
         ),
       (r) => this.removeObj(r.entityId),
-      (r) => this.onUnitUpdate(r)
+      (r) => this.onUnitUpdate(r),
     );
     on(
       db.building,
@@ -415,33 +426,33 @@ export class SaladinGame {
           r.hp,
           r.owner?.toHexString?.(),
           r.rallyX,
-          r.rallyY
+          r.rallyY,
         ),
       (r) => this.removeObj(r.entityId),
-      (r) => this.onBuildingUpdate(r)
+      (r) => this.onBuildingUpdate(r),
     );
     on(
       db.garrison,
       (r) => this.onGarrisonInsert(r),
-      (r) => this.onGarrisonDelete(r)
+      (r) => this.onGarrisonDelete(r),
     );
     on(
       db.resourceNode,
       (r) => this.spawnNode(r.entityId, r.resType, r.remaining),
       (r) => this.removeObj(r.entityId),
-      (r) => this.scaleNode(r.entityId, r.remaining)
+      (r) => this.scaleNode(r.entityId, r.remaining),
     );
     on(
       db.player,
       (r) => this.onPlayer(r),
       () => {},
-      (r) => this.onPlayer(r)
+      (r) => this.onPlayer(r),
     );
     on(
       db.config,
       (r) => this.onConfig(r),
       () => {},
-      (r) => this.onConfig(r)
+      (r) => this.onConfig(r),
     );
 
     const onShotInsert = (_c: any, r: any) => this.onShot(r);
@@ -452,7 +463,7 @@ export class SaladinGame {
   private onShot(r: any) {
     const mesh = new THREE.Mesh(
       new THREE.CylinderGeometry(0.03, 0.03, 0.55, 5),
-      new THREE.MeshBasicMaterial({ color: 0x2e2114 })
+      new THREE.MeshBasicMaterial({ color: 0x2e2114 }),
     );
     this.scene.add(mesh);
     this.arrows.push({
@@ -468,7 +479,7 @@ export class SaladinGame {
   private onConfig(r: any) {
     if (!r?.seed) return;
     // Rebuild when the seed OR preset changes (a new skirmish regenerates both).
-    const preset = (r.preset as string) || 'continental';
+    const preset = (r.preset as string) || "continental";
     if (this.seed === r.seed && this.presetId === preset) return;
     this.seed = r.seed;
     this.presetId = preset;
@@ -492,7 +503,10 @@ export class SaladinGame {
 
     // Re-seat everything on the freshly amplified heightmap.
     for (const o of this.objs.values())
-      o.group.position.y = this.heightAt(o.group.position.x, o.group.position.z);
+      o.group.position.y = this.heightAt(
+        o.group.position.x,
+        o.group.position.z,
+      );
   }
 
   private disposeTree(root: THREE.Object3D) {
@@ -523,7 +537,7 @@ export class SaladinGame {
     this.tryFrameKeep(id);
     const o = this.objs.get(id);
     if (!o) return;
-    if (o.arche === 'building') {
+    if (o.arche === "building") {
       // Buildings are static — snap, don't interpolate, so occupancy is exact.
       o.group.position.x = r.x;
       o.group.position.z = r.y;
@@ -560,8 +574,11 @@ export class SaladinGame {
     const hex = r.identity.toHexString();
     const color = PLAYER_COLORS[r.color % PLAYER_COLORS.length];
     this.playerColors.set(hex, color);
-    for (const o of this.objs.values())
-      if (o.ownerHex === hex && o.tintMat) o.tintMat.color.setHex(color);
+    for (const [id, o] of this.objs) {
+      if (o.ownerHex !== hex) continue;
+      if (o.arche === "unit") this.instancedUnits.setColor(o.kind, id, color);
+      else if (o.tintMat) o.tintMat.color.setHex(color);
+    }
     // The local player jumped to a different match (a load, or starting a fresh
     // skirmish): the old match's rows are being torn down and replaced with fresh
     // entityIds, so re-frame on the incoming keep rather than the stale one.
@@ -602,10 +619,11 @@ export class SaladinGame {
     this.garrisonByUnit.set(unitId, buildingId);
     this.occupantsByBuilding.set(
       buildingId,
-      (this.occupantsByBuilding.get(buildingId) ?? 0) + 1
+      (this.occupantsByBuilding.get(buildingId) ?? 0) + 1,
     );
     const o = this.objs.get(unitId);
     if (o) o.group.visible = false;
+    this.instancedHpBars.remove(unitId); // sheltered units carry no field bar
     if (this.selected.delete(unitId)) this.emitSelection();
     if (this.selectedBuildingId === buildingId) this.emitSelectedBuilding();
   }
@@ -632,7 +650,7 @@ export class SaladinGame {
     if (routing && !o.routFlag) {
       const def = UNIT_DEFS[o.kind as UnitKind] ?? UNIT_DEFS[UnitKind.Peasant];
       const flag = new THREE.Sprite(
-        new THREE.SpriteMaterial({ color: 0xff5533, depthTest: false })
+        new THREE.SpriteMaterial({ color: 0xff5533, depthTest: false }),
       );
       flag.scale.set(0.34, 0.34, 1);
       flag.position.y = def.height + def.radius * 2.4 + 0.72;
@@ -667,38 +685,44 @@ export class SaladinGame {
     hp: number,
     ownerHex?: string,
     morale = 1,
-    routing = false
+    routing = false,
   ) {
     const id = entityId.toString();
     if (this.objs.has(id)) return;
     const def = UNIT_DEFS[kind as UnitKind] ?? UNIT_DEFS[UnitKind.Peasant];
-    const color = ownerHex ? this.playerColors.get(ownerHex) ?? 0xdddddd : 0xdddddd;
-    const p =
-      this.pos.get(id) ?? { entityId, x: WORLD_SIZE / 2, y: WORLD_SIZE / 2, facing: 0 };
+    const color = ownerHex
+      ? (this.playerColors.get(ownerHex) ?? 0xdddddd)
+      : 0xdddddd;
+    const p = this.pos.get(id) ?? {
+      entityId,
+      x: WORLD_SIZE / 2,
+      y: WORLD_SIZE / 2,
+      facing: 0,
+    };
     const group = this.newGroup(id, p);
 
-    const body = buildUnit(kind, color);
-    group.add(body);
+    // The body is drawn by the per-kind InstancedMesh; the HP bar is the instanced
+    // overlay; the group carries only the selection ring (+ a lazy rout flag) so
+    // those follow the unit and toggle per-unit.
+    this.instancedUnits.add(kind, id);
+    this.instancedUnits.setColor(kind, id, color);
     const ring = buildSelRing(def.radius);
     group.add(ring);
-    const hpBar = buildHpBar();
-    hpBar.position.y = def.height + def.radius * 2.4 + 0.35;
-    group.add(hpBar);
 
     this.scene.add(group);
     const o: RObj = {
       group,
-      arche: 'unit',
-      body,
+      arche: "unit",
       kind,
       ownerHex,
       hp,
       maxHp: def.maxHp,
       morale,
       routing: false,
-      tintMat: body.userData.tintMat as THREE.MeshStandardMaterial,
       selRing: ring,
-      hpBar,
+      // hpBar handled by the instanced overlay (no per-unit group); height stored
+      // for placement above the unit each frame.
+      hpBarY: def.height + def.radius * 2.4 + 0.35,
       fromX: p.x,
       fromZ: p.y,
       toX: p.x,
@@ -720,20 +744,24 @@ export class SaladinGame {
     hp: number,
     ownerHex?: string,
     rallyX?: number,
-    rallyY?: number
+    rallyY?: number,
   ) {
     const id = entityId.toString();
     if (this.objs.has(id)) return;
     const def = BUILDING_DEFS[kind as 0] ?? BUILDING_DEFS[BuildingKind.Keep];
-    const color = ownerHex ? this.playerColors.get(ownerHex) ?? 0xdddddd : 0xdddddd;
+    const color = ownerHex
+      ? (this.playerColors.get(ownerHex) ?? 0xdddddd)
+      : 0xdddddd;
     const known = this.pos.get(id);
-    const p =
-      known ?? { entityId, x: WORLD_SIZE / 2, y: WORLD_SIZE / 2, facing: 0 };
+    const p = known ?? {
+      entityId,
+      x: WORLD_SIZE / 2,
+      y: WORLD_SIZE / 2,
+      facing: 0,
+    };
     const group = this.newGroup(id, p);
     const body =
-      kind === BuildingKind.Wall
-        ? buildWallSlab()
-        : buildByKind(kind, color);
+      kind === BuildingKind.Wall ? buildWallSlab() : buildByKind(kind, color);
     group.add(body);
     const hpBar = buildHpBar();
     hpBar.position.y = def.height + 0.6;
@@ -741,7 +769,7 @@ export class SaladinGame {
     this.scene.add(group);
     const o: RObj = {
       group,
-      arche: 'building',
+      arche: "building",
       body,
       kind,
       ownerHex,
@@ -772,7 +800,7 @@ export class SaladinGame {
 
   private finalizeBuildingPlacement(id: string) {
     const o = this.objs.get(id);
-    if (!o || o.arche !== 'building') return;
+    if (!o || o.arche !== "building") return;
     const x = o.group.position.x;
     const z = o.group.position.z;
     this.stampOccupancy(o.kind, x, z, true);
@@ -817,7 +845,7 @@ export class SaladinGame {
     // Slab template is the same; only the run orientation changes.
     o.group.rotation.y = this.wallAngleAt(
       o.group.position.x,
-      o.group.position.z
+      o.group.position.z,
     );
   }
 
@@ -834,8 +862,12 @@ export class SaladinGame {
   private spawnNode(entityId: bigint, resType: number, remaining: number) {
     const id = entityId.toString();
     if (this.objs.has(id)) return;
-    const p =
-      this.pos.get(id) ?? { entityId, x: WORLD_SIZE / 2, y: WORLD_SIZE / 2, facing: 0 };
+    const p = this.pos.get(id) ?? {
+      entityId,
+      x: WORLD_SIZE / 2,
+      y: WORLD_SIZE / 2,
+      facing: 0,
+    };
     const group = this.newGroup(id, p);
     const body = buildResourceNode(resType);
     group.add(body);
@@ -843,7 +875,7 @@ export class SaladinGame {
     this.scene.add(group);
     this.objs.set(id, {
       group,
-      arche: 'tree',
+      arche: "tree",
       body,
       kind: resType, // resType drives the minimap color for nodes
       hp: 0,
@@ -875,10 +907,15 @@ export class SaladinGame {
     if (!o) return;
     const bx = o.group.position.x;
     const bz = o.group.position.z;
-    const isWall = o.arche === 'building' && o.kind === BuildingKind.Wall;
+    const isWall = o.arche === "building" && o.kind === BuildingKind.Wall;
     this.pendingBuildings.delete(id);
-    if (o.arche === 'building') this.stampOccupancy(o.kind, bx, bz, false);
-    if (isWall) this.wallByTile.delete(Math.floor(bz) * WORLD_SIZE + Math.floor(bx));
+    if (o.arche === "building") this.stampOccupancy(o.kind, bx, bz, false);
+    if (isWall)
+      this.wallByTile.delete(Math.floor(bz) * WORLD_SIZE + Math.floor(bx));
+    if (o.arche === "unit") {
+      this.instancedUnits.remove(o.kind, id);
+      this.instancedHpBars.remove(id);
+    }
     this.scene.remove(o.group);
     o.group.traverse((c) => {
       const m = c as THREE.Mesh;
@@ -892,8 +929,8 @@ export class SaladinGame {
     // authoritative, but a unit/building can be removed while still referenced).
     this.garrisonByUnit.delete(id);
     this.occupantsByBuilding.delete(id);
-    if (o.arche === 'building') this.refreshWallsAround(o.kind, bx, bz);
-    if (o.arche === 'building' && o.ownerHex === this.myHex)
+    if (o.arche === "building") this.refreshWallsAround(o.kind, bx, bz);
+    if (o.arche === "building" && o.ownerHex === this.myHex)
       this.emitOwnedBuildings();
     if (this.selectedBuildingId === id) this.clearBuildingSel();
     if (this.selected.delete(id)) this.emitSelection();
@@ -934,13 +971,23 @@ export class SaladinGame {
   }
 
   private updateHpBar(o: RObj) {
-    if (!o.hpBar || o.maxHp <= 0) return;
+    if (o.maxHp <= 0) return;
     const ratio = Math.max(0, Math.min(1, o.hp / o.maxHp));
+    // Units: the instanced overlay owns the bar; the loop positions it each frame.
+    // Hidden (garrisoned) units drop their bar entirely. The actual placement +
+    // ratio push happens in the loop so it follows the interpolated position.
+    if (o.arche === "unit") {
+      if (!o.group.visible || ratio >= 0.999)
+        this.instancedHpBars.remove(o.group.userData.rid as string);
+      // Visible+damaged bars are pushed in the render loop with live coordinates.
+      return;
+    }
+    if (!o.hpBar) return;
     const fg = o.hpBar.userData.fg as THREE.Sprite;
     fg.scale.x = BAR_W * ratio;
     fg.position.x = -(BAR_W * (1 - ratio)) / 2;
     (fg.material as THREE.SpriteMaterial).color.setHex(
-      ratio > 0.5 ? 0x33dd44 : ratio > 0.25 ? 0xddcc33 : 0xdd3333
+      ratio > 0.5 ? 0x33dd44 : ratio > 0.25 ? 0xddcc33 : 0xdd3333,
     );
     o.hpBar.visible = ratio < 0.999;
   }
@@ -994,7 +1041,8 @@ export class SaladinGame {
   private emitOwnedBuildings() {
     const kinds = new Set<number>();
     for (const o of this.objs.values())
-      if (o.arche === 'building' && o.ownerHex === this.myHex) kinds.add(o.kind);
+      if (o.arche === "building" && o.ownerHex === this.myHex)
+        kinds.add(o.kind);
     useGameStore.getState().setOwnedBuildings([...kinds]);
   }
 
@@ -1012,6 +1060,9 @@ export class SaladinGame {
   private pickList(): THREE.Object3D[] {
     const list: THREE.Object3D[] = [this.terrain];
     for (const o of this.objs.values()) list.push(o.group);
+    // Unit bodies live in per-kind InstancedMeshes, not in their groups — include
+    // them so a click resolves to the instance under the cursor.
+    for (const m of this.instancedUnits.pickMeshes()) list.push(m);
     return list;
   }
 
@@ -1021,24 +1072,33 @@ export class SaladinGame {
     return cur;
   }
 
+  // Resolve a raycast hit to an entityId: instanced unit hits carry an instanceId
+  // resolved by the batch; everything else walks up to the group's rid.
+  private ridOfHit(hit: THREE.Intersection): string | undefined {
+    if (hit.object.userData.instKind !== undefined)
+      return (
+        this.instancedUnits.resolveHit(hit.object, hit.instanceId) ?? undefined
+      );
+    return this.findRoot(hit.object)?.userData.rid as string | undefined;
+  }
+
   private clickSelect(p: { x: number; y: number }, additive: boolean) {
     this.setPointer(p.x, p.y);
     this.raycaster.setFromCamera(this.pointer, this.camera);
     const hits = this.raycaster.intersectObjects(this.pickList(), true);
     for (const hit of hits) {
-      const root = this.findRoot(hit.object);
-      const rid = root?.userData.rid as string | undefined;
+      const rid = this.ridOfHit(hit);
       if (!rid) continue;
       const o = this.objs.get(rid);
       if (!o) continue;
-      if (o.arche === 'unit' && o.ownerHex === this.myHex) {
+      if (o.arche === "unit" && o.ownerHex === this.myHex) {
         this.clearBuildingSel();
         if (!additive) this.selected.clear();
         this.selected.add(rid);
         this.emitSelection();
         return;
       }
-      if (o.arche === 'building' && o.ownerHex === this.myHex) {
+      if (o.arche === "building" && o.ownerHex === this.myHex) {
         this.selected.clear();
         this.emitSelection();
         this.selectBuilding(rid);
@@ -1108,13 +1168,13 @@ export class SaladinGame {
         depthTest: false,
         transparent: true,
         opacity: 0.9,
-      })
+      }),
     );
     this.buildingSelRing.rotation.x = -Math.PI / 2;
     this.buildingSelRing.position.set(
       o.group.position.x,
       o.group.position.y + 0.06,
-      o.group.position.z
+      o.group.position.z,
     );
     this.buildingSelRing.renderOrder = 2;
     this.scene.add(this.buildingSelRing);
@@ -1128,7 +1188,7 @@ export class SaladinGame {
       const flag = new THREE.Group();
       const pole = new THREE.Mesh(
         new THREE.CylinderGeometry(0.04, 0.04, 1.0, 5),
-        new THREE.MeshBasicMaterial({ color: 0x3a2a18 })
+        new THREE.MeshBasicMaterial({ color: 0x3a2a18 }),
       );
       pole.position.y = 0.5;
       flag.add(pole);
@@ -1137,7 +1197,7 @@ export class SaladinGame {
         new THREE.MeshBasicMaterial({
           color: 0x9bf06b,
           side: THREE.DoubleSide,
-        })
+        }),
       );
       cloth.position.set(0.27, 0.85, 0);
       flag.add(cloth);
@@ -1155,7 +1215,7 @@ export class SaladinGame {
     const maxY = Math.max(a.y, b.y);
     this.selected.clear();
     for (const [id, o] of this.objs) {
-      if (o.arche !== 'unit' || o.ownerHex !== this.myHex) continue;
+      if (o.arche !== "unit" || o.ownerHex !== this.myHex) continue;
       if (this.garrisonByUnit.has(id)) continue; // sheltered — not on the field
       const v = o.group.position.clone().project(this.camera);
       if (v.z < -1 || v.z > 1) continue;
@@ -1175,7 +1235,7 @@ export class SaladinGame {
     const hits = this.raycaster.intersectObjects(this.pickList(), true);
 
     if (this.selectedBuildingId) {
-      const g = hits.find((h) => h.object.name === 'ground');
+      const g = hits.find((h) => h.object.name === "ground");
       if (g) {
         this.conn.reducers.setRally({
           entityId: BigInt(this.selectedBuildingId),
@@ -1188,20 +1248,19 @@ export class SaladinGame {
 
     if (this.selected.size === 0) return;
     for (const hit of hits) {
-      const root = this.findRoot(hit.object);
-      const rid = root?.userData.rid as string | undefined;
+      const rid = this.ridOfHit(hit);
       if (rid) {
         const o = this.objs.get(rid);
         if (!o) continue;
-        if (o.arche === 'unit' && o.ownerHex !== this.myHex) {
+        if (o.arche === "unit" && o.ownerHex !== this.myHex) {
           this.commandAttack(BigInt(rid));
           return;
         }
-        if (o.arche === 'tree') {
+        if (o.arche === "tree") {
           this.commandGather(BigInt(rid));
           return;
         }
-        if (o.arche === 'building') {
+        if (o.arche === "building") {
           if (o.ownerHex !== this.myHex) this.commandAttack(BigInt(rid));
           else if (canHostGarrison(BUILDING_DEFS[o.kind as 0]))
             this.commandGarrison(rid);
@@ -1211,7 +1270,7 @@ export class SaladinGame {
         // own unit / other: ignore, let it fall through to nothing
         return;
       }
-      if (hit.object.name === 'ground') {
+      if (hit.object.name === "ground") {
         this.commandMove(hit.point.x, hit.point.z);
         return;
       }
@@ -1247,14 +1306,18 @@ export class SaladinGame {
   // slots. Non-garrisonable units (cavalry/siege) in the selection are left to
   // walk to the building instead so a mixed group still does something sensible.
   private commandGarrison(buildingId: string) {
-    const def = BUILDING_DEFS[
-      (this.objs.get(buildingId)?.kind ?? BuildingKind.Tower) as 0
-    ];
-    let free = garrisonFreeSlots(def, this.occupantsByBuilding.get(buildingId) ?? 0);
+    const def =
+      BUILDING_DEFS[
+        (this.objs.get(buildingId)?.kind ?? BuildingKind.Tower) as 0
+      ];
+    let free = garrisonFreeSlots(
+      def,
+      this.occupantsByBuilding.get(buildingId) ?? 0,
+    );
     let routedAny = false;
     for (const id of this.selected) {
       const o = this.objs.get(id);
-      if (!o || o.arche !== 'unit') continue;
+      if (!o || o.arche !== "unit") continue;
       if (canGarrison(UNIT_DEFS[o.kind as UnitKind])) {
         if (free <= 0) break;
         this.conn!.reducers.garrisonUnit({
@@ -1294,7 +1357,7 @@ export class SaladinGame {
       this.ghost = new THREE.Group();
       this.scene.add(this.ghost);
     }
-    this.selBox.style.display = 'none';
+    this.selBox.style.display = "none";
   }
 
   private clearGhost() {
@@ -1312,12 +1375,8 @@ export class SaladinGame {
     if (this.buildMode === null) return false;
     const def = BUILDING_DEFS[this.buildMode as 0];
     const passable = (tx: number, ty: number) => isPassable(this.seed, tx, ty);
-    const ok = canPlace(
-      this.buildMode as 0,
-      cx,
-      cy,
-      passable,
-      (tx, ty) => this.occupied.has(ty * WORLD_SIZE + tx)
+    const ok = canPlace(this.buildMode as 0, cx, cy, passable, (tx, ty) =>
+      this.occupied.has(ty * WORLD_SIZE + tx),
     );
     if (!ok) return false;
     // Shore buildings (FishingHut) must touch water — mirror the module's gate.
@@ -1327,12 +1386,17 @@ export class SaladinGame {
   }
 
   // Placement cells under the cursor: a single footprint, or a dragged wall line.
-  private buildCells(hx: number, hz: number): Array<{ cx: number; cy: number; f: number }> {
+  private buildCells(
+    hx: number,
+    hz: number,
+  ): Array<{ cx: number; cy: number; f: number }> {
     if (this.buildMode === null) return [];
     const def = BUILDING_DEFS[this.buildMode as 0];
     if (this.buildMode === BuildingKind.Wall) {
       const hov = { tx: Math.floor(hx), ty: Math.floor(hz) };
-      const tiles = this.buildDragStart ? lineTiles(this.buildDragStart, hov) : [hov];
+      const tiles = this.buildDragStart
+        ? lineTiles(this.buildDragStart, hov)
+        : [hov];
       return tiles.map((t) => ({ cx: t.tx + 0.5, cy: t.ty + 0.5, f: 1 }));
     }
     const c = footprintCenter(def.footprint, hx, hz);
@@ -1386,7 +1450,7 @@ export class SaladinGame {
   private commitBuild(hx: number, hz: number) {
     if (this.buildMode === null || !this.conn) return;
     const valid = this.buildCells(hx, hz).filter((c) =>
-      this.placeValid(c.cx, c.cy)
+      this.placeValid(c.cx, c.cy),
     );
     if (this.buildMode === BuildingKind.Wall) {
       // One batched call for the whole dragged line — no per-tile reducer flood.
@@ -1418,7 +1482,7 @@ export class SaladinGame {
       this.ghost = new THREE.Group();
       this.scene.add(this.ghost);
     }
-    this.selBox.style.display = 'none';
+    this.selBox.style.display = "none";
   }
 
   private ownBuildingUnder(e: PointerEvent): { id: string; o: RObj } | null {
@@ -1431,7 +1495,7 @@ export class SaladinGame {
       const rid = root?.userData.rid as string | undefined;
       if (!rid) continue;
       const o = this.objs.get(rid);
-      if (o && o.arche === 'building' && o.ownerHex === this.myHex)
+      if (o && o.arche === "building" && o.ownerHex === this.myHex)
         return { id: rid, o };
       return null; // topmost object isn't a demolishable building
     }
@@ -1453,7 +1517,7 @@ export class SaladinGame {
           transparent: true,
           opacity: 0.4,
           depthWrite: false,
-        })
+        }),
       );
       const px = tgt.o.group.position.x;
       const pz = tgt.o.group.position.z;
@@ -1479,14 +1543,14 @@ export class SaladinGame {
 
   private bindEvents() {
     const el = this.renderer.domElement;
-    el.addEventListener('pointerdown', this.onPointerDown);
-    el.addEventListener('contextmenu', (e) => e.preventDefault());
-    el.addEventListener('wheel', this.onWheel, { passive: false });
-    window.addEventListener('pointermove', this.onPointerMove);
-    window.addEventListener('pointerup', this.onPointerUp);
-    window.addEventListener('resize', this.onResize);
-    window.addEventListener('keydown', this.onKey);
-    window.addEventListener('keyup', this.onKey);
+    el.addEventListener("pointerdown", this.onPointerDown);
+    el.addEventListener("contextmenu", (e) => e.preventDefault());
+    el.addEventListener("wheel", this.onWheel, { passive: false });
+    window.addEventListener("pointermove", this.onPointerMove);
+    window.addEventListener("pointerup", this.onPointerUp);
+    window.addEventListener("resize", this.onResize);
+    window.addEventListener("keydown", this.onKey);
+    window.addEventListener("keyup", this.onKey);
   }
 
   private onPointerDown = (e: PointerEvent) => {
@@ -1539,11 +1603,14 @@ export class SaladinGame {
     }
     if (!this.dragStart) return;
     const p = this.pixel(e);
-    if (!this.dragging && Math.hypot(p.x - this.dragStart.x, p.y - this.dragStart.y) > 4)
+    if (
+      !this.dragging &&
+      Math.hypot(p.x - this.dragStart.x, p.y - this.dragStart.y) > 4
+    )
       this.dragging = true;
     if (this.dragging) {
       const a = this.dragStart;
-      this.selBox.style.display = 'block';
+      this.selBox.style.display = "block";
       this.selBox.style.left = `${Math.min(a.x, p.x)}px`;
       this.selBox.style.top = `${Math.min(a.y, p.y)}px`;
       this.selBox.style.width = `${Math.abs(p.x - a.x)}px`;
@@ -1571,7 +1638,7 @@ export class SaladinGame {
     else this.clickSelect(p, e.shiftKey);
     this.dragStart = null;
     this.dragging = false;
-    this.selBox.style.display = 'none';
+    this.selBox.style.display = "none";
   };
 
   private onWheel = (e: WheelEvent) => {
@@ -1579,18 +1646,21 @@ export class SaladinGame {
     // Wider zoom-out ceiling so the player can survey the whole 144² map.
     this.viewSize = Math.max(
       10,
-      Math.min(85, this.viewSize + Math.sign(e.deltaY) * 2.5)
+      Math.min(85, this.viewSize + Math.sign(e.deltaY) * 2.5),
     );
     this.updateProjection();
   };
 
   private onKey = (e: KeyboardEvent) => {
-    if (e.type === 'keydown') this.keys.add(e.key.toLowerCase());
+    if (e.type === "keydown") this.keys.add(e.key.toLowerCase());
     else this.keys.delete(e.key.toLowerCase());
   };
 
   private onResize = () => {
-    this.renderer.setSize(this.container.clientWidth, this.container.clientHeight);
+    this.renderer.setSize(
+      this.container.clientWidth,
+      this.container.clientHeight,
+    );
     this.updateProjection();
   };
 
@@ -1599,8 +1669,9 @@ export class SaladinGame {
       this.camera,
       this.viewSize,
       this.container.clientWidth,
-      this.container.clientHeight
+      this.container.clientHeight,
     );
+    this.instancedUnits.setViewSize(this.viewSize);
   }
 
   private placeCamera() {
@@ -1623,10 +1694,10 @@ export class SaladinGame {
         // Resource nodes carry their resType in `kind`; color the blip by the
         // resource so the minimap distinguishes wood/stone/food/gold.
         color:
-          o.arche === 'tree'
-            ? RESOURCE_DEFS[o.kind as 0]?.color ?? 0x2f5a25
+          o.arche === "tree"
+            ? (RESOURCE_DEFS[o.kind as 0]?.color ?? 0x2f5a25)
             : o.ownerHex
-              ? this.playerColors.get(o.ownerHex) ?? 0xffffff
+              ? (this.playerColors.get(o.ownerHex) ?? 0xffffff)
               : 0xffffff,
       };
   }
@@ -1639,7 +1710,7 @@ export class SaladinGame {
       this.minimapBlips(),
       this.center.x,
       this.center.z,
-      this.viewSize
+      this.viewSize,
     );
   }
 
@@ -1659,18 +1730,46 @@ export class SaladinGame {
     this.ocean.position.set(this.center.x, -0.05, this.center.z);
 
     const bob = now * 0.005;
-    for (const o of this.objs.values()) {
+    for (const [id, o] of this.objs) {
       if (o.lerp < 1) {
         o.lerp = Math.min(1, o.lerp + dt / INTERP_S);
         o.group.position.x = o.fromX + (o.toX - o.fromX) * o.lerp;
         o.group.position.z = o.fromZ + (o.toZ - o.fromZ) * o.lerp;
       }
-      o.group.position.y = this.heightAt(o.group.position.x, o.group.position.z);
-      if (o.arche === 'unit') {
-        o.group.rotation.y = -o.facing;
-        o.body.position.y = Math.abs(Math.sin(bob + o.phase)) * 0.07;
+      o.group.position.y = this.heightAt(
+        o.group.position.x,
+        o.group.position.z,
+      );
+      if (o.arche === "unit") {
+        // Overlays ride the group (facing not applied — rings/bars are flat);
+        // the instanced body carries position + facing yaw + idle bob.
+        const bobY = Math.abs(Math.sin(bob + o.phase)) * 0.07;
+        this.instancedUnits.setTransform(
+          o.kind,
+          id,
+          o.group.position.x,
+          o.group.position.y,
+          o.group.position.z,
+          o.facing,
+          bobY,
+          o.group.visible,
+        );
+        // Floating HP bar follows the live position; hidden/full-HP units have
+        // no bar (set() removes them) so only damaged units cost anything.
+        if (o.group.visible && o.maxHp > 0) {
+          const ratio = o.hp / o.maxHp;
+          this.instancedHpBars.set(
+            id,
+            o.group.position.x,
+            o.group.position.y + (o.hpBarY ?? 1),
+            o.group.position.z,
+            ratio,
+          );
+        }
       }
     }
+    this.instancedUnits.flush();
+    this.instancedHpBars.update(this.camera);
 
     for (let i = this.arrows.length - 1; i >= 0; i--) {
       const a = this.arrows[i];
@@ -1707,7 +1806,7 @@ export class SaladinGame {
       this.offset,
       this.viewSize,
       this.keys,
-      dt
+      dt,
     );
   }
 
@@ -1716,15 +1815,20 @@ export class SaladinGame {
     cancelAnimationFrame(this.raf);
     this.storeUnsub?.();
     this.detach();
-    window.removeEventListener('pointermove', this.onPointerMove);
-    window.removeEventListener('pointerup', this.onPointerUp);
-    window.removeEventListener('resize', this.onResize);
-    window.removeEventListener('keydown', this.onKey);
-    window.removeEventListener('keyup', this.onKey);
-    window.removeEventListener('keydown', this.onPerfToggle);
+    window.removeEventListener("pointermove", this.onPointerMove);
+    window.removeEventListener("pointerup", this.onPointerUp);
+    window.removeEventListener("resize", this.onResize);
+    window.removeEventListener("keydown", this.onKey);
+    window.removeEventListener("keyup", this.onKey);
+    window.removeEventListener("keydown", this.onPerfToggle);
     this.perfOverlay?.remove();
-    this.renderer.domElement.removeEventListener('pointerdown', this.onPointerDown);
-    this.renderer.domElement.removeEventListener('wheel', this.onWheel);
+    this.renderer.domElement.removeEventListener(
+      "pointerdown",
+      this.onPointerDown,
+    );
+    this.renderer.domElement.removeEventListener("wheel", this.onWheel);
+    this.instancedUnits.dispose();
+    this.instancedHpBars.dispose();
     if (this.vegetation) this.disposeTree(this.vegetation);
     this.disposeTree(this.terrain);
     this.selBox.remove();
