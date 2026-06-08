@@ -15,6 +15,7 @@ import {
   footprintTiles,
   footprintCenter,
   canPlace,
+  isWaterAdjacent,
 } from '../../shared/index.ts';
 import { biasOf, NEUTRAL_BIAS, type MapBias } from '../../shared/index.ts';
 import { buildTerrain, terrainHeight } from './Terrain.ts';
@@ -547,6 +548,7 @@ export class SaladinGame {
     };
     this.objs.set(id, o);
     this.updateHpBar(o);
+    if (ownerHex === this.myHex) this.emitOwnedBuildings();
     // Occupancy + wall orientation need the real position, which may arrive
     // (via the entity row) after this building row. Defer if it's not here yet.
     if (known) this.finalizeBuildingPlacement(id);
@@ -670,6 +672,8 @@ export class SaladinGame {
     });
     this.objs.delete(id);
     if (o.arche === 'building') this.refreshWallsAround(o.kind, bx, bz);
+    if (o.arche === 'building' && o.ownerHex === this.myHex)
+      this.emitOwnedBuildings();
     if (this.selectedBuildingId === id) this.clearBuildingSel();
     if (this.selected.delete(id)) this.emitSelection();
   }
@@ -733,9 +737,25 @@ export class SaladinGame {
       const sel = this.selected.has(id);
       if (o.selRing) o.selRing.visible = sel;
       if (!sel) continue;
+      // Bucket the expanded roster into the card's four rows by role so new
+      // units never get miscounted as peasants: ranged → archers, cavalry/siege
+      // → knights, other melee → spearmen, non-combatants → peasants.
+      const def = UNIT_DEFS[o.kind as UnitKind];
       if (o.kind === UnitKind.Spearman) spearmen++;
-      else if (o.kind === UnitKind.Archer) archers++;
-      else if (o.kind === UnitKind.Knight) knights++;
+      else if (
+        o.kind === UnitKind.Archer ||
+        o.kind === UnitKind.Crossbowman ||
+        o.kind === UnitKind.HorseArcher
+      )
+        archers++;
+      else if (
+        o.kind === UnitKind.Knight ||
+        o.kind === UnitKind.Mamluk ||
+        o.kind === UnitKind.Ram ||
+        o.kind === UnitKind.Mangonel
+      )
+        knights++;
+      else if (def && def.attack > 0) spearmen++;
       else peasants++;
       if (o.maxHp > 0) {
         hpSum += o.hp / o.maxHp;
@@ -755,6 +775,15 @@ export class SaladinGame {
   private clearSelection() {
     this.selected.clear();
     this.emitSelection();
+  }
+
+  // Publish the set of building kinds the local player owns so the BuildBar can
+  // dim tech-gated buildings/units the same way the module enforces them.
+  private emitOwnedBuildings() {
+    const kinds = new Set<number>();
+    for (const o of this.objs.values())
+      if (o.arche === 'building' && o.ownerHex === this.myHex) kinds.add(o.kind);
+    useGameStore.getState().setOwnedBuildings([...kinds]);
   }
 
   private setPointer(px: number, py: number) {
@@ -1019,13 +1048,20 @@ export class SaladinGame {
 
   private placeValid(cx: number, cy: number): boolean {
     if (this.buildMode === null) return false;
-    return canPlace(
+    const def = BUILDING_DEFS[this.buildMode as 0];
+    const passable = (tx: number, ty: number) => isPassable(this.seed, tx, ty);
+    const ok = canPlace(
       this.buildMode as 0,
       cx,
       cy,
-      (tx, ty) => isPassable(this.seed, tx, ty),
+      passable,
       (tx, ty) => this.occupied.has(ty * WORLD_SIZE + tx)
     );
+    if (!ok) return false;
+    // Shore buildings (FishingHut) must touch water — mirror the module's gate.
+    if (def.requiresWater && !isWaterAdjacent(def.footprint, cx, cy, passable))
+      return false;
+    return true;
   }
 
   // Placement cells under the cursor: a single footprint, or a dragged wall line.

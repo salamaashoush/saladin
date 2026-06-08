@@ -22,12 +22,14 @@ export interface Toast {
 interface GameUIState {
   selection: SelectionSummary;
   selectedBuilding: { id: string; kind: number } | null;
+  ownedBuildings: number[]; // BuildingKinds the player currently owns (tech tree)
   toasts: Toast[];
   buildMode: number | null; // BuildingKind being placed, or null
   demolishMode: boolean;
   lastSkirmish: SkirmishConfig | null; // remembered for "Rematch"
   setSelection: (s: SelectionSummary) => void;
   setSelectedBuilding: (b: { id: string; kind: number } | null) => void;
+  setOwnedBuildings: (kinds: number[]) => void;
   pushToast: (text: string, kind?: Toast['kind']) => void;
   dismissToast: (id: number) => void;
   setBuildMode: (kind: number | null) => void;
@@ -49,12 +51,14 @@ let nextToastId = 1;
 export const useGameStore = create<GameUIState>((set) => ({
   selection: EMPTY_SELECTION,
   selectedBuilding: null,
+  ownedBuildings: [],
   toasts: [],
   buildMode: null,
   demolishMode: false,
   lastSkirmish: null,
   setSelection: (selection) => set({ selection }),
   setSelectedBuilding: (selectedBuilding) => set({ selectedBuilding }),
+  setOwnedBuildings: (ownedBuildings) => set({ ownedBuildings }),
   pushToast: (text, kind = 'info') =>
     set((s) => ({ toasts: [...s.toasts, { id: nextToastId++, text, kind }] })),
   dismissToast: (id) =>

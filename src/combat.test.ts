@@ -75,6 +75,44 @@ describe('counter triangle (per-hit damage)', () => {
   });
 });
 
+describe('expanded roster counters (per-hit damage)', () => {
+  const vs = (k: number, armor: ArmorClass) =>
+    effectiveDamage(UNIT_DEFS[k as 0], armor);
+
+  it('crossbowmen punch mail far harder than archers — they counter knights at range', () => {
+    expect(vs(UnitKind.Crossbowman, ArmorClass.Mail)).toBeGreaterThan(
+      vs(UnitKind.Archer, ArmorClass.Mail) * 2
+    );
+  });
+
+  it('mamluks butcher leather-clad troops harder than they dent mail', () => {
+    expect(vs(UnitKind.Mamluk, ArmorClass.Leather)).toBeGreaterThan(
+      vs(UnitKind.Mamluk, ArmorClass.Mail)
+    );
+    // and harder than a knight hits the same leather target
+    expect(vs(UnitKind.Mamluk, ArmorClass.Leather)).toBeGreaterThan(
+      vs(UnitKind.Knight, ArmorClass.Leather)
+    );
+  });
+
+  it('rams and mangonels crack stone walls where melee barely scratches them', () => {
+    for (const siege of [UnitKind.Ram, UnitKind.Mangonel]) {
+      expect(vs(siege, ArmorClass.Stone)).toBeGreaterThan(
+        vs(UnitKind.Knight, ArmorClass.Stone) * 4
+      );
+      // siege is poor against soft field troops — it's a building-breaker
+      expect(vs(siege, ArmorClass.Stone)).toBeGreaterThan(
+        vs(siege, ArmorClass.Leather)
+      );
+    }
+  });
+
+  it('siege units are flagged to prefer buildings', () => {
+    expect(UNIT_DEFS[UnitKind.Ram].prefersBuildings).toBe(true);
+    expect(UNIT_DEFS[UnitKind.Mangonel].prefersBuildings).toBe(true);
+  });
+});
+
 describe('damage matrix shape', () => {
   it('only siege meaningfully cracks stone', () => {
     expect(DAMAGE_MATRIX[DamageType.Siege][ArmorClass.Stone]).toBeGreaterThan(

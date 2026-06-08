@@ -2,7 +2,7 @@
 // placement and stamps occupancy; the client previews the same predicate as a
 // ghost. Footprints feed the pathfinding passability layer (units route around).
 import { WORLD_SIZE } from './constants.ts';
-import { BUILDING_DEFS } from './defs.ts';
+import { BUILDING_DEFS } from './buildings_defs.ts';
 import type { BuildingKind } from './enums.ts';
 import { isPassable, type Passable } from './pathfinding.ts';
 
@@ -98,4 +98,32 @@ export function canPlace(
     if (occupied(tx, ty)) return false;
   }
   return true;
+}
+
+// True if any tile orthogonally bordering the footprint is impassable (water on
+// land maps). Used to gate water-adjacent buildings (FishingHut) — its footprint
+// sits on land but it must touch the shore. Pure so the client ghost previews the
+// same rule the module enforces.
+export function isWaterAdjacent(
+  footprint: number,
+  x: number,
+  y: number,
+  passable: Passable
+): boolean {
+  const tiles = footprintTiles(footprint, x, y);
+  const inFootprint = new Set(tiles.map((t) => t.ty * WORLD_SIZE + t.tx));
+  for (const { tx, ty } of tiles) {
+    for (const [dx, dy] of [
+      [1, 0],
+      [-1, 0],
+      [0, 1],
+      [0, -1],
+    ]) {
+      const nx = tx + dx;
+      const ny = ty + dy;
+      if (inFootprint.has(ny * WORLD_SIZE + nx)) continue;
+      if (!passable(nx, ny)) return true;
+    }
+  }
+  return false;
 }

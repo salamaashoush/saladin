@@ -10,11 +10,12 @@ import {
   type UnitKind as UnitKindT,
   type BuildingKind as BuildingKindT,
 } from '../../../shared/enums.ts';
+import { hasPrereq } from '../../../shared/tech.ts';
 import { canAfford, payCost } from '../../../shared/economy.ts';
 import { nearestIndex } from '../../../shared/sim.ts';
 import { nearestPassableGrid } from '../../../shared/pathfinding.ts';
 import { clampWorld, getSeed, passableWith, buildNodes } from './util.ts';
-import { buildOccupancy, movePatch } from './placement.ts';
+import { buildOccupancy, movePatch, ownedBuildingKinds } from './placement.ts';
 import { spawnUnitEntity } from './spawn.ts';
 
 export function popInfo(ctx: any, owner: any): { pop: number; cap: number } {
@@ -85,6 +86,8 @@ export function trainFrom(
   if (!udef) return 'unknown unit';
   const p = ctx.db.player.identity.find(owner);
   if (!p) return 'not in game';
+  if (!hasPrereq(ownedBuildingKinds(ctx, owner), udef))
+    return `requires ${BUILDING_DEFS[udef.requires as BuildingKindT].label}`;
   if (!canAfford(p, udef.cost)) return 'not enough resources';
   const pop = popInfo(ctx, owner);
   if (pop.pop >= pop.cap) return 'population full — build houses';

@@ -48,6 +48,18 @@ function enemyUnitsAround(
   return out;
 }
 
+// Live enemy buildings (as Located). Siege engines (prefersBuildings) auto-
+// acquire these so they hammer structures rather than chasing soft targets.
+function enemyBuildingsAround(ctx: any, owner: any): Located[] {
+  const out: Located[] = [];
+  for (const b of [...ctx.db.building.iter()]) {
+    if (b.owner.equals(owner)) continue;
+    const be = ctx.db.entity.entityId.find(b.entityId);
+    if (be) out.push({ id: b.entityId, x: be.x, y: be.y });
+  }
+  return out;
+}
+
 // Combat — runs every COMBAT_TICK_MS. Soldiers auto-acquire nearby enemies,
 // close to range, and strike on cooldown. Dead units are removed.
 export const combatTick = spacetimedb.reducer(
@@ -67,11 +79,20 @@ export const combatTick = spacetimedb.reducer(
       if (!e) continue;
 
       let targetId = u.attackTarget;
-      // No current target: auto-acquire the nearest LIVE enemy unit in range.
+      // No current target: auto-acquire the nearest LIVE enemy in range. Siege
+      // engines (prefersBuildings) acquire enemy structures first, falling back
+      // to units only when no building is near.
       if (targetId === 0n && def.aggroRange > 0) {
-        const enemies = enemyUnitsAround(ctx, units, u.owner, u.entityId);
-        const near = nearestWithin(e.x, e.y, enemies, def.aggroRange);
-        if (near) targetId = near.id;
+        if (def.prefersBuildings) {
+          const blds = enemyBuildingsAround(ctx, u.owner);
+          const nearB = nearestWithin(e.x, e.y, blds, def.aggroRange);
+          if (nearB) targetId = nearB.id;
+        }
+        if (targetId === 0n) {
+          const enemies = enemyUnitsAround(ctx, units, u.owner, u.entityId);
+          const near = nearestWithin(e.x, e.y, enemies, def.aggroRange);
+          if (near) targetId = near.id;
+        }
       }
 
       // Resolve the target fresh — stale hp can't double-hit or "revive".

@@ -7,6 +7,12 @@ export {
   buildGatehouse,
   buildHouse,
   buildWallSlab,
+  buildStable,
+  buildBlacksmith,
+  buildMarket,
+  buildGranary,
+  buildFishingHut,
+  buildSiegeWorkshop,
 } from './buildings.ts';
 export {
   BAR_W,

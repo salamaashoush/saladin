@@ -1,6 +1,12 @@
 import { WORLD_SIZE } from '../../../shared/constants.ts';
+import { BUILDING_DEFS } from '../../../shared/defs.ts';
 import { isPassable, type Passable } from '../../../shared/pathfinding.ts';
-import { GatherState } from '../../../shared/enums.ts';
+import {
+  GatherState,
+  ResourceType,
+  BuildingKind,
+  type BuildingKind as BuildingKindT,
+} from '../../../shared/enums.ts';
 import { nearestIndex } from '../../../shared/sim.ts';
 
 export interface NodePos {
@@ -27,6 +33,44 @@ export function getSeed(ctx: any): number {
 
 export function passableWith(seed: number, occ: Set<number>): Passable {
   return (px, py) => isPassable(seed, px, py) && !occ.has(py * WORLD_SIZE + px);
+}
+
+export interface Dropoff {
+  x: number;
+  y: number;
+  footprint: number;
+}
+
+// Nearest place `owner` can deposit a carry of `carryType` from (x,y): the keep
+// always accepts every resource; food-dropoff buildings (FishingHut/Granary)
+// accept food only, letting shoreline fishers bank without trekking to the keep.
+// Returns null only if the owner has no keep (defeated).
+export function nearestDropoff(
+  ctx: any,
+  owner: any,
+  carryType: number,
+  x: number,
+  y: number
+): Dropoff | null {
+  let best: Dropoff | null = null;
+  let bestD = Infinity;
+  for (const b of [...ctx.db.building.iter()]) {
+    if (!b.owner.equals(owner)) continue;
+    const def = BUILDING_DEFS[b.kind as BuildingKindT];
+    if (!def) continue;
+    const accepts =
+      b.kind === BuildingKind.Keep ||
+      (def.foodDropoff && carryType === ResourceType.Food);
+    if (!accepts) continue;
+    const e = ctx.db.entity.entityId.find(b.entityId);
+    if (!e) continue;
+    const d = dist(x, y, e.x, e.y);
+    if (d < bestD) {
+      bestD = d;
+      best = { x: e.x, y: e.y, footprint: def.footprint };
+    }
+  }
+  return best;
 }
 
 export function buildNodes(ctx: any): NodePos[] {

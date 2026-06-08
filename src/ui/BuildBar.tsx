@@ -8,6 +8,7 @@ import {
   BuildingKind,
   UnitKind,
   canAfford,
+  hasPrereq,
   type ResourceCost,
 } from '../../shared/index.ts';
 import { useGameStore } from '../store/gameStore';
@@ -32,6 +33,12 @@ const BUILD_ICONS: Record<number, string> = {
   [BuildingKind.Tower]: '🗼',
   [BuildingKind.House]: '🏠',
   [BuildingKind.Barracks]: '🏛️',
+  [BuildingKind.Stable]: '🐴',
+  [BuildingKind.Blacksmith]: '⚒️',
+  [BuildingKind.Market]: '🏪',
+  [BuildingKind.Granary]: '🌾',
+  [BuildingKind.FishingHut]: '🎣',
+  [BuildingKind.SiegeWorkshop]: '🛠️',
 };
 
 const UNIT_ICONS: Record<number, string> = {
@@ -39,6 +46,11 @@ const UNIT_ICONS: Record<number, string> = {
   [UnitKind.Spearman]: '🛡️',
   [UnitKind.Archer]: '🏹',
   [UnitKind.Knight]: '🐎',
+  [UnitKind.HorseArcher]: '🐎',
+  [UnitKind.Mamluk]: '🗡️',
+  [UnitKind.Crossbowman]: '🎯',
+  [UnitKind.Ram]: '🪵',
+  [UnitKind.Mangonel]: '💥',
 };
 
 interface ToolProps {
@@ -47,6 +59,7 @@ interface ToolProps {
   cost?: ResourceCost;
   active?: boolean;
   disabled?: boolean;
+  lockNote?: string; // tech prereq not met — shown in tooltip, button dimmed
   cls?: string;
   onClick: () => void;
 }
@@ -65,16 +78,17 @@ function costParts(cost: ResourceCost): { type: ResourceType; amount: number }[]
     .filter((p) => p.amount > 0);
 }
 
-function Tool({ icon, label, cost, active, disabled, cls, onClick }: ToolProps) {
+function Tool({ icon, label, cost, active, disabled, lockNote, cls, onClick }: ToolProps) {
   const parts = cost ? costParts(cost) : [];
-  const title = parts.length
+  const base = parts.length
     ? `${label} — ${parts.map((p) => `${p.amount} ${RESOURCE_DEFS[p.type].label}`).join(', ')}`
     : label;
+  const title = lockNote ? `${label} — 🔒 ${lockNote}` : base;
   return (
     <button
       type="button"
       title={title}
-      disabled={disabled}
+      disabled={disabled || !!lockNote}
       onClick={onClick}
       className={`${styles.tool} ${active ? styles.toolActive : ''} ${cls ?? ''}`}
     >
@@ -104,7 +118,17 @@ export function BuildBar({
   const setBuildMode = useGameStore((s) => s.setBuildMode);
   const demolishMode = useGameStore((s) => s.demolishMode);
   const setDemolishMode = useGameStore((s) => s.setDemolishMode);
+  const ownedBuildings = useGameStore((s) => s.ownedBuildings);
   const [tab, setTab] = useState(0);
+
+  // Tech-tree gate, mirrored from the module: a building/unit with a `requires`
+  // is locked until the player owns that prerequisite. Shared hasPrereq keeps the
+  // dim rule identical to the authoritative one.
+  const owned = new Set(ownedBuildings) as Set<BuildingKind>;
+  const lockNote = (def: { requires?: BuildingKind }): string | undefined =>
+    hasPrereq(owned, def)
+      ? undefined
+      : `Requires ${BUILDING_DEFS[def.requires as 0].label}`;
 
   // The player's full stockpile drives every affordability check via the shared
   // canAfford contract — multi-resource costs (e.g. Tower's wood + stone) dim
@@ -161,6 +185,7 @@ export function BuildBar({
                   label={u.label}
                   cost={u.cost}
                   disabled={!canAfford(stock, u.cost)}
+                  lockNote={lockNote(u)}
                   onClick={() => onTrain(selB.id, kind)}
                 />
               );
@@ -209,6 +234,7 @@ export function BuildBar({
                 cost={d.cost}
                 active={active}
                 disabled={!active && !canAfford(stock, d.cost)}
+                lockNote={lockNote(d)}
                 onClick={() => setBuildMode(active ? null : kind)}
               />
             );

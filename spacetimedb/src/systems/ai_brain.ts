@@ -44,8 +44,18 @@ export const aiBrain = spacetimedb.reducer(
         b.owner.equals(owner)
       );
       const barracks = myBuildings.find((b) => b.kind === BuildingKind.Barracks);
+      const stable = myBuildings.find((b) => b.kind === BuildingKind.Stable);
+      const blacksmith = myBuildings.find(
+        (b) => b.kind === BuildingKind.Blacksmith
+      );
+      const siegeWorkshop = myBuildings.find(
+        (b) => b.kind === BuildingKind.SiegeWorkshop
+      );
       const towers = myBuildings.filter(
         (b) => b.kind === BuildingKind.Tower
+      ).length;
+      const sieges = myUnits.filter(
+        (u) => UNIT_DEFS[u.kind as UnitKindT]?.prefersBuildings
       ).length;
       const pop = popInfo(ctx, owner);
 
@@ -61,7 +71,18 @@ export const aiBrain = spacetimedb.reducer(
             : undefined;
       assignIdleGatherers(ctx, owner, prefer);
 
-      // One macro action per decision window.
+      const wantsCavalry = prof.cavalryRatio > 0;
+      const wantsSiege = prof.siegeTarget > 0;
+      const placeNear = (kind: BuildingKind) => {
+        if (!canAfford(p, BUILDING_DEFS[kind].cost)) return false;
+        const s = aiFindSpot(ctx, kind, ke.x, ke.y);
+        if (s) placeFor(ctx, owner, kind, s.x, s.y);
+        return true;
+      };
+
+      // One macro action per decision window. Follows the tech tree: economy →
+      // barracks → stable (cavalry) → blacksmith → siege workshop, mustering an
+      // army the whole way. Each branch enforces its own prereqs via placeFor.
       let decisionCd = bot.decisionCd - AI_BRAIN_DT;
       if (decisionCd <= 0) {
         decisionCd = 1.0;
@@ -71,27 +92,45 @@ export const aiBrain = spacetimedb.reducer(
           pop.cap - pop.pop <= 1 &&
           canAfford(p, BUILDING_DEFS[BuildingKind.House].cost)
         ) {
-          const s = aiFindSpot(ctx, BuildingKind.House, ke.x, ke.y);
-          if (s) placeFor(ctx, owner, BuildingKind.House, s.x, s.y);
+          placeNear(BuildingKind.House);
+        } else if (!barracks) {
+          placeNear(BuildingKind.Barracks);
+        } else if (wantsCavalry && !stable) {
+          placeNear(BuildingKind.Stable);
+        } else if (wantsSiege && !blacksmith) {
+          placeNear(BuildingKind.Blacksmith);
+        } else if (wantsSiege && blacksmith && !siegeWorkshop) {
+          placeNear(BuildingKind.SiegeWorkshop);
         } else if (
-          !barracks &&
-          canAfford(p, BUILDING_DEFS[BuildingKind.Barracks].cost)
-        ) {
-          const s = aiFindSpot(ctx, BuildingKind.Barracks, ke.x, ke.y);
-          if (s) placeFor(ctx, owner, BuildingKind.Barracks, s.x, s.y);
-        } else if (
-          barracks &&
-          soldiers.length < prof.armyTarget &&
+          siegeWorkshop &&
+          sieges < prof.siegeTarget &&
           pop.pop < pop.cap
         ) {
-          const roll = ctx.random();
           const kind =
-            roll < prof.knightRatio
-              ? UnitKind.Knight
-              : roll < prof.knightRatio + prof.archerRatio
+            ctx.random() < 0.5 ? UnitKind.Mangonel : UnitKind.Ram;
+          trainFrom(ctx, owner, siegeWorkshop, kind);
+        } else if (soldiers.length < prof.armyTarget && pop.pop < pop.cap) {
+          // Split production between the barracks (infantry) and the stable
+          // (cavalry) by the profile's cavalryRatio.
+          const roll = ctx.random();
+          if (stable && roll < prof.cavalryRatio) {
+            const cav =
+              roll < prof.cavalryRatio * 0.4
+                ? UnitKind.Mamluk
+                : roll < prof.cavalryRatio * 0.7
+                  ? UnitKind.Knight
+                  : UnitKind.HorseArcher;
+            trainFrom(ctx, owner, stable, cav);
+          } else {
+            const r2 = ctx.random();
+            const inf =
+              r2 < prof.archerRatio
                 ? UnitKind.Archer
-                : UnitKind.Spearman;
-          trainFrom(ctx, owner, barracks, kind);
+                : r2 < prof.archerRatio + prof.knightRatio
+                  ? UnitKind.Crossbowman
+                  : UnitKind.Spearman;
+            trainFrom(ctx, owner, barracks, inf);
+          }
         } else if (
           towers < prof.maxTowers &&
           // Keep a wood reserve before optional defensive spends.
@@ -102,8 +141,7 @@ export const aiBrain = spacetimedb.reducer(
               prof.woodBuffer,
           })
         ) {
-          const s = aiFindSpot(ctx, BuildingKind.Tower, ke.x, ke.y);
-          if (s) placeFor(ctx, owner, BuildingKind.Tower, s.x, s.y);
+          placeNear(BuildingKind.Tower);
         }
       }
 

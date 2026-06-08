@@ -1,7 +1,14 @@
 import { t, SenderError } from 'spacetimedb/server';
 import { marketSale, type Tradeable } from '../../../shared/economy.ts';
-import { ResourceType } from '../../../shared/enums.ts';
+import { BuildingKind, ResourceType } from '../../../shared/enums.ts';
 import { spacetimedb } from '../schema/db.ts';
+
+// True once the player owns a Market — gates the trade reducer behind the tech.
+function ownsMarket(ctx: any, owner: any): boolean {
+  for (const b of [...ctx.db.building.iter()])
+    if (b.owner.equals(owner) && b.kind === BuildingKind.Market) return true;
+  return false;
+}
 
 // Sell wood or stone for gold at MARKET_RATE. `resType` selects which raw
 // resource to sell (Wood or Stone only — Food/Gold are not tradeable here).
@@ -13,6 +20,8 @@ export const marketTrade = spacetimedb.reducer(
   (ctx, { resType, amount }) => {
     const p = ctx.db.player.identity.find(ctx.sender);
     if (!p) throw new SenderError('not in game');
+    if (!ownsMarket(ctx, ctx.sender))
+      throw new SenderError('build a Market to trade');
     const field: Tradeable | null =
       resType === ResourceType.Wood
         ? 'wood'

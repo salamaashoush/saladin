@@ -1,9 +1,8 @@
 import { AI_DT, HARVEST_RANGE, DEPOSIT_RANGE, HARVEST_TIME } from '../../../shared/constants.ts';
-import { UNIT_DEFS, BUILDING_DEFS } from '../../../shared/defs.ts';
+import { UNIT_DEFS } from '../../../shared/defs.ts';
 import { addResource } from '../../../shared/economy.ts';
 import {
   UnitKind,
-  BuildingKind,
   GatherState,
   type ResourceType as ResourceTypeT,
   type UnitKind as UnitKindT,
@@ -12,7 +11,7 @@ import { nearestIndex } from '../../../shared/sim.ts';
 import { spacetimedb } from '../schema/db.ts';
 import { aiTimer } from '../schema/tables.ts';
 import { scheduleRefs } from '../schema/schedule_refs.ts';
-import { dist, buildNodes } from '../world/util.ts';
+import { dist, buildNodes, nearestDropoff } from '../world/util.ts';
 import { movePatch } from '../world/placement.ts';
 
 // Gather AI state machine — runs every AI_TICK_MS, sets movement targets.
@@ -98,8 +97,12 @@ export const unitAi = spacetimedb.reducer({ timer: aiTimer.rowType }, (ctx) => {
       });
     } else if (u.gatherState === GatherState.ToStockpile) {
       const p = ctx.db.player.identity.find(u.owner);
-      const keep = p ? ctx.db.entity.entityId.find(p.keepEntity) : null;
-      if (!p || !keep) {
+      // Route to the nearest valid deposit point for what's being carried — the
+      // keep, or a food-dropoff (FishingHut/Granary) when carrying food.
+      const drop = p
+        ? nearestDropoff(ctx, u.owner, u.carryType, e.x, e.y)
+        : null;
+      if (!p || !drop) {
         ctx.db.unit.entityId.update({
           ...u,
           gatherState: GatherState.Idle,
@@ -107,11 +110,10 @@ export const unitAi = spacetimedb.reducer({ timer: aiTimer.rowType }, (ctx) => {
         });
         continue;
       }
-      // Keep blocks its own footprint, so the peasant stops at the wall edge;
-      // accept deposits within the keep's radius too.
-      const depositRange =
-        DEPOSIT_RANGE + BUILDING_DEFS[BuildingKind.Keep].footprint / 2;
-      if (dist(e.x, e.y, keep.x, keep.y) <= depositRange) {
+      // The building blocks its own footprint, so the peasant stops at the wall
+      // edge; accept deposits within the footprint radius too.
+      const depositRange = DEPOSIT_RANGE + drop.footprint / 2;
+      if (dist(e.x, e.y, drop.x, drop.y) <= depositRange) {
         ctx.db.player.identity.update({
           ...p,
           ...addResource(p, u.carryType as ResourceTypeT, u.carrying),
@@ -131,7 +133,7 @@ export const unitAi = spacetimedb.reducer({ timer: aiTimer.rowType }, (ctx) => {
       } else if (!u.hasTarget) {
         ctx.db.unit.entityId.update({
           ...u,
-          ...movePatch(ctx, e.x, e.y, keep.x, keep.y),
+          ...movePatch(ctx, e.x, e.y, drop.x, drop.y),
         });
       }
     }

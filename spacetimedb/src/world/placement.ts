@@ -9,12 +9,22 @@ import {
 import {
   footprintCenter,
   canPlace,
+  isWaterAdjacent,
   occupancySet,
   type Occupant,
 } from '../../../shared/buildings.ts';
+import { hasPrereq } from '../../../shared/tech.ts';
 import { canAfford, payCost } from '../../../shared/economy.ts';
 import { clampWorld, getSeed, passableWith } from './util.ts';
 import { spawnBuilding } from './spawn.ts';
+
+// Set of building kinds the owner already has — feeds the shared tech gate.
+export function ownedBuildingKinds(ctx: any, owner: any): Set<BuildingKindT> {
+  const s = new Set<BuildingKindT>();
+  for (const b of [...ctx.db.building.iter()])
+    if (b.owner.equals(owner)) s.add(b.kind as BuildingKindT);
+  return s;
+}
 
 // Resolve every building to its world position for the shared occupancy builder.
 function buildingOccupants(ctx: any): Occupant[] {
@@ -69,6 +79,8 @@ export function placeFor(
   if (!def || !def.buildable) return 'cannot build that';
   const p = ctx.db.player.identity.find(owner);
   if (!p) return 'not in game';
+  if (!hasPrereq(ownedBuildingKinds(ctx, owner), def))
+    return `requires ${BUILDING_DEFS[def.requires as BuildingKindT].label}`;
   if (!canAfford(p, def.cost)) return 'not enough resources';
 
   const seed = getSeed(ctx);
@@ -81,6 +93,11 @@ export function placeFor(
     (tx, ty) => occ.has(ty * WORLD_SIZE + tx)
   );
   if (!ok) return 'blocked or on water';
+  if (
+    def.requiresWater &&
+    !isWaterAdjacent(def.footprint, x, y, (tx, ty) => isPassable(seed, tx, ty))
+  )
+    return 'must be built on the shore';
 
   const c = footprintCenter(def.footprint, x, y);
   ctx.db.player.identity.update({ ...p, ...payCost(p, def.cost) });

@@ -1,5 +1,8 @@
-// Data-driven content: unit/building/resource stats + presentation. New unit
-// types, buildings, factions slot in here without touching systems code.
+// Data-driven content barrel: resource stats, factions, AI tuning, match setup.
+// Unit content lives in ./units.ts (UnitDef + UNIT_DEFS), building content in
+// ./buildings_defs.ts (BuildingDef + BUILDING_DEFS + BUILD_CATEGORIES), and the
+// tech-tree predicate in ./tech.ts. Those are re-exported here so existing
+// imports (`from './defs.ts'`) keep working unchanged.
 
 import {
   WORLD_SIZE,
@@ -21,178 +24,12 @@ import {
   fishDensity,
   goldDensity,
 } from './terrain.ts';
-import {
-  UnitKind,
-  BuildingKind,
-  ResourceType,
-  DamageType,
-  ArmorClass,
-  type Faction,
-} from './enums.ts';
-import type { ResourceCost } from './economy.ts';
+import { ResourceType, type Faction } from './enums.ts';
 import type { Vec2 } from './sim.ts';
 
-export interface UnitDef {
-  label: string;
-  speed: number; // world units / second
-  carry: number; // wood per gather trip (0 = non-gatherer)
-  radius: number;
-  height: number;
-  maxHp: number;
-  attack: number; // base damage per hit (0 = non-combatant)
-  damageType: DamageType;
-  armorClass: ArmorClass;
-  bonusVsArmor?: Partial<Record<ArmorClass, number>>; // specialist counter
-  range: number; // attack reach in world units
-  attackRate: number; // seconds between hits
-  aggroRange: number; // auto-acquire enemies within (0 = never auto-aggro)
-  cost: ResourceCost; // resources to train
-  tint?: number; // mesh tint override; otherwise owner color
-}
-
-export const UNIT_DEFS: Record<UnitKind, UnitDef> = {
-  [UnitKind.Peasant]: {
-    label: 'Peasant',
-    speed: 2.5,
-    carry: 8,
-    radius: 0.22,
-    height: 0.7,
-    maxHp: 30,
-    attack: 0,
-    damageType: DamageType.Blunt,
-    armorClass: ArmorClass.Unarmored,
-    range: 0.8,
-    attackRate: 1.2,
-    aggroRange: 0,
-    cost: { wood: 20 },
-  },
-  [UnitKind.Spearman]: {
-    label: 'Spearman',
-    speed: 2.2,
-    carry: 0,
-    radius: 0.26,
-    height: 0.85,
-    maxHp: 70,
-    attack: 12,
-    damageType: DamageType.Pierce,
-    armorClass: ArmorClass.Leather,
-    bonusVsArmor: { [ArmorClass.Mail]: 2.6 }, // braced against mailed cavalry
-    range: 1.2, // long reach — outranges a knight's blade
-    attackRate: 1.0,
-    aggroRange: 6,
-    cost: { wood: 35 },
-    tint: 0x3a3a3a,
-  },
-  [UnitKind.Archer]: {
-    label: 'Archer',
-    speed: 2.4,
-    carry: 0,
-    radius: 0.24,
-    height: 0.8,
-    maxHp: 45,
-    attack: 9,
-    damageType: DamageType.Pierce,
-    armorClass: ArmorClass.Leather,
-    range: 5,
-    attackRate: 1.4,
-    aggroRange: 7,
-    cost: { wood: 45 },
-    tint: 0x5a3a1a,
-  },
-  [UnitKind.Knight]: {
-    label: 'Knight',
-    speed: 3.4, // fast — runs down archers
-    carry: 0,
-    radius: 0.3,
-    height: 1.0,
-    maxHp: 130,
-    attack: 17,
-    damageType: DamageType.Slash, // shreds unarmored/leather, glances mail
-    armorClass: ArmorClass.Mail, // shrugs off arrows, but spears punch through
-    range: 1.0,
-    attackRate: 1.1,
-    aggroRange: 7,
-    cost: { wood: 90 },
-    tint: 0x9a8050,
-  },
-};
-
-export interface BuildingDef {
-  label: string;
-  footprint: number; // tiles per side (integer)
-  height: number;
-  cost: ResourceCost;
-  maxHp: number;
-  buildable: boolean;
-  pop: number; // population capacity provided
-  attack: number; // tower fire damage (0 = not a shooter)
-  damageType: DamageType; // tower fire type
-  armorClass: ArmorClass; // how the structure resists damage
-  range: number; // tower fire range
-  attackRate: number; // seconds between shots
-  passable: boolean; // units may walk through (gatehouse)
-  trains: number[]; // UnitKinds this building can produce
-}
-
-const B = (
-  label: string,
-  footprint: number,
-  height: number,
-  cost: ResourceCost,
-  maxHp: number,
-  buildable: boolean,
-  extra: Partial<BuildingDef> = {}
-): BuildingDef => ({
-  label,
-  footprint,
-  height,
-  cost,
-  maxHp,
-  buildable,
-  pop: 0,
-  attack: 0,
-  damageType: DamageType.Pierce,
-  armorClass: ArmorClass.Stone,
-  range: 0,
-  attackRate: 0,
-  passable: false,
-  trains: [],
-  ...extra,
-});
-
-export const BUILDING_DEFS: Record<BuildingKind, BuildingDef> = {
-  [BuildingKind.Keep]: B('Keep', 3, 1.8, { wood: 0 }, 1500, false, {
-    pop: 8,
-    trains: [UnitKind.Peasant],
-  }),
-  [BuildingKind.Barracks]: B('Barracks', 2, 1.4, { wood: 70, stone: 20 }, 500, true, {
-    trains: [UnitKind.Spearman, UnitKind.Archer, UnitKind.Knight],
-    armorClass: ArmorClass.Leather, // timber hall — chops faster than stone
-  }),
-  [BuildingKind.Tower]: B('Tower', 1, 2.6, { wood: 40, stone: 30 }, 400, true, {
-    attack: 9,
-    range: 7,
-    attackRate: 0.9,
-  }),
-  [BuildingKind.Wall]: B('Wall', 1, 1.2, { wood: 6, stone: 6 }, 300, true),
-  [BuildingKind.Gatehouse]: B('Gatehouse', 1, 1.5, { wood: 15, stone: 15 }, 400, true, {
-    passable: true,
-  }),
-  [BuildingKind.House]: B('House', 2, 1.2, { wood: 40 }, 250, true, {
-    pop: 6,
-    armorClass: ArmorClass.Leather,
-  }),
-};
-
-export const BUILD_CATEGORIES: { label: string; icon: string; kinds: BuildingKind[] }[] = [
-  {
-    label: 'Defense',
-    icon: '🛡️',
-    kinds: [BuildingKind.Wall, BuildingKind.Gatehouse, BuildingKind.Tower],
-  },
-  { label: 'Economy', icon: '🏠', kinds: [BuildingKind.House] },
-  { label: 'Military', icon: '⚔️', kinds: [BuildingKind.Barracks] },
-];
+export * from './units.ts';
+export * from './buildings_defs.ts';
+export * from './tech.ts';
 
 export interface ResourceDef {
   label: string;
@@ -251,14 +88,16 @@ export interface AiProfile {
   woodBuffer: number; // reserve kept before optional (tower) spends
   archerRatio: number; // 0..1 share of soldiers trained as archers
   knightRatio: number; // 0..1 share trained as (expensive) knights
+  cavalryRatio: number; // 0..1 share of Stable production that is cavalry
+  siegeTarget: number; // siege engines to build toward (0 = never go siege)
 }
 
 export const AiDifficulty = { Easy: 0, Normal: 1, Hard: 2 } as const;
 
 export const AI_PROFILES: Record<number, AiProfile> = {
-  0: { label: 'Easy', peasantTarget: 6, armyTarget: 6, waveSize: 4, waveInterval: 45, firstWaveDelay: 60, maxTowers: 1, woodBuffer: 30, archerRatio: 0.3, knightRatio: 0.0 },
-  1: { label: 'Normal', peasantTarget: 8, armyTarget: 10, waveSize: 6, waveInterval: 35, firstWaveDelay: 45, maxTowers: 2, woodBuffer: 40, archerRatio: 0.35, knightRatio: 0.2 },
-  2: { label: 'Hard', peasantTarget: 10, armyTarget: 14, waveSize: 8, waveInterval: 25, firstWaveDelay: 30, maxTowers: 3, woodBuffer: 50, archerRatio: 0.4, knightRatio: 0.3 },
+  0: { label: 'Easy', peasantTarget: 6, armyTarget: 6, waveSize: 4, waveInterval: 45, firstWaveDelay: 60, maxTowers: 1, woodBuffer: 30, archerRatio: 0.3, knightRatio: 0.0, cavalryRatio: 0.0, siegeTarget: 0 },
+  1: { label: 'Normal', peasantTarget: 8, armyTarget: 10, waveSize: 6, waveInterval: 35, firstWaveDelay: 45, maxTowers: 2, woodBuffer: 40, archerRatio: 0.35, knightRatio: 0.2, cavalryRatio: 0.3, siegeTarget: 1 },
+  2: { label: 'Hard', peasantTarget: 10, armyTarget: 14, waveSize: 8, waveInterval: 25, firstWaveDelay: 30, maxTowers: 3, woodBuffer: 50, archerRatio: 0.4, knightRatio: 0.3, cavalryRatio: 0.4, siegeTarget: 2 },
 };
 
 // Themed commanders per faction, assigned to AIs in join order.
