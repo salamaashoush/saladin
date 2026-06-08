@@ -1,17 +1,17 @@
 // Derives the current player's match state from the live tables. The cache IS
 // the source of truth (TanStack-style) — no local mirrors. `inGame` and
 // `outcome` drive the top-level phase routing in App.
-import { useTable } from 'spacetimedb/react';
-import type { Identity } from 'spacetimedb';
-import { tables } from '../module_bindings';
+import { useTable } from "spacetimedb/react";
+import type { Identity } from "spacetimedb";
+import { tables } from "../module_bindings";
 import {
   UnitKind,
   BUILDING_DEFS,
   FACTION_LABELS,
   FOOD_PER_UNIT,
-} from '../../shared/index.ts';
+} from "../../shared/index.ts";
 
-export type Outcome = 'victory' | 'defeat' | null;
+export type Outcome = "victory" | "defeat" | null;
 
 export interface MatchState {
   inGame: boolean;
@@ -26,6 +26,7 @@ export interface MatchState {
   soldiers: number;
   pop: number;
   cap: number;
+  techMask: bigint; // completed Blacksmith techs as a bitset — drives upgraded stats + tech row
   outcome: Outcome;
 }
 
@@ -51,9 +52,9 @@ export function useMatch(identity?: Identity): MatchState {
     ? players.filter((p) => !p.identity.isEqual(identity))
     : [];
   const outcome: Outcome = me?.defeated
-    ? 'defeat'
+    ? "defeat"
     : rivals.length > 0 && rivals.every((p) => p.defeated)
-      ? 'victory'
+      ? "victory"
       : null;
 
   // Starving when the food bill for owned units outpaces the stockpile — the
@@ -64,8 +65,10 @@ export function useMatch(identity?: Identity): MatchState {
 
   return {
     inGame: !!me,
-    name: me?.name || 'Commander',
-    faction: me ? (FACTION_LABELS[me.faction as 0 | 1] ?? 'Ayyubid') : 'Ayyubid',
+    name: me?.name || "Commander",
+    faction: me
+      ? (FACTION_LABELS[me.faction as 0 | 1] ?? "Ayyubid")
+      : "Ayyubid",
     wood: me?.wood ?? 0,
     stone: me?.stone ?? 0,
     food,
@@ -75,6 +78,7 @@ export function useMatch(identity?: Identity): MatchState {
     soldiers: myUnits.length - peasants,
     pop: myUnits.length,
     cap,
+    techMask: me?.techMask ?? 0n,
     outcome,
   };
 }

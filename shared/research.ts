@@ -4,12 +4,14 @@
 // are DERIVED on read from the owner's completed-tech bitmask, so a researched
 // upgrade applies to every CURRENT and FUTURE unit automatically.
 
-import { BuildingKind, ArmorClass } from './enums.ts';
-import type { UnitDef } from './units.ts';
-import { UNIT_DEFS } from './units.ts';
-import type { BuildingDef } from './buildings_defs.ts';
-import { BUILDING_DEFS } from './buildings_defs.ts';
-import type { ResourceCost } from './economy.ts';
+import { BuildingKind, ArmorClass } from "./enums.ts";
+import type { UnitDef } from "./units.ts";
+import { UNIT_DEFS } from "./units.ts";
+import type { BuildingDef } from "./buildings_defs.ts";
+import { BUILDING_DEFS } from "./buildings_defs.ts";
+import type { ResourceCost, Stockpile } from "./economy.ts";
+import { canAfford } from "./economy.ts";
+import { hasPrereq } from "./tech.ts";
 
 // Each Tech is a BIT POSITION in the owner's u64 techMask (0..63). Stored as u8
 // in the `research` table; the mask packs all completed techs into one number so
@@ -76,16 +78,16 @@ export interface UpgradeDef {
 // conscription is the across-the-board hp tech that always helps.
 export const UPGRADE_DEFS: Record<Tech, UpgradeDef> = {
   [Tech.ArmorMail]: {
-    label: 'Mail Armor',
-    icon: '🥼',
+    label: "Mail Armor",
+    icon: "🥼",
     cost: { wood: 60, gold: 40 },
     researchTime: 30,
     appliesTo: (d) => isCombatant(d) && !d.prefersBuildings, // troops, not siege
     delta: { armorTier: 1 },
   },
   [Tech.ArmorPlate]: {
-    label: 'Plate Barding',
-    icon: '🛡️',
+    label: "Plate Barding",
+    icon: "🛡️",
     cost: { wood: 40, stone: 30, gold: 60 },
     researchTime: 45,
     requires: BuildingKind.Stable,
@@ -93,24 +95,24 @@ export const UPGRADE_DEFS: Record<Tech, UpgradeDef> = {
     delta: { maxHp: 25 },
   },
   [Tech.FletchedArrows]: {
-    label: 'Fletched Arrows',
-    icon: '🏹',
+    label: "Fletched Arrows",
+    icon: "🏹",
     cost: { wood: 50, gold: 30 },
     researchTime: 30,
     appliesTo: (d) => isRanged(d),
     delta: { attack: 3 },
   },
   [Tech.SharpenedBlades]: {
-    label: 'Sharpened Blades',
-    icon: '⚔️',
+    label: "Sharpened Blades",
+    icon: "⚔️",
     cost: { wood: 50, gold: 30 },
     researchTime: 30,
     appliesTo: (d) => isMelee(d),
     delta: { attack: 3 },
   },
   [Tech.Masonry]: {
-    label: 'Masonry',
-    icon: '🧱',
+    label: "Masonry",
+    icon: "🧱",
     cost: { wood: 40, stone: 80 },
     researchTime: 40,
     appliesTo: () => false, // structures only — no unit effect
@@ -119,8 +121,8 @@ export const UPGRADE_DEFS: Record<Tech, UpgradeDef> = {
     buildingDelta: { maxHp: 150, armorTier: 1 },
   },
   [Tech.Conscription]: {
-    label: 'Conscription',
-    icon: '🪖',
+    label: "Conscription",
+    icon: "🪖",
     cost: { food: 60, gold: 50 },
     researchTime: 50,
     requires: BuildingKind.Barracks,
@@ -207,4 +209,81 @@ export function effectiveBuildingDef(kind: number, mask: bigint): BuildingDef {
   }
   if (!changed) return base;
   return { ...base, maxHp, armorClass: clampTier(tier, ArmorClass.Stone) };
+}
+
+// ── research panel (UI-facing, pure) ──────────────────────────────────────────
+// One deterministic descriptor per tech for the Blacksmith research panel. The
+// SAME function feeds the client UI and the tests; it never reads SpacetimeDB or
+// Three, so the panel a player sees is computed from the exact rules the module
+// enforces (afford via shared canAfford, prereq via shared hasPrereq, done via
+// the techMask bit). Status precedence, top → bottom: done > in_progress >
+// locked (missing prereq) > unaffordable > available.
+
+export type ResearchStatus =
+  | "done" // bit set in techMask — already owned
+  | "in_progress" // a research row exists and is advancing
+  | "locked" // an extra building prereq (e.g. Stable) is not owned
+  | "unaffordable" // prereqs met but the stockpile is short
+  | "available"; // ready to start now
+
+export interface ResearchRowState {
+  tech: Tech;
+  label: string;
+  icon: string;
+  cost: ResourceCost;
+  status: ResearchStatus;
+  progress: number; // 0..1; 1 when done, the live fraction while in_progress, else 0
+  lockNote?: string; // when locked: "Requires <Building>" for the tooltip
+}
+
+// Minimal shape of a research table row the panel needs. Decoupled from the
+// generated binding so this stays a pure shared helper.
+export interface ResearchProgressRow {
+  tech: number;
+  progress: number;
+  done: boolean;
+}
+
+// Render order for the panel — same canonical order the AI/availableTechs uses so
+// players and bots see the tree laid out identically. Ascending bit order.
+const PANEL_ORDER: Tech[] = ALL_TECHS;
+
+export function researchPanelState(
+  mask: bigint,
+  rows: readonly ResearchProgressRow[],
+  stock: Stockpile,
+  ownedBuildings: ReadonlySet<BuildingKind>,
+): ResearchRowState[] {
+  // Index the owner's in-flight/completed rows by tech for O(1) lookup.
+  const byTech = new Map<number, ResearchProgressRow>();
+  for (const r of rows) byTech.set(r.tech, r);
+
+  return PANEL_ORDER.map((tech) => {
+    const up = UPGRADE_DEFS[tech];
+    const row = byTech.get(tech);
+    const base = { tech, label: up.label, icon: up.icon, cost: up.cost };
+
+    if (hasTech(mask, tech))
+      return { ...base, status: "done" as const, progress: 1 };
+
+    if (row && !row.done)
+      return {
+        ...base,
+        status: "in_progress" as const,
+        progress: Math.max(0, Math.min(1, row.progress)),
+      };
+
+    if (up.requires !== undefined && !hasPrereq(ownedBuildings, up))
+      return {
+        ...base,
+        status: "locked" as const,
+        progress: 0,
+        lockNote: `Requires ${BUILDING_DEFS[up.requires as 0].label}`,
+      };
+
+    if (!canAfford(stock, up.cost))
+      return { ...base, status: "unaffordable" as const, progress: 0 };
+
+    return { ...base, status: "available" as const, progress: 0 };
+  });
 }

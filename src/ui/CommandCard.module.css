@@ -42,6 +42,13 @@
   color: var(--sld-ink-dim);
 }
 
+/* a small marker after upgraded units — researched bonuses are folded in */
+.upgraded {
+  margin-left: 4px;
+  color: var(--sld-green);
+  font-size: 0.7em;
+}
+
 .v {
   font-weight: 700;
   color: #fff;

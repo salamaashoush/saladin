@@ -1,9 +1,11 @@
-import { ResourceBar } from './ResourceBar';
-import { BuildBar } from './BuildBar';
-import { CommandCard } from './CommandCard';
-import { Minimap } from './Minimap';
-import { Toasts } from './Toasts';
-import styles from './HUD.module.css';
+import { ResourceBar } from "./ResourceBar";
+import { BuildBar } from "./BuildBar";
+import { CommandCard } from "./CommandCard";
+import { Minimap } from "./Minimap";
+import { Toasts } from "./Toasts";
+import type { ResearchRowState } from "../../shared/index.ts";
+import type { CompletedTech } from "../session/useResearch";
+import styles from "./HUD.module.css";
 
 export interface HUDProps {
   connected: boolean;
@@ -19,11 +21,15 @@ export interface HUDProps {
   soldiers: number;
   pop: number;
   cap: number;
+  researchRows: ResearchRowState[];
+  completedTechs: CompletedTech[];
+  techMask: bigint;
   onTrain: (buildingId: string, kind: number) => void;
   onDemolish: (id: string) => void;
   onGatherAll: () => void;
   onTrade: (resType: number, amount: number) => void;
   onUngarrison: (buildingId: string) => void;
+  onResearch: (buildingId: string, tech: number) => void;
   onAddAi: () => void;
   onLeave: () => void;
   onSetStance: (stance: number) => void;
@@ -62,7 +68,10 @@ export function HUD(props: HUDProps) {
 
       <div className={styles.bottomBar}>
         <div className={styles.barLeft}>
-          <CommandCard onSetStance={props.onSetStance} />
+          <CommandCard
+            techMask={props.techMask}
+            onSetStance={props.onSetStance}
+          />
         </div>
         <div className={styles.barCenter}>
           <BuildBar
@@ -70,11 +79,14 @@ export function HUD(props: HUDProps) {
             stone={props.stone}
             food={props.food}
             gold={props.gold}
+            researchRows={props.researchRows}
+            completedTechs={props.completedTechs}
             onTrain={props.onTrain}
             onDemolish={props.onDemolish}
             onGatherAll={props.onGatherAll}
             onTrade={props.onTrade}
             onUngarrison={props.onUngarrison}
+            onResearch={props.onResearch}
           />
         </div>
         <div className={styles.barRight}>

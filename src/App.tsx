@@ -1,12 +1,14 @@
-import { useRef } from 'react';
-import './App.css';
-import { useGameSession } from './session/useGameSession';
-import { useMatch } from './session/useMatch';
-import { useGameActions } from './session/useGameActions';
-import { useGameStore } from './store/gameStore';
-import { Menu } from './menu/Menu';
-import { GameOver } from './menu/GameOver';
-import { HUD } from './ui/HUD';
+import { useRef } from "react";
+import "./App.css";
+import { useGameSession } from "./session/useGameSession";
+import { useMatch } from "./session/useMatch";
+import { useResearch } from "./session/useResearch";
+import { useGameActions } from "./session/useGameActions";
+import { useGameStore } from "./store/gameStore";
+import type { BuildingKind } from "../shared/index.ts";
+import { Menu } from "./menu/Menu";
+import { GameOver } from "./menu/GameOver";
+import { HUD } from "./ui/HUD";
 
 // Top-level router only. Three phases, driven by server state: not connected →
 // status; connected but no player row → Menu; player row exists → HUD (+ GameOver
@@ -17,6 +19,21 @@ function App() {
   const match = useMatch(identity);
   const actions = useGameActions();
   const lastSkirmish = useGameStore((s) => s.lastSkirmish);
+  const ownedBuildings = useGameStore((s) => s.ownedBuildings);
+
+  // The Blacksmith research view (panel rows + completed techs), folded from the
+  // live research table + the player's techMask via the SHARED pure helper.
+  const research = useResearch(
+    identity,
+    match.techMask,
+    {
+      wood: match.wood,
+      stone: match.stone,
+      food: match.food,
+      gold: match.gold,
+    },
+    new Set(ownedBuildings) as Set<BuildingKind>,
+  );
 
   const rematch = () =>
     lastSkirmish ? actions.startSkirmish(lastSkirmish) : actions.leaveGame();
@@ -44,11 +61,15 @@ function App() {
           soldiers={match.soldiers}
           pop={match.pop}
           cap={match.cap}
+          researchRows={research.rows}
+          completedTechs={research.completed}
+          techMask={match.techMask}
           onTrain={actions.train}
           onDemolish={actions.demolish}
           onGatherAll={actions.gatherAll}
           onTrade={actions.trade}
           onUngarrison={actions.ungarrison}
+          onResearch={actions.research}
           onAddAi={() => actions.addAi(1)}
           onLeave={actions.leaveGame}
           onSetStance={(s) => game?.setSelectedStance(s)}

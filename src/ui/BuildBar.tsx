@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState } from "react";
 import {
   UNIT_DEFS,
   BUILDING_DEFS,
@@ -9,20 +9,26 @@ import {
   canAfford,
   hasPrereq,
   type ResourceCost,
-} from '../../shared/index.ts';
-import { useGameStore } from '../store/gameStore';
-import styles from './BuildBar.module.css';
+  type ResearchRowState,
+} from "../../shared/index.ts";
+import { useGameStore } from "../store/gameStore";
+import { ResearchPanel } from "./ResearchPanel";
+import type { CompletedTech } from "../session/useResearch";
+import styles from "./BuildBar.module.css";
 
 interface BuildBarProps {
   wood: number;
   stone: number;
   food: number;
   gold: number;
+  researchRows: ResearchRowState[];
+  completedTechs: CompletedTech[];
   onTrain: (buildingId: string, kind: number) => void;
   onDemolish: (id: string) => void;
   onGatherAll: () => void;
   onTrade: (resType: number, amount: number) => void;
   onUngarrison: (buildingId: string) => void;
+  onResearch: (buildingId: string, tech: number) => void;
 }
 
 const MARKET_LOT = 20; // resources sold per market click
@@ -39,23 +45,41 @@ interface ToolProps {
 }
 
 const RESOURCE_FIELD = {
-  [ResourceType.Wood]: 'wood',
-  [ResourceType.Stone]: 'stone',
-  [ResourceType.Food]: 'food',
-  [ResourceType.Gold]: 'gold',
+  [ResourceType.Wood]: "wood",
+  [ResourceType.Stone]: "stone",
+  [ResourceType.Food]: "food",
+  [ResourceType.Gold]: "gold",
 } as const satisfies Record<ResourceType, keyof ResourceCost>;
 
 // Render a cost as "12🪵 5🪨 …" over whichever resources the cost names.
-function costParts(cost: ResourceCost): { type: ResourceType; amount: number }[] {
-  return ([ResourceType.Wood, ResourceType.Stone, ResourceType.Food, ResourceType.Gold] as const)
+function costParts(
+  cost: ResourceCost,
+): { type: ResourceType; amount: number }[] {
+  return (
+    [
+      ResourceType.Wood,
+      ResourceType.Stone,
+      ResourceType.Food,
+      ResourceType.Gold,
+    ] as const
+  )
     .map((type) => ({ type, amount: cost[RESOURCE_FIELD[type]] ?? 0 }))
     .filter((p) => p.amount > 0);
 }
 
-function Tool({ icon, label, cost, active, disabled, lockNote, cls, onClick }: ToolProps) {
+function Tool({
+  icon,
+  label,
+  cost,
+  active,
+  disabled,
+  lockNote,
+  cls,
+  onClick,
+}: ToolProps) {
   const parts = cost ? costParts(cost) : [];
   const base = parts.length
-    ? `${label} — ${parts.map((p) => `${p.amount} ${RESOURCE_DEFS[p.type].label}`).join(', ')}`
+    ? `${label} — ${parts.map((p) => `${p.amount} ${RESOURCE_DEFS[p.type].label}`).join(", ")}`
     : label;
   const title = lockNote ? `${label} — 🔒 ${lockNote}` : base;
   return (
@@ -64,13 +88,15 @@ function Tool({ icon, label, cost, active, disabled, lockNote, cls, onClick }: T
       title={title}
       disabled={disabled || !!lockNote}
       onClick={onClick}
-      className={`${styles.tool} ${active ? styles.toolActive : ''} ${cls ?? ''}`}
+      className={`${styles.tool} ${active ? styles.toolActive : ""} ${cls ?? ""}`}
     >
       <span className={styles.toolIcon}>{icon}</span>
       <span className={styles.toolLabel}>{label}</span>
       {parts.length > 0 && (
         <span className={styles.toolCost}>
-          {parts.map((p) => `${p.amount}${RESOURCE_DEFS[p.type].icon}`).join(' ')}
+          {parts
+            .map((p) => `${p.amount}${RESOURCE_DEFS[p.type].icon}`)
+            .join(" ")}
         </span>
       )}
     </button>
@@ -82,11 +108,14 @@ export function BuildBar({
   stone,
   food,
   gold,
+  researchRows,
+  completedTechs,
   onTrain,
   onDemolish,
   onGatherAll,
   onTrade,
   onUngarrison,
+  onResearch,
 }: BuildBarProps) {
   const selB = useGameStore((s) => s.selectedBuilding);
   const buildMode = useGameStore((s) => s.buildMode);
@@ -110,13 +139,33 @@ export function BuildBar({
   // correctly when any single resource is short.
   const stock = { wood, stone, food, gold };
 
+  // Completed upgrades — a compact, always-visible row of researched techs so the
+  // player can read their edge at a glance. Folded from the owner's techMask.
+  const techRow = completedTechs.length > 0 && (
+    <div className={`${styles.group} ${styles.techGroup}`}>
+      <div className={styles.groupLabel}>⚒️ Upgrades</div>
+      <div className={styles.techBadges}>
+        {completedTechs.map((t) => (
+          <span key={t.tech} className={styles.techBadge} title={t.label}>
+            {t.icon} {t.label}
+          </span>
+        ))}
+      </div>
+    </div>
+  );
+
   // The "Orders" group is global (always available). Market sells raw resources
   // for gold via the shared MARKET_RATE; disabled when there is nothing to sell.
   const orders = (
     <div className={styles.group}>
       <div className={styles.groupLabel}>Orders</div>
       <div className={styles.tools}>
-        <Tool icon="🪓" label="Gather" cls={styles.green} onClick={onGatherAll} />
+        <Tool
+          icon="🪓"
+          label="Gather"
+          cls={styles.green}
+          onClick={onGatherAll}
+        />
         <Tool
           icon="🪙"
           label="Sell Wood"
@@ -140,9 +189,11 @@ export function BuildBar({
     </div>
   );
 
-  // Selected building -> production group + orders.
+  // Selected building -> production group + orders. A Blacksmith also gets the
+  // research panel (the upgrade tree) alongside its production group.
   if (selB) {
     const bdef = BUILDING_DEFS[selB.kind as 0];
+    const isBlacksmith = selB.kind === BuildingKind.Blacksmith;
     return (
       <div className={styles.bar}>
         <div className={styles.group}>
@@ -175,6 +226,13 @@ export function BuildBar({
             )}
           </div>
         </div>
+        {isBlacksmith && (
+          <ResearchPanel
+            buildingId={selB.id}
+            rows={researchRows}
+            onResearch={onResearch}
+          />
+        )}
         {selB.garrisonCap > 0 && (
           <div className={styles.group}>
             <div className={styles.groupLabel}>
@@ -194,6 +252,7 @@ export function BuildBar({
           </div>
         )}
         {orders}
+        {techRow}
       </div>
     );
   }
@@ -208,7 +267,7 @@ export function BuildBar({
             <button
               key={c.label}
               type="button"
-              className={`${styles.tab} ${tab === i ? styles.tabActive : ''}`}
+              className={`${styles.tab} ${tab === i ? styles.tabActive : ""}`}
               onClick={() => setTab(i)}
             >
               {c.icon} {c.label}
@@ -235,6 +294,7 @@ export function BuildBar({
         </div>
       </div>
       {orders}
+      {techRow}
     </div>
   );
 }

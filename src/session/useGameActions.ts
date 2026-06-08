@@ -1,10 +1,10 @@
 // The single typed gateway for every reducer call. Each action is guarded so a
 // rejected reducer surfaces as a toast instead of an unhandled rejection. UI
 // components call these — they never touch `reducers` directly.
-import { useReducer } from 'spacetimedb/react';
-import { reducers } from '../module_bindings';
-import { useGameStore } from '../store/gameStore';
-import type { SkirmishConfig, JoinConfig } from './types';
+import { useReducer } from "spacetimedb/react";
+import { reducers } from "../module_bindings";
+import { useGameStore } from "../store/gameStore";
+import type { SkirmishConfig, JoinConfig } from "./types";
 
 export function useGameActions() {
   const pushToast = useGameStore((s) => s.pushToast);
@@ -20,10 +20,11 @@ export function useGameActions() {
   const marketTrade = useReducer(reducers.marketTrade);
   const garrisonUnit = useReducer(reducers.garrisonUnit);
   const ungarrisonBuilding = useReducer(reducers.ungarrisonBuilding);
+  const startResearch = useReducer(reducers.startResearch);
 
   const guard = (p: unknown) =>
     Promise.resolve(p).catch((e: unknown) =>
-      pushToast(e instanceof Error ? e.message : 'Action failed', 'error')
+      pushToast(e instanceof Error ? e.message : "Action failed", "error"),
     );
 
   return {
@@ -36,7 +37,7 @@ export function useGameActions() {
           enemies: new Uint8Array(c.enemies),
           seed: c.seed >>> 0,
           preset: c.preset,
-        })
+        }),
       );
     },
     joinMultiplayer: (c: JoinConfig) =>
@@ -51,10 +52,15 @@ export function useGameActions() {
       guard(marketTrade({ resType, amount })),
     garrison: (unitId: string, buildingId: string) =>
       guard(
-        garrisonUnit({ unitId: BigInt(unitId), buildingId: BigInt(buildingId) })
+        garrisonUnit({
+          unitId: BigInt(unitId),
+          buildingId: BigInt(buildingId),
+        }),
       ),
     ungarrison: (buildingId: string) =>
       guard(ungarrisonBuilding({ buildingId: BigInt(buildingId) })),
+    research: (buildingId: string, tech: number) =>
+      guard(startResearch({ buildingId: BigInt(buildingId), tech })),
   };
 }
 

@@ -1,11 +1,11 @@
 // Owns the Three.js scene + the live SpacetimeDB connection: mounts the renderer
 // into a container, attaches the connection, and subscribes to the world tables.
 // Returns the pieces the UI layer needs — it never derives game state itself.
-import { useEffect, useRef, useState, type RefObject } from 'react';
-import { useSpacetimeDB } from 'spacetimedb/react';
-import type { Identity } from 'spacetimedb';
-import { tables, type DbConnection } from '../module_bindings';
-import { SaladinGame } from '../game/SaladinGame';
+import { useEffect, useRef, useState, type RefObject } from "react";
+import { useSpacetimeDB } from "spacetimedb/react";
+import type { Identity } from "spacetimedb";
+import { tables, type DbConnection } from "../module_bindings";
+import { SaladinGame } from "../game/SaladinGame";
 
 export interface GameSession {
   game: SaladinGame | null;
@@ -23,10 +23,11 @@ const WORLD_TABLES = [
   tables.player,
   tables.config,
   tables.shot,
+  tables.research,
 ];
 
 export function useGameSession(
-  containerRef: RefObject<HTMLDivElement | null>
+  containerRef: RefObject<HTMLDivElement | null>,
 ): GameSession {
   const { identity, isActive } = useSpacetimeDB();
   const { getConnection } = useSpacetimeDB() as unknown as {
