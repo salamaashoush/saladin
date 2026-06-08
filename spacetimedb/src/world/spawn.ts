@@ -18,6 +18,7 @@ import {
   spawnCorner,
   allocSlot,
 } from '../../../shared/defs.ts';
+import { AiPhase } from '../../../shared/ai.ts';
 import { MORALE_MAX } from '../../../shared/morale.ts';
 import { scatterNodes as scatterNodesPure } from '../../../shared/terrain.ts';
 import { findBuildableNear } from '../../../shared/buildings.ts';
@@ -188,6 +189,9 @@ export function spawnAi(
     difficulty: diff,
     decisionCd: 0,
     waveTimer: AI_PROFILES[diff].firstWaveDelay,
+    phase: AiPhase.Boot,
+    scoutId: 0n,
+    threatTimer: 0,
   });
 }
 

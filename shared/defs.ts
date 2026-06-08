@@ -75,31 +75,92 @@ export const FACTION_LABELS: Record<Faction, string> = {
   1: 'Crusader',
 };
 
-// Skirmish AI behaviour, data-driven per difficulty. The brain reducer reads
-// these numbers; tuning the opponent never touches systems code.
+// Skirmish AI behaviour, data-driven per difficulty. The strategic planner
+// (shared/ai.ts) reads the economy/army/tech knobs; the brain reducer reads the
+// assault cadence + decision interval. Difficulty is DECISION QUALITY and CADENCE
+// only — never a resource, vision or production handicap. Easy reacts slowly with
+// a small army and no siege; Hard teches fast, counters precisely, and uses
+// siege. Tuning the opponent never touches systems code.
 export interface AiProfile {
   label: string;
-  peasantTarget: number; // economy size to reach before pushing military
-  armyTarget: number; // soldiers to build toward
+  // cadence — how fast the bot thinks and how aggressively it pushes out
+  decisionInterval: number; // seconds between macro decisions (lower = sharper)
   waveSize: number; // soldiers on hand before launching an assault
   waveInterval: number; // seconds between assaults
   firstWaveDelay: number; // grace period before the first assault
-  maxTowers: number; // defensive towers near the keep
+  // planner tuning — fed straight into PlannerTuning (shared/ai.ts)
+  peasantTarget: number; // economy size to reach before pushing military
+  armyTarget: number; // soldiers to build toward
+  coreArmy: number; // standing army kept WHILE teching (defensive core)
+  popBuffer: number; // free pop headroom to keep before building a House
+  foodFloorMult: number; // bias to food while food <= upkeep * this
   woodBuffer: number; // reserve kept before optional (tower) spends
-  archerRatio: number; // 0..1 share of soldiers trained as archers
-  knightRatio: number; // 0..1 share trained as (expensive) knights
-  cavalryRatio: number; // 0..1 share of Stable production that is cavalry
+  maxTowers: number; // defensive towers near the keep
+  wantsCavalry: boolean; // teches a Stable and fields cavalry
+  wantsSiege: boolean; // teches Blacksmith→SiegeWorkshop and fields siege
   siegeTarget: number; // siege engines to build toward (0 = never go siege)
   imamTarget: number; // support Imams to keep around (0 = never train one)
+  defendThreat: number; // enemy combatants near home that trigger Defend
+  foodFloor: number; // food balance below which the bot stops adding upkeep
+  reservePeasants: number; // extra gatherers added during a food crisis
 }
 
 export const AiDifficulty = { Easy: 0, Normal: 1, Hard: 2 } as const;
 
 export const AI_PROFILES: Record<number, AiProfile> = {
-  0: { label: 'Easy', peasantTarget: 6, armyTarget: 6, waveSize: 4, waveInterval: 45, firstWaveDelay: 60, maxTowers: 1, woodBuffer: 30, archerRatio: 0.3, knightRatio: 0.0, cavalryRatio: 0.0, siegeTarget: 0, imamTarget: 0 },
-  1: { label: 'Normal', peasantTarget: 8, armyTarget: 10, waveSize: 6, waveInterval: 35, firstWaveDelay: 45, maxTowers: 2, woodBuffer: 40, archerRatio: 0.35, knightRatio: 0.2, cavalryRatio: 0.3, siegeTarget: 1, imamTarget: 1 },
-  2: { label: 'Hard', peasantTarget: 10, armyTarget: 14, waveSize: 8, waveInterval: 25, firstWaveDelay: 30, maxTowers: 3, woodBuffer: 50, archerRatio: 0.4, knightRatio: 0.3, cavalryRatio: 0.4, siegeTarget: 2, imamTarget: 1 },
+  // Easy: slow to decide, small army, no cavalry/siege — a gentle sparring foe.
+  0: {
+    label: 'Easy',
+    decisionInterval: 2.0,
+    waveSize: 4, waveInterval: 45, firstWaveDelay: 60,
+    peasantTarget: 6, armyTarget: 6, coreArmy: 3, popBuffer: 1, foodFloorMult: 4,
+    woodBuffer: 30, maxTowers: 1,
+    wantsCavalry: false, wantsSiege: false, siegeTarget: 0, imamTarget: 0,
+    defendThreat: 4, foodFloor: 12, reservePeasants: 2,
+  },
+  // Normal: steady tempo, mixed army with some cavalry and a single siege engine.
+  1: {
+    label: 'Normal',
+    decisionInterval: 1.0,
+    waveSize: 6, waveInterval: 35, firstWaveDelay: 45,
+    peasantTarget: 8, armyTarget: 10, coreArmy: 4, popBuffer: 2, foodFloorMult: 4,
+    woodBuffer: 40, maxTowers: 2,
+    wantsCavalry: true, wantsSiege: true, siegeTarget: 1, imamTarget: 1,
+    defendThreat: 3, foodFloor: 16, reservePeasants: 3,
+  },
+  // Hard: thinks fast, teches the full tree quickly, counters precisely and
+  // brings a siege train to crack the player's walls/keep.
+  2: {
+    label: 'Hard',
+    decisionInterval: 0.6,
+    waveSize: 8, waveInterval: 25, firstWaveDelay: 30,
+    peasantTarget: 10, armyTarget: 14, coreArmy: 5, popBuffer: 3, foodFloorMult: 5,
+    woodBuffer: 50, maxTowers: 3,
+    wantsCavalry: true, wantsSiege: true, siegeTarget: 2, imamTarget: 1,
+    defendThreat: 3, foodFloor: 20, reservePeasants: 4,
+  },
 };
+
+// Build the planner's tuning view from a profile. Pure mapping, kept here so the
+// profile shape and the planner stay in one place.
+export function plannerTuning(prof: AiProfile): import('./ai.ts').PlannerTuning {
+  return {
+    peasantTarget: prof.peasantTarget,
+    armyTarget: prof.armyTarget,
+    coreArmy: prof.coreArmy,
+    popBuffer: prof.popBuffer,
+    foodFloorMult: prof.foodFloorMult,
+    woodBuffer: prof.woodBuffer,
+    maxTowers: prof.maxTowers,
+    wantsCavalry: prof.wantsCavalry,
+    wantsSiege: prof.wantsSiege,
+    siegeTarget: prof.siegeTarget,
+    imamTarget: prof.imamTarget,
+    defendThreat: prof.defendThreat,
+    foodFloor: prof.foodFloor,
+    reservePeasants: prof.reservePeasants,
+  };
+}
 
 // Themed commanders per faction, assigned to AIs in join order.
 export const AI_NAMES_BY_FACTION: Record<Faction, string[]> = {

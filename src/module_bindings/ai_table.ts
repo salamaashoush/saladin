@@ -16,4 +16,7 @@ export default __t.row({
   difficulty: __t.u8(),
   decisionCd: __t.f32().name("decision_cd"),
   waveTimer: __t.f32().name("wave_timer"),
+  phase: __t.u8(),
+  scoutId: __t.u64().name("scout_id"),
+  threatTimer: __t.f32().name("threat_timer"),
 });

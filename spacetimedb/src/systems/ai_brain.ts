@@ -1,5 +1,10 @@
 import { AI_BRAIN_DT, FOOD_PER_UNIT } from '../../../shared/constants.ts';
-import { UNIT_DEFS, BUILDING_DEFS, AI_PROFILES } from '../../../shared/defs.ts';
+import {
+  UNIT_DEFS,
+  BUILDING_DEFS,
+  AI_PROFILES,
+  plannerTuning,
+} from '../../../shared/defs.ts';
 import { canAfford } from '../../../shared/economy.ts';
 import {
   UnitKind,
@@ -7,169 +12,218 @@ import {
   ResourceType,
   GatherState,
   type UnitKind as UnitKindT,
+  type BuildingKind as BuildingKindT,
 } from '../../../shared/enums.ts';
+import {
+  AiPhase,
+  nextPhase,
+  nextBuild,
+  foodCrisis,
+  type PlannerState,
+  type UnitCensus,
+} from '../../../shared/ai.ts';
 import { spacetimedb } from '../schema/db.ts';
 import { aiBrainTimer } from '../schema/tables.ts';
 import { scheduleRefs } from '../schema/schedule_refs.ts';
-import { popInfo, assignIdleGatherers, trainFrom } from '../world/economy.ts';
+import { assignIdleGatherers, trainFrom } from '../world/economy.ts';
 import { aiFindSpot, placeFor, movePatch } from '../world/placement.ts';
 import { nearestEnemyKeep } from '../world/commands.ts';
+import { dist } from '../world/util.ts';
 
-// Skirmish AI — runs every AI_BRAIN_TICK_MS. Each bot keeps peasants gathering,
-// follows a build-order priority (economy → military → defense), and launches
-// attack waves. It only calls the same owner-parameterized command logic a human
-// goes through; no special powers.
+const isCombat = (kind: number): boolean =>
+  (UNIT_DEFS[kind as UnitKindT]?.attack ?? 0) > 0;
+const isSiege = (kind: number): boolean =>
+  !!UNIT_DEFS[kind as UnitKindT]?.prefersBuildings;
+
+const HOME_THREAT_RADIUS = 24; // enemy combatants this close to the keep = threat
+
+// Strategic skirmish AI. Each tick it builds ONE shared snapshot of the world
+// (positions, every unit, every building) and then, per bot, derives a planner
+// state from that snapshot — no nested table scans — and drives the pure planner
+// in shared/ai.ts: nextPhase decides posture, nextBuild decides the single macro
+// action, counterComposition (inside nextBuild) picks the unit that best answers
+// the enemy's mix. It executes only through the SAME owner-parameterized helpers a
+// human's reducers call (trainFrom / placeFor): no resource cheats, no vision
+// cheats, no special powers.
 export const aiBrain = spacetimedb.reducer(
   { timer: aiBrainTimer.rowType },
   (ctx) => {
-    for (const bot of [...ctx.db.ai.iter()]) {
+    const bots = [...ctx.db.ai.iter()];
+    if (bots.length === 0) return;
+
+    // ── one snapshot per tick, hoisted out of the bot loop ──────────────────
+    const pos = new Map<bigint, { x: number; y: number }>();
+    for (const e of [...ctx.db.entity.iter()]) pos.set(e.entityId, e);
+    const allUnits = [...ctx.db.unit.iter()];
+    const allBuildings = [...ctx.db.building.iter()];
+    // Owner identity (hex) → faction, so the per-bot enemy census never re-scans
+    // the player table per unit/building.
+    const factionOf = new Map<string, number>();
+    for (const pl of [...ctx.db.player.iter()])
+      factionOf.set(pl.identity.toHexString(), pl.faction);
+    const facOf = (id: any): number | undefined =>
+      factionOf.get(id.toHexString());
+
+    for (const bot of bots) {
       const p = ctx.db.player.identity.find(bot.identity);
       if (!p || p.defeated) continue;
       const owner = bot.identity;
       const prof = AI_PROFILES[bot.difficulty] ?? AI_PROFILES[1];
+      const tune = plannerTuning(prof);
 
-      const keep = ctx.db.building.entityId.find(p.keepEntity);
-      const ke = keep ? ctx.db.entity.entityId.find(keep.entityId) : null;
+      const keep = allBuildings.find(
+        (b) => b.owner.equals(owner) && b.kind === BuildingKind.Keep
+      );
+      const ke = keep ? pos.get(keep.entityId) : null;
       if (!keep || !ke) continue; // keep gone — combatTick marks it defeated
 
-      // Census of this bot's holdings.
-      const myUnits = [...ctx.db.unit.iter()].filter((u) =>
-        u.owner.equals(owner)
-      );
-      const peasants = myUnits.filter((u) => u.kind === UnitKind.Peasant).length;
-      const soldiers = myUnits.filter(
-        (u) => (UNIT_DEFS[u.kind as UnitKindT]?.attack ?? 0) > 0
-      );
-      const myBuildings = [...ctx.db.building.iter()].filter((b) =>
-        b.owner.equals(owner)
-      );
-      const barracks = myBuildings.find((b) => b.kind === BuildingKind.Barracks);
-      const stable = myBuildings.find((b) => b.kind === BuildingKind.Stable);
-      const blacksmith = myBuildings.find(
-        (b) => b.kind === BuildingKind.Blacksmith
-      );
-      const siegeWorkshop = myBuildings.find(
-        (b) => b.kind === BuildingKind.SiegeWorkshop
-      );
-      const towers = myBuildings.filter(
-        (b) => b.kind === BuildingKind.Tower
-      ).length;
-      const sieges = myUnits.filter(
-        (u) => UNIT_DEFS[u.kind as UnitKindT]?.prefersBuildings
-      ).length;
-      const imams = myUnits.filter((u) => u.kind === UnitKind.Imam).length;
-      const pop = popInfo(ctx, owner);
+      // ── census from the hoisted snapshot (no nested table iteration) ───────
+      const myUnits = allUnits.filter((u) => u.owner.equals(owner));
+      const armyComposition: UnitCensus = {};
+      let peasants = 0;
+      let soldiers = 0;
+      let sieges = 0;
+      for (const u of myUnits) {
+        if (u.kind === UnitKind.Peasant) peasants++;
+        if (isCombat(u.kind) || u.kind === UnitKind.Imam)
+          armyComposition[u.kind] = (armyComposition[u.kind] ?? 0) + 1;
+        if (isCombat(u.kind)) soldiers++;
+        if (isSiege(u.kind)) sieges++;
+      }
 
-      // Keep the economy busy every tick, steering toward what the bot is short
-      // of: food first if starvation looms (it must out-gather upkeep), then the
-      // scarcest of the raw building resources, otherwise the nearest node.
-      const upkeep = myUnits.length * FOOD_PER_UNIT;
+      const owned = new Set<BuildingKindT>();
+      let towers = 0;
+      let cap = 0;
+      for (const b of allBuildings) {
+        if (!b.owner.equals(owner)) continue;
+        owned.add(b.kind as BuildingKindT);
+        if (b.kind === BuildingKind.Tower) towers++;
+        cap += (
+          BUILDING_DEFS[b.kind as BuildingKindT] ?? BUILDING_DEFS[BuildingKind.Keep]
+        ).pop;
+      }
+      const pop = myUnits.length;
+
+      // Enemy census + wall detection + threat near home, all from the snapshot.
+      // Hostile = any player on the opposing faction (the human or a rival bot).
+      const enemy: UnitCensus = {};
+      let threatNearHome = 0;
+      for (const u of allUnits) {
+        if (u.owner.equals(owner)) continue;
+        const fac = facOf(u.owner);
+        if (fac === undefined || fac === p.faction) continue;
+        if (!isCombat(u.kind)) continue;
+        enemy[u.kind] = (enemy[u.kind] ?? 0) + 1;
+        const e = pos.get(u.entityId);
+        if (e && dist(e.x, e.y, ke.x, ke.y) <= HOME_THREAT_RADIUS)
+          threatNearHome++;
+      }
+      let enemyHasWalls = false;
+      for (const b of allBuildings) {
+        if (b.owner.equals(owner)) continue;
+        const fac = facOf(b.owner);
+        if (fac === undefined || fac === p.faction) continue;
+        if (b.kind === BuildingKind.Wall || b.kind === BuildingKind.Gatehouse) {
+          enemyHasWalls = true;
+          break;
+        }
+      }
+
+      const upkeep = soldiers * FOOD_PER_UNIT;
+
+      const state: PlannerState = {
+        peasants,
+        pop,
+        cap,
+        food: p.food,
+        wood: p.wood,
+        stone: p.stone,
+        gold: p.gold,
+        upkeep,
+        soldiers,
+        armyComposition,
+        sieges,
+        towers,
+        owned,
+        enemy,
+        enemyHasWalls,
+        threatNearHome,
+      };
+
+      // ── economy: keep gatherers busy, steered to what the bot is short of ──
+      // In a food crisis the army is out-eating the larder: forcibly pull EVERY
+      // gatherer off other resources onto food (idle-reassign only moves idle
+      // ones, which is too slow when food has already collapsed) so the shortfall
+      // is closed before the army starves. Drop carried loads to food so the trip
+      // banks immediately. Otherwise steer food-first when thin, then to the
+      // scarcer building resource, else nearest node.
+      const crisis = foodCrisis(state, tune);
+      if (crisis) {
+        for (const u of myUnits) {
+          if (u.kind !== UnitKind.Peasant) continue;
+          if (u.carryType === ResourceType.Food && u.gatherState !== GatherState.Idle)
+            continue; // already working food
+          ctx.db.unit.entityId.update({
+            ...u,
+            gatherState: GatherState.Idle,
+            targetNode: 0n,
+          });
+        }
+      }
       const prefer =
-        p.food <= upkeep * 4
+        crisis || p.food <= Math.max(1, upkeep) * tune.foodFloorMult
           ? ResourceType.Food
           : p.stone < p.wood
             ? ResourceType.Stone
             : undefined;
       assignIdleGatherers(ctx, owner, prefer);
 
-      const wantsCavalry = prof.cavalryRatio > 0;
-      const wantsSiege = prof.siegeTarget > 0;
-      const placeNear = (kind: BuildingKind) => {
-        if (!canAfford(p, BUILDING_DEFS[kind].cost)) return false;
-        const s = aiFindSpot(ctx, kind, ke.x, ke.y);
-        if (s) placeFor(ctx, owner, kind, s.x, s.y);
-        return true;
-      };
-
-      // One macro action per decision window. Follows the tech tree: economy →
-      // barracks → stable (cavalry) → blacksmith → siege workshop, mustering an
-      // army the whole way. Each branch enforces its own prereqs via placeFor.
+      // ── phase + one macro decision per profile-paced window ───────────────
+      const phase = nextPhase(state, tune);
       let decisionCd = bot.decisionCd - AI_BRAIN_DT;
       if (decisionCd <= 0) {
-        decisionCd = 1.0;
-        if (peasants < prof.peasantTarget && pop.pop < pop.cap) {
-          trainFrom(ctx, owner, keep, UnitKind.Peasant);
-        } else if (
-          pop.cap - pop.pop <= 1 &&
-          canAfford(p, BUILDING_DEFS[BuildingKind.House].cost)
-        ) {
-          placeNear(BuildingKind.House);
-        } else if (!barracks) {
-          placeNear(BuildingKind.Barracks);
-        } else if (wantsCavalry && !stable) {
-          placeNear(BuildingKind.Stable);
-        } else if (wantsSiege && !blacksmith) {
-          placeNear(BuildingKind.Blacksmith);
-        } else if (wantsSiege && blacksmith && !siegeWorkshop) {
-          placeNear(BuildingKind.SiegeWorkshop);
-        } else if (
-          siegeWorkshop &&
-          sieges < prof.siegeTarget &&
-          pop.pop < pop.cap
-        ) {
-          const kind =
-            ctx.random() < 0.5 ? UnitKind.Mangonel : UnitKind.Ram;
-          trainFrom(ctx, owner, siegeWorkshop, kind);
-        } else if (
-          // Once an army is forming, fold in a support Imam to steady morale.
-          barracks &&
-          imams < prof.imamTarget &&
-          soldiers.length >= 2 &&
-          pop.pop < pop.cap
-        ) {
-          trainFrom(ctx, owner, keep, UnitKind.Imam);
-        } else if (soldiers.length < prof.armyTarget && pop.pop < pop.cap) {
-          // Split production between the barracks (infantry) and the stable
-          // (cavalry) by the profile's cavalryRatio.
-          const roll = ctx.random();
-          if (stable && roll < prof.cavalryRatio) {
-            const cav =
-              roll < prof.cavalryRatio * 0.4
-                ? UnitKind.Mamluk
-                : roll < prof.cavalryRatio * 0.7
-                  ? UnitKind.Knight
-                  : UnitKind.HorseArcher;
-            trainFrom(ctx, owner, stable, cav);
+        decisionCd = prof.decisionInterval;
+        const plan = nextBuild(state, tune);
+        if (plan) {
+          if (plan.isUnit) {
+            const trainer = allBuildings.find(
+              (b) =>
+                b.owner.equals(owner) &&
+                b.kind === (plan.trainer ?? BuildingKind.Keep)
+            );
+            if (trainer && pop < cap) trainFrom(ctx, owner, trainer, plan.kind);
           } else {
-            const r2 = ctx.random();
-            const inf =
-              r2 < prof.archerRatio
-                ? UnitKind.Archer
-                : r2 < prof.archerRatio + prof.knightRatio
-                  ? UnitKind.Crossbowman
-                  : UnitKind.Spearman;
-            trainFrom(ctx, owner, barracks, inf);
+            // Defensive towers keep a wood reserve; structural buildings just
+            // need to be affordable. placeFor re-checks afford + tech.
+            const def = BUILDING_DEFS[plan.kind as BuildingKindT];
+            const cost =
+              plan.kind === BuildingKind.Tower
+                ? { ...def.cost, wood: (def.cost.wood ?? 0) + tune.woodBuffer }
+                : def.cost;
+            if (canAfford(p, cost)) {
+              const s = aiFindSpot(ctx, plan.kind, ke.x, ke.y);
+              if (s) placeFor(ctx, owner, plan.kind, s.x, s.y);
+            }
           }
-        } else if (
-          towers < prof.maxTowers &&
-          // Keep a wood reserve before optional defensive spends.
-          canAfford(p, {
-            ...BUILDING_DEFS[BuildingKind.Tower].cost,
-            wood:
-              (BUILDING_DEFS[BuildingKind.Tower].cost.wood ?? 0) +
-              prof.woodBuffer,
-          })
-        ) {
-          placeNear(BuildingKind.Tower);
         }
       }
 
-      // Assault: once an army is mustered and the timer is up, throw the army
-      // (plus any support Imams) at the nearest enemy keep. movePatch routes
-      // them; combat auto-aggro fights. Routing units are left alone — the rout
-      // logic owns them until they rally, so the brain never fights the flee.
+      // ── threat timer (debug/telemetry) ────────────────────────────────────
+      const threatTimer =
+        threatNearHome > 0 ? bot.threatTimer + AI_BRAIN_DT : 0;
+
+      // ── assault: muster then march on the nearest enemy keep ──────────────
+      // Hold the army home while Defending; otherwise push when a wave is ready.
       let waveTimer = bot.waveTimer - AI_BRAIN_DT;
-      if (soldiers.length >= prof.waveSize && waveTimer <= 0) {
+      const wantsAssault =
+        phase !== AiPhase.Defend && soldiers >= prof.waveSize && waveTimer <= 0;
+      if (wantsAssault) {
         const target = nearestEnemyKeep(ctx, owner, ke.x, ke.y);
         if (target) {
-          const wave = myUnits.filter(
-            (u) =>
-              (UNIT_DEFS[u.kind as UnitKindT]?.attack ?? 0) > 0 ||
-              u.kind === UnitKind.Imam
-          );
-          for (const s of wave) {
-            const su = ctx.db.unit.entityId.find(s.entityId);
-            const se = ctx.db.entity.entityId.find(s.entityId);
+          for (const u of myUnits) {
+            if (!isCombat(u.kind) && u.kind !== UnitKind.Imam) continue;
+            const su = ctx.db.unit.entityId.find(u.entityId);
+            const se = pos.get(u.entityId);
             if (!su || !se || su.routing) continue;
             ctx.db.unit.entityId.update({
               ...su,
@@ -183,7 +237,13 @@ export const aiBrain = spacetimedb.reducer(
         }
       }
 
-      ctx.db.ai.identity.update({ ...bot, decisionCd, waveTimer });
+      ctx.db.ai.identity.update({
+        ...bot,
+        decisionCd,
+        waveTimer,
+        phase,
+        threatTimer,
+      });
     }
   }
 );

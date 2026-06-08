@@ -127,6 +127,9 @@ export const ai = table(
     difficulty: t.u8(),
     decisionCd: t.f32(),
     waveTimer: t.f32(),
+    phase: t.u8(), // current AiPhase (shared/ai.ts) — drives cadence + telemetry
+    scoutId: t.u64(), // entityId of the unit sent to scout (0 = none out)
+    threatTimer: t.f32(), // seconds the bot has been under threat near home
   }
 );
 

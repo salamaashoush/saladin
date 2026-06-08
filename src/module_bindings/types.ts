@@ -16,6 +16,9 @@ export const Ai = __t.object("Ai", {
   difficulty: __t.u8(),
   decisionCd: __t.f32(),
   waveTimer: __t.f32(),
+  phase: __t.u8(),
+  scoutId: __t.u64(),
+  threatTimer: __t.f32(),
 });
 export type Ai = __Infer<typeof Ai>;
 
