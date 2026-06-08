@@ -9,10 +9,7 @@ import {
   type AlgebraicTypeType as __AlgebraicTypeType,
   type Infer as __Infer,
 } from "spacetimedb";
-import {
-  PathPoint,
-} from "./types";
-
+import { PathPoint } from "./types";
 
 export default __t.row({
   entityId: __t.u64().primaryKey().name("entity_id"),

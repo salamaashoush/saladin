@@ -10,9 +10,7 @@ import {
   type Infer as __Infer,
 } from "spacetimedb";
 
-import {
-  WallTile,
-} from "./types";
+import { WallTile } from "./types";
 
 export default {
   get tiles() {

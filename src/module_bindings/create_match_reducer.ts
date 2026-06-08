@@ -10,12 +10,8 @@ import {
   type Infer as __Infer,
 } from "spacetimedb";
 
-export default __t.row({
-  matchId: __t.u64().primaryKey().name("match_id"),
+export default {
   name: __t.string(),
-  host: __t.identity(),
-  status: __t.u8(),
-  seed: __t.u32(),
+  faction: __t.u8(),
   preset: __t.string(),
-  players: __t.u8(),
-});
+};

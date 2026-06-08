@@ -95,6 +95,7 @@ export const Match = __t.object("Match", {
   status: __t.u8(),
   seed: __t.u32(),
   preset: __t.string(),
+  players: __t.u8(),
 });
 export type Match = __Infer<typeof Match>;
 
@@ -212,6 +213,7 @@ export const SaveMatchRow = __t.object("SaveMatchRow", {
   status: __t.u8(),
   seed: __t.u32(),
   preset: __t.string(),
+  players: __t.u8(),
 });
 export type SaveMatchRow = __Infer<typeof SaveMatchRow>;
 
@@ -337,4 +339,3 @@ export const WallTile = __t.object("WallTile", {
   y: __t.f32(),
 });
 export type WallTile = __Infer<typeof WallTile>;
-

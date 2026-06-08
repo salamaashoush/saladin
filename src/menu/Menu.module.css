@@ -403,6 +403,51 @@
   padding: 8px 12px;
 }
 
+/* ── Multiplayer lobby ─────────────────────────────────────────────────── */
+.lobbyHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.lobbyMeta {
+  display: flex;
+  gap: 12px;
+  margin-top: 2px;
+}
+
+.lobbyTag {
+  font-size: 0.78rem;
+  color: var(--sld-ink-faint);
+}
+
+.lobbyHost {
+  font-size: 0.78rem;
+  color: var(--sld-gold);
+}
+
+.playerBadge {
+  font-size: 0.82rem;
+  font-weight: 700;
+  color: var(--sld-ink);
+  padding: 4px 10px;
+  background: rgba(0, 0, 0, 0.3);
+  border: 1px solid var(--sld-border);
+  border-radius: var(--sld-radius-sm);
+  white-space: nowrap;
+}
+
+.createPanel {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 16px;
+  background: rgba(0, 0, 0, 0.22);
+  border: 1px dashed var(--sld-border);
+  border-radius: var(--sld-radius-sm);
+}
+
 /* ── Game over ─────────────────────────────────────────────────────────── */
 .outcome {
   margin: 0;

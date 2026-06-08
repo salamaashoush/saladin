@@ -4,7 +4,7 @@
 import { useReducer } from "spacetimedb/react";
 import { reducers } from "../module_bindings";
 import { useGameStore } from "../store/gameStore";
-import type { SkirmishConfig, JoinConfig } from "./types";
+import type { SkirmishConfig, JoinConfig, CreateMatchConfig } from "./types";
 
 export function useGameActions() {
   const pushToast = useGameStore((s) => s.pushToast);
@@ -12,6 +12,7 @@ export function useGameActions() {
 
   const startSkirmish = useReducer(reducers.startSkirmish);
   const enterGame = useReducer(reducers.enterGame);
+  const createMatch = useReducer(reducers.createMatch);
   const leaveGame = useReducer(reducers.leaveGame);
   const addAi = useReducer(reducers.addAi);
   const trainUnit = useReducer(reducers.trainUnit);
@@ -43,8 +44,20 @@ export function useGameActions() {
         }),
       );
     },
-    joinMultiplayer: (c: JoinConfig) =>
-      guard(enterGame({ name: c.name, faction: c.faction })),
+    // Join an existing open match by its id (the lobby's Join button).
+    join: (c: JoinConfig) =>
+      guard(
+        enterGame({
+          matchId: BigInt(c.matchId),
+          name: c.name,
+          faction: c.faction,
+        }),
+      ),
+    // Host a fresh multiplayer match (the lobby's Create button).
+    createMatch: (c: CreateMatchConfig) =>
+      guard(
+        createMatch({ name: c.name, faction: c.faction, preset: c.preset }),
+      ),
     leaveGame: () => guard(leaveGame()),
     addAi: (difficulty: number) => guard(addAi({ difficulty })),
     train: (buildingId: string, kind: number) =>
@@ -66,7 +79,8 @@ export function useGameActions() {
       guard(startResearch({ buildingId: BigInt(buildingId), tech })),
     saveMatch: (name: string) => guard(saveMatch({ name })),
     loadMatch: (saveId: string) => guard(loadMatch({ saveId: BigInt(saveId) })),
-    deleteSave: (saveId: string) => guard(deleteSave({ saveId: BigInt(saveId) })),
+    deleteSave: (saveId: string) =>
+      guard(deleteSave({ saveId: BigInt(saveId) })),
   };
 }
 

@@ -165,9 +165,13 @@ export function rehydrateSave(
   }
 
   // Restore the match row itself under the new id, Active and hosted by the caller.
+  // `players` is recomputed from the players actually restored above (a load may
+  // drop bots whose identities collide, etc.), so the lobby count stays honest.
   const savedMatch = [...ctx.db.saveMatchRow.saveId.filter(saveId)][0];
   if (savedMatch) {
     const m = unmirror(savedMatch);
+    const restoredPlayers = [...ctx.db.player.matchId.filter(newMatchId)]
+      .length;
     ctx.db.match.insert({
       matchId: newMatchId,
       name: m.name,
@@ -175,6 +179,7 @@ export function rehydrateSave(
       status: MatchStatus.Active,
       seed: m.seed,
       preset: m.preset,
+      players: restoredPlayers,
     });
   }
   return newMatchId;

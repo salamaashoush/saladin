@@ -9,7 +9,16 @@ export interface SkirmishConfig {
   preset: string; // map preset id (render flavor)
 }
 
+// Join an existing open match by its id.
 export interface JoinConfig {
+  matchId: string; // matchId as a decimal string (bigint-safe for keys + args)
   name: string;
   faction: number;
+}
+
+// Host a brand-new multiplayer match.
+export interface CreateMatchConfig {
+  name: string;
+  faction: number;
+  preset: string; // map preset id
 }

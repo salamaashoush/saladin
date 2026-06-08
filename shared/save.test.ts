@@ -140,6 +140,7 @@ const MIRROR_COLUMNS: Record<string, string[]> = {
     "status",
     "seed",
     "preset",
+    "players",
   ],
 };
 

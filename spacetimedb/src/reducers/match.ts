@@ -7,7 +7,10 @@ import { foodLow } from '../../../shared/economy.ts';
 import { spacetimedb } from '../schema/db.ts';
 import { foundPlayer, spawnAi } from '../world/spawn.ts';
 import { regenerateWorld } from '../world/commands.ts';
-import { createMatch, scatterMatchNodes } from '../world/match.ts';
+import {
+  createMatch as createMatchRow,
+  scatterMatchNodes,
+} from '../world/match.ts';
 import {
   clearMatchRows,
   callerMatchId,
@@ -16,27 +19,55 @@ import {
 } from '../world/scope.ts';
 import { assignIdleGatherers, popInfo } from '../world/economy.ts';
 
-// A multiplayer-joinable match: Active, hosted by a human, with room left. enterGame
-// drops into the most recent such match so several humans can share one world; if
-// none exists it founds its own. Skirmish matches are joinable too — a friend can
-// hop into a started skirmish.
-function joinableMatch(ctx: any): any | null {
-  let best: any = null;
-  for (const m of [...ctx.db.match.iter()]) {
-    if (m.status !== MatchStatus.Active) continue;
-    if (playersOfMatch(ctx, m.matchId).length >= MAX_PLAYERS) continue;
-    if (best === null || m.matchId > best.matchId) best = m;
-  }
-  return best;
+function normalizeFaction(faction: number): number {
+  return faction === Faction.Crusader ? Faction.Crusader : Faction.Ayyubid;
 }
 
-// Join the world. Founds a base on first call (joining an open match or creating
-// one), reconnects just flip online. Faction is the player's chosen side.
+// Found a brand-new multiplayer match the caller hosts, and join it. The match is
+// Active, gets a fresh per-match forest on the shared map, and starts with just the
+// host — others find it in the lobby (status Active, players < MAX_PLAYERS) and
+// join by its matchId. Returns the new matchId so enterGame(0) can reuse it.
+function createNewMatch(
+  ctx: any,
+  name: string,
+  preset: string,
+  side: number
+): bigint {
+  const cfg = ctx.db.config.id.find(0);
+  const presetId = preset || cfg?.preset || 'continental';
+  const matchId = createMatchRow(
+    ctx,
+    ctx.sender,
+    name || 'Open Match',
+    cfg?.seed ?? 1,
+    presetId
+  );
+  scatterMatchNodes(ctx, matchId);
+  foundPlayer(ctx, ctx.sender, name || 'Amir', side, matchId);
+  return matchId;
+}
+
+// Create a fresh multiplayer match hosted by the caller and drop them into it. The
+// lobby's "Create Match" calls this; `preset` is the map flavor shown in the list.
+// A caller already in a match is rejected — leave first.
+export const createMatch = spacetimedb.reducer(
+  { name: t.string(), faction: t.u8(), preset: t.string() },
+  (ctx, { name, faction, preset }) => {
+    if (ctx.db.player.identity.find(ctx.sender))
+      throw new SenderError('already in a match — leave first');
+    createNewMatch(ctx, name, preset, normalizeFaction(faction));
+  }
+);
+
+// Join an EXPLICIT match. `matchId = 0` means "create a new multiplayer match and
+// join it" (the lobby's Create path). A real id joins THAT match if it is Active
+// and has room — erroring on a missing/ended/full match rather than silently
+// dropping the player into some other world. A reconnecting player (already has a
+// row) just flips online; their matchId is unchanged.
 export const enterGame = spacetimedb.reducer(
-  { name: t.string(), faction: t.u8() },
-  (ctx, { name, faction }) => {
-    const side =
-      faction === Faction.Crusader ? Faction.Crusader : Faction.Ayyubid;
+  { matchId: t.u64(), name: t.string(), faction: t.u8() },
+  (ctx, { matchId, name, faction }) => {
+    const side = normalizeFaction(faction);
     const existing = ctx.db.player.identity.find(ctx.sender);
     if (existing) {
       ctx.db.player.identity.update({
@@ -47,21 +78,16 @@ export const enterGame = spacetimedb.reducer(
       });
       return;
     }
-    const open = joinableMatch(ctx);
-    let matchId: bigint;
-    if (open) {
-      matchId = open.matchId;
-    } else {
-      const cfg = ctx.db.config.id.find(0);
-      matchId = createMatch(
-        ctx,
-        ctx.sender,
-        name || 'Skirmish',
-        cfg?.seed ?? 1,
-        cfg?.preset ?? 'continental'
-      );
-      scatterMatchNodes(ctx, matchId);
+    if (matchId === 0n) {
+      createNewMatch(ctx, name, '', side);
+      return;
     }
+    const m = ctx.db.match.matchId.find(matchId);
+    if (!m) throw new SenderError('match no longer exists');
+    if (m.status !== MatchStatus.Active)
+      throw new SenderError('match is not open to join');
+    if (playersOfMatch(ctx, matchId).length >= MAX_PLAYERS)
+      throw new SenderError('match is full');
     foundPlayer(ctx, ctx.sender, name || 'Amir', side, matchId);
   }
 );
@@ -92,7 +118,7 @@ export const startSkirmish = spacetimedb.reducer(
       ? { seed: cfg?.seed ?? 1, preset: cfg?.preset ?? 'continental' }
       : regenerateWorld(ctx, seed, preset);
 
-    const matchId = createMatch(ctx, ctx.sender, name || 'Skirmish', world.seed, world.preset);
+    const matchId = createMatchRow(ctx, ctx.sender, name || 'Skirmish', world.seed, world.preset);
     scatterMatchNodes(ctx, matchId);
 
     const human =

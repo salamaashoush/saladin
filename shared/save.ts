@@ -106,7 +106,7 @@ export const LIVE_COLUMNS: Record<string, readonly string[]> = {
     "matchId",
   ],
   garrison: ["slotId", "building", "unit", "owner"],
-  match: ["matchId", "name", "host", "status", "seed", "preset"],
+  match: ["matchId", "name", "host", "status", "seed", "preset", "players"],
 };
 
 // Columns a mirror table adds on top of its live columns: its own autoInc id and

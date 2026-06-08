@@ -22,6 +22,7 @@ export function createMatch(
     status: MatchStatus.Active,
     seed,
     preset,
+    players: 0, // bumped by foundPlayer as each human/bot joins this match
   });
   return id;
 }

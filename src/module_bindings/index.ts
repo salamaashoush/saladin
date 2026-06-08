@@ -37,6 +37,7 @@ import {
 import AddAiReducer from "./add_ai_reducer";
 import AttackUnitReducer from "./attack_unit_reducer";
 import AutoGatherReducer from "./auto_gather_reducer";
+import CreateMatchReducer from "./create_match_reducer";
 import DebugBigMatchReducer from "./debug_big_match_reducer";
 import DebugStressReducer from "./debug_stress_reducer";
 import DebugStressClearReducer from "./debug_stress_clear_reducer";
@@ -450,6 +451,7 @@ const reducersSchema = __reducers(
   __reducerSchema("add_ai", AddAiReducer),
   __reducerSchema("attack_unit", AttackUnitReducer),
   __reducerSchema("auto_gather", AutoGatherReducer),
+  __reducerSchema("create_match", CreateMatchReducer),
   __reducerSchema("debug_big_match", DebugBigMatchReducer),
   __reducerSchema("debug_stress", DebugStressReducer),
   __reducerSchema("debug_stress_clear", DebugStressClearReducer),

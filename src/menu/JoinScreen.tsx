@@ -1,8 +1,8 @@
-import { useState } from 'react';
-import { Faction } from '../../shared/index.ts';
-import type { JoinConfig } from '../session/types';
-import { FactionPicker } from './FactionPicker';
-import styles from './Menu.module.css';
+import { useState } from "react";
+import { Faction } from "../../shared/index.ts";
+import type { JoinConfig } from "../session/types";
+import { FactionPicker } from "./FactionPicker";
+import styles from "./Menu.module.css";
 
 export function JoinScreen({
   onJoin,
@@ -13,7 +13,7 @@ export function JoinScreen({
   onBack: () => void;
   disabled: boolean;
 }) {
-  const [name, setName] = useState('Amir');
+  const [name, setName] = useState("Amir");
   const [faction, setFaction] = useState<number>(Faction.Ayyubid);
 
   return (
@@ -47,7 +47,11 @@ export function JoinScreen({
           <button
             className={styles.primary}
             disabled={disabled}
-            onClick={() => onJoin({ name: name.trim() || 'Amir', faction })}
+            onClick={() =>
+              // matchId '0' = create a fresh open match (the lobby supersedes
+              // this quick-join screen; kept buildable as a fallback entry point).
+              onJoin({ matchId: "0", name: name.trim() || "Amir", faction })
+            }
           >
             Enter the World
           </button>

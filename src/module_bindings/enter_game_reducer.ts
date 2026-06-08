@@ -11,6 +11,7 @@ import {
 } from "spacetimedb";
 
 export default {
+  matchId: __t.u64(),
   name: __t.string(),
   faction: __t.u8(),
 };

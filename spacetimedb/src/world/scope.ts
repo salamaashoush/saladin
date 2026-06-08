@@ -26,6 +26,19 @@ export function aisOfMatch(ctx: any, matchId: bigint): any[] {
   return [...ctx.db.ai.iter()].filter((a: any) => a.matchId === matchId);
 }
 
+// Re-derive `match.players` from the live player rows of `matchId` and write it
+// back. The denormalized count lets the lobby list open matches from the `match`
+// table alone (no player-table subscription) while staying truthful: every place
+// that adds or removes a player row in a match calls this. A no-op if the match
+// row is already gone (it's torn down before its players in clearMatchRows).
+export function recountMatchPlayers(ctx: any, matchId: bigint): void {
+  const m = ctx.db.match.matchId.find(matchId);
+  if (!m) return;
+  const players = [...ctx.db.player.matchId.filter(matchId)].length;
+  if (m.players !== players)
+    ctx.db.match.matchId.update({ ...m, players });
+}
+
 // True if a HUMAN (no ai row) other than `caller` shares `matchId` — used to guard
 // world regeneration so one player's reset can't reshape a co-tenant's match.
 export function otherHumansInMatch(

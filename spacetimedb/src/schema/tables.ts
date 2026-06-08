@@ -202,6 +202,11 @@ export const match = table(
     status: t.u8(), // MatchStatus (shared/match.ts): Active / Paused / Ended
     seed: t.u32(),
     preset: t.string(),
+    // Live human+bot player count, maintained by foundPlayer/clearMatchRows. The
+    // lobby derives "joinable" (Active && players < MAX_PLAYERS) from this number
+    // without subscribing to the player table — the match row alone carries enough
+    // for the open-match list, keeping lobby scope to the lightweight `match` table.
+    players: t.u8(),
   }
 );
 
@@ -379,6 +384,7 @@ export const saveMatchRow = table(
     status: t.u8(),
     seed: t.u32(),
     preset: t.string(),
+    players: t.u8(),
   }
 );
 

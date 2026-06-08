@@ -37,6 +37,7 @@ import {
 } from '../../../shared/enums.ts';
 import { cellOf } from '../../../shared/spatial.ts';
 import { clampWorld, getSeed, buildNodes, assignGatherBalanced } from './util.ts';
+import { recountMatchPlayers } from './scope.ts';
 
 // ctx is typed inside reducers; helpers take `any` to avoid threading the schema
 // generic everywhere. They only touch typed table rows.
@@ -184,6 +185,9 @@ export function foundPlayer(
     techMask: 0n,
     matchId,
   });
+
+  // Keep the lobby's denormalized headcount in step with the player row just added.
+  recountMatchPlayers(ctx, matchId);
 
   const nodes = buildNodes(ctx, matchId);
   const fresh: any[] = [];
