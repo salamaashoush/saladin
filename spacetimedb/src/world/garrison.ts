@@ -124,3 +124,14 @@ export function clearGarrisonsOf(ctx: any, owner: any): void {
   for (const g of [...ctx.db.garrison.iter()])
     if (g.owner.equals(owner)) ctx.db.garrison.slotId.delete(g.slotId);
 }
+
+// Remove one unit completely: its garrison slot (if sheltered), its unit row, and
+// its entity row — leaving nothing orphaned. Used when a unit dies OUTSIDE the
+// combat loop (e.g. starves to death), so it stops drawing upkeep instead of
+// lingering as a zero-hp zombie that deadlocks the food economy.
+export function removeUnit(ctx: any, unitId: bigint): void {
+  for (const g of [...ctx.db.garrison.iter()])
+    if (g.unit === unitId) ctx.db.garrison.slotId.delete(g.slotId);
+  if (ctx.db.unit.entityId.find(unitId)) ctx.db.unit.entityId.delete(unitId);
+  if (ctx.db.entity.entityId.find(unitId)) ctx.db.entity.entityId.delete(unitId);
+}

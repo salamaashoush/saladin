@@ -1,5 +1,6 @@
-import { BuildingKind } from '../../../shared/enums.ts';
+import { BuildingKind, UnitKind } from '../../../shared/enums.ts';
 import { mapPresetById } from '../../../shared/presets.ts';
+import type { AssaultIntel, TacticalTarget } from '../../../shared/ai.ts';
 import { dist, getSeed } from './util.ts';
 import { scatterNodes } from './spawn.ts';
 import { clearGarrisonsOf } from './garrison.ts';
@@ -99,4 +100,59 @@ export function nearestEnemyKeep(
     }
   }
   return best ?? fallback;
+}
+
+// Defensive structures a siege train should crack first — anything that fights
+// back or blocks the way to the keep.
+function isDefenseWork(kind: number): boolean {
+  return (
+    kind === BuildingKind.Wall ||
+    kind === BuildingKind.Gatehouse ||
+    kind === BuildingKind.Tower ||
+    kind === BuildingKind.Watchtower ||
+    kind === BuildingKind.Keep
+  );
+}
+
+// Build the per-bot assault picture from the tick snapshot: the nearest enemy
+// keep (main objective), every enemy structure (split out: defenses for the siege
+// train), and enemy gatherers (the soft economy raiders hunt). Hostile = a player
+// on the opposing faction. Reads positions from the hoisted `pos` map so it never
+// re-scans the entity table per row. Pure data shaping — feeds the pure
+// targetForRole planner in shared/ai.ts.
+export function assaultIntel(
+  allUnits: ReadonlyArray<any>,
+  allBuildings: ReadonlyArray<any>,
+  pos: ReadonlyMap<bigint, { x: number; y: number }>,
+  isEnemy: (ownerId: any) => boolean,
+  fromX: number,
+  fromY: number
+): AssaultIntel {
+  const defenses: TacticalTarget[] = [];
+  const buildings: TacticalTarget[] = [];
+  const gatherers: TacticalTarget[] = [];
+  let keep: TacticalTarget | null = null;
+  let keepD = Infinity;
+
+  for (const b of allBuildings) {
+    if (!isEnemy(b.owner)) continue;
+    const e = pos.get(b.entityId);
+    if (!e) continue;
+    const t: TacticalTarget = { id: b.entityId, x: e.x, y: e.y };
+    buildings.push(t);
+    if (isDefenseWork(b.kind)) defenses.push(t);
+    if (b.kind === BuildingKind.Keep) {
+      const d = dist(fromX, fromY, e.x, e.y);
+      if (d < keepD) {
+        keepD = d;
+        keep = t;
+      }
+    }
+  }
+  for (const u of allUnits) {
+    if (u.kind !== UnitKind.Peasant || !isEnemy(u.owner)) continue;
+    const e = pos.get(u.entityId);
+    if (e) gatherers.push({ id: u.entityId, x: e.x, y: e.y });
+  }
+  return { keep, defenses, buildings, gatherers };
 }

@@ -389,3 +389,171 @@ function countTowersBelowCap(s: PlannerState, tune: PlannerTuning): boolean {
 export function countOwnKind(census: UnitCensus, kind: number): number {
   return census[kind] ?? 0;
 }
+
+// ── tactical layer: squad roles & target selection ───────────────────────────
+//
+// The strategic planner above decides WHAT to build. This layer decides WHERE the
+// fielded army goes once an assault is on. It is pure (no ctx / tables) so the
+// brain feeds it snapshots and the same logic is byte-for-byte testable. The brain
+// reuses shared/combat acquireTarget for in-range engagement; these helpers decide
+// the higher-level march order — which structure the main body besieges, what the
+// siege train cracks, and which soft targets the raiders peel off to harass.
+
+// What a fielded combat unit is FOR on the attack. Derived from unit data so a
+// new unit slots in by its stats, not a hand-keyed table:
+//   Siege   — prefersBuildings (Ram/Mangonel): cracks walls/towers/keep.
+//   Raider  — fast (speed >= RAIDER_SPEED) light cavalry: harasses gatherers.
+//   Main    — everything else: the shield wall that marches on the keep.
+export const SquadRole = { Main: 0, Siege: 1, Raider: 2 } as const;
+export type SquadRole = (typeof SquadRole)[keyof typeof SquadRole];
+
+// A mounted skirmisher this fast is a raider — it can reach the enemy economy and
+// kite away before the defenders form up. Knights/Mamluks are fast too but hit
+// hard in a line, so only LIGHT fast cavalry (low hp) raid; heavies stay Main.
+export const RAIDER_SPEED = 3.8;
+const RAIDER_MAX_HP = 80; // above this the "fast" unit is a heavy — keep it Main
+
+export function squadRole(kind: number): SquadRole {
+  const def = UNIT_DEFS[kind as UnitKind];
+  if (!def || def.attack <= 0) return SquadRole.Main; // Imam etc. tag along as Main
+  if (def.prefersBuildings) return SquadRole.Siege;
+  if (def.speed >= RAIDER_SPEED && def.maxHp <= RAIDER_MAX_HP)
+    return SquadRole.Raider;
+  return SquadRole.Main;
+}
+
+// A point the brain can hand a squad to march on: an entityId plus its position.
+export interface TacticalTarget {
+  id: bigint;
+  x: number;
+  y: number;
+}
+
+// The battlefield as the planner sees it for one bot's assault. Buildings split
+// into defenseworks (walls/towers — siege food) and the keep (the win condition);
+// gatherers are the enemy's soft economy that raiders hunt.
+export interface AssaultIntel {
+  keep: TacticalTarget | null; // nearest enemy keep — the main objective
+  defenses: ReadonlyArray<TacticalTarget>; // enemy walls/towers/gatehouses
+  buildings: ReadonlyArray<TacticalTarget>; // ALL enemy structures (incl. keep)
+  gatherers: ReadonlyArray<TacticalTarget>; // enemy peasants in the field
+}
+
+function nearest(
+  x: number,
+  y: number,
+  pts: ReadonlyArray<TacticalTarget>
+): TacticalTarget | null {
+  let best: TacticalTarget | null = null;
+  let bestD = Infinity;
+  for (const p of pts) {
+    const dx = p.x - x;
+    const dy = p.y - y;
+    const d = dx * dx + dy * dy;
+    if (d < bestD) {
+      bestD = d;
+      best = p;
+    }
+  }
+  return best;
+}
+
+// Pick the march objective for ONE unit at (x,y) given its role and the intel.
+// Pure & deterministic — ties break by nearest (squared distance), and with no
+// distance signal the caller's input order decides, so the same snapshot always
+// yields the same order. Returns null when there's nothing for that role to do
+// (e.g. a raider with no gatherers left), letting the brain fall the unit back to
+// the main objective.
+//
+//   Siege  → nearest enemy DEFENSE (wall/tower); else nearest building; else keep.
+//            Siege auto-aggro (acquireTarget/prefersBuildings) finishes the job in
+//            range, but we still march it onto the fortifications so it leads with
+//            its strength instead of wandering toward soft units.
+//   Raider → nearest enemy GATHERER (the economy); else null (rejoin the main body).
+//   Main   → the keep (fall back to any building, then to a gatherer to stay useful).
+export function targetForRole(
+  role: SquadRole,
+  x: number,
+  y: number,
+  intel: AssaultIntel
+): TacticalTarget | null {
+  if (role === SquadRole.Siege) {
+    return (
+      nearest(x, y, intel.defenses) ??
+      nearest(x, y, intel.buildings) ??
+      intel.keep
+    );
+  }
+  if (role === SquadRole.Raider) {
+    return nearest(x, y, intel.gatherers); // null → brain rejoins it to Main
+  }
+  // Main body: march on the keep; if it's already gone, mop up other buildings,
+  // then chase down whatever economy is left so the assault never stalls.
+  return intel.keep ?? nearest(x, y, intel.buildings) ?? nearest(x, y, intel.gatherers);
+}
+
+// How many of `army` should be carved off as raiders, given the profile's raid
+// fraction and how many raider-class units are actually on hand. 0 when the
+// profile doesn't raid (Easy) or no light cavalry exists. The brain assigns the
+// fastest raider-class units up to this count; the rest fold into the main body so
+// a raid never strips the assault of its punch.
+export function raidQuota(raiderCount: number, raidFraction: number): number {
+  if (raidFraction <= 0 || raiderCount <= 0) return 0;
+  return Math.min(raiderCount, Math.max(1, Math.floor(raiderCount * raidFraction)));
+}
+
+// ── tactical layer: threat / recall / muster decisions ───────────────────────
+
+// The bot's read of an attack on its home. `attackers` is the count of enemy
+// combatants within the home-threat radius of any OWNED building (not just the
+// keep) — a tower or barracks under the axe still counts. `fieldArmy` is the
+// soldiers currently out on the attack; `homeArmy` those already near home.
+export interface ThreatState {
+  attackers: number; // enemy combatants near owned buildings
+  fieldArmy: number; // own combat units out in the field (not near home)
+  homeArmy: number; // own combat units already defending near home
+}
+
+// Should the bot RECALL part of its field army to defend? True once the attack on
+// home outweighs the defenders already there by the profile's threshold, AND there
+// IS a field army to recall. Reaction SPEED is the profile's defendReactDelay
+// (handled in the brain via threatTimer); this is the yes/no quality call.
+export function shouldRecall(
+  th: ThreatState,
+  tune: TacticalTuning
+): boolean {
+  if (th.attackers < tune.defendThreat) return false;
+  if (th.fieldArmy <= 0) return false;
+  // Already enough at home to handle it (with a small margin) — keep pressing.
+  return th.attackers > th.homeArmy + tune.recallMargin;
+}
+
+// How many field soldiers to pull home to defend: enough to match the attackers
+// (over what's already home), capped by the profile's recall fraction of the
+// field army so a feint never drains the whole assault. At least 1 when recalling.
+export function recallCount(th: ThreatState, tune: TacticalTuning): number {
+  if (!shouldRecall(th, tune)) return 0;
+  const needed = Math.max(0, th.attackers - th.homeArmy);
+  const cap = Math.max(1, Math.floor(th.fieldArmy * tune.recallFraction));
+  return Math.max(1, Math.min(needed, cap, th.fieldArmy));
+}
+
+// Muster gate: don't throw a wave until enough soldiers are mustered. The planner
+// must not feed tiny dribbles into the enemy — it waits for waveSize, then commits
+// the whole body together. Pure so the cadence rule is testable.
+export function mustered(soldiers: number, waveSize: number): boolean {
+  return soldiers >= waveSize;
+}
+
+// Tactical knobs, supplied per difficulty alongside PlannerTuning. Decision
+// QUALITY + reaction, never a cheat: Easy recalls slowly with a big margin and
+// never raids/scouts; Hard recalls precisely and fast, raids, and scouts.
+export interface TacticalTuning {
+  defendThreat: number; // enemy combatants near home to trigger a recall
+  recallMargin: number; // extra attackers over home defenders before recalling
+  recallFraction: number; // max share of the field army pulled home at once
+  raidFraction: number; // share of raider-class units sent to harass (0 = none)
+  scouts: boolean; // sends an early scout toward the enemy (Hard)
+  defendReactDelay: number; // seconds of sustained threat before reacting (lower = sharper)
+  raidReactDelay: number; // seconds into the game before raids begin
+}

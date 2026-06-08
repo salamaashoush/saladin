@@ -4,6 +4,7 @@ import { UNIT_DEFS } from '../../../shared/defs.ts';
 import { spacetimedb } from '../schema/db.ts';
 import { economyTimer } from '../schema/tables.ts';
 import { scheduleRefs } from '../schema/schedule_refs.ts';
+import { removeUnit } from '../world/garrison.ts';
 
 // Economy upkeep — runs every ECONOMY_TICK_MS. Only COMBAT units draw rations;
 // peasants and imams feed themselves, so a worker-only opening never starves and
@@ -27,9 +28,14 @@ export const economySystem = spacetimedb.reducer(
       );
       if (food !== p.food) ctx.db.player.identity.update({ ...p, food });
       if (!starving || hpDrain <= 0) continue;
+      // Drain hp; a unit whose rations run out entirely starves to DEATH and is
+      // removed (slot + unit + entity). Without this, zero-hp soldiers linger and
+      // keep eating, deadlocking the larder so the army can never recover.
       for (const u of eaters) {
         const hp = Math.max(0, u.hp - hpDrain);
-        if (hp !== u.hp) ctx.db.unit.entityId.update({ ...u, hp });
+        if (hp === u.hp) continue;
+        if (hp <= 0) removeUnit(ctx, u.entityId);
+        else ctx.db.unit.entityId.update({ ...u, hp });
       }
     }
   }

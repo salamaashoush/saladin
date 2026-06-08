@@ -8,11 +8,22 @@ import {
   foodCrisis,
   eatsFood,
   FIELD_UNITS,
+  SquadRole,
+  squadRole,
+  targetForRole,
+  raidQuota,
+  mustered,
+  shouldRecall,
+  recallCount,
   type PlannerState,
   type PlannerTuning,
   type UnitCensus,
+  type TacticalTuning,
+  type AssaultIntel,
+  type TacticalTarget,
+  type ThreatState,
 } from './ai.ts';
-import { plannerTuning, AI_PROFILES } from './defs.ts';
+import { plannerTuning, tacticalTuning, AI_PROFILES } from './defs.ts';
 import { UnitKind, BuildingKind } from './enums.ts';
 import { UNIT_DEFS } from './units.ts';
 
@@ -236,9 +247,11 @@ describe('nextPhase', () => {
     const easy = tune({
       ...plannerTuning(AI_PROFILES[0]),
     });
+    // Economy at target and army at target — Easy teches neither cavalry nor siege,
+    // so a full economy + Barracks + army should go straight to Assault.
     const s = state({
-      peasants: 6,
-      soldiers: 6,
+      peasants: easy.peasantTarget,
+      soldiers: easy.armyTarget,
       owned: owned(BuildingKind.Keep, BuildingKind.Barracks),
     });
     expect(nextPhase(s, easy)).toBe(AiPhase.Assault);
@@ -549,5 +562,245 @@ describe('nextBuild — terminal', () => {
       tune({ peasantTarget: 10, armyTarget: 14, maxTowers: 3, siegeTarget: 2, imamTarget: 1 })
     );
     expect(plan).toBeNull();
+  });
+});
+
+// ── tactical: squad roles ─────────────────────────────────────────────────────
+
+describe('squadRole', () => {
+  it('classifies siege engines (prefersBuildings) as Siege', () => {
+    expect(squadRole(UnitKind.Ram)).toBe(SquadRole.Siege);
+    expect(squadRole(UnitKind.Mangonel)).toBe(SquadRole.Siege);
+  });
+
+  it('classifies light fast cavalry as Raiders', () => {
+    // HorseArcher: speed 4.0, hp 60 — a textbook raider.
+    expect(squadRole(UnitKind.HorseArcher)).toBe(SquadRole.Raider);
+  });
+
+  it('keeps heavy cavalry in the Main body even though they are fast', () => {
+    // Knight (130hp) and Mamluk (150hp) are fast but too heavy to raid — they
+    // belong in the line, so the assault never loses its punch.
+    expect(squadRole(UnitKind.Knight)).toBe(SquadRole.Main);
+    expect(squadRole(UnitKind.Mamluk)).toBe(SquadRole.Main);
+  });
+
+  it('classifies foot troops and support as Main', () => {
+    expect(squadRole(UnitKind.Spearman)).toBe(SquadRole.Main);
+    expect(squadRole(UnitKind.Archer)).toBe(SquadRole.Main);
+    expect(squadRole(UnitKind.Crossbowman)).toBe(SquadRole.Main);
+    expect(squadRole(UnitKind.Imam)).toBe(SquadRole.Main); // tags along with the line
+  });
+});
+
+// ── tactical: target selection per role ───────────────────────────────────────
+
+const tgt = (id: number, x: number, y: number): TacticalTarget => ({
+  id: BigInt(id),
+  x,
+  y,
+});
+
+// A full picture: a keep at (100,100), a wall and a tower guarding it, and two
+// enemy peasants gathering off to the side.
+const intel = (over: Partial<AssaultIntel> = {}): AssaultIntel => {
+  const keep = tgt(1, 100, 100);
+  const wall = tgt(2, 90, 95);
+  const tower = tgt(3, 95, 90);
+  const gatherer1 = tgt(4, 20, 20);
+  const gatherer2 = tgt(5, 30, 25);
+  return {
+    keep,
+    defenses: [wall, tower, keep],
+    buildings: [keep, wall, tower],
+    gatherers: [gatherer1, gatherer2],
+    ...over,
+  };
+};
+
+describe('targetForRole', () => {
+  it('sends the MAIN body at the enemy keep', () => {
+    const t = targetForRole(SquadRole.Main, 0, 0, intel());
+    expect(t?.id).toBe(intel().keep!.id);
+  });
+
+  it('sends SIEGE at the nearest defensive structure (wall/tower), not the keep', () => {
+    // Standing near the wall, siege should pick the wall over the distant keep.
+    const t = targetForRole(SquadRole.Siege, 89, 96, intel());
+    expect([intel().defenses[0].id, intel().defenses[1].id]).toContain(t?.id);
+  });
+
+  it('SIEGE focuses a building even when no dedicated defenses stand', () => {
+    const noDefenses = intel({ defenses: [] });
+    const t = targetForRole(SquadRole.Siege, 0, 0, noDefenses);
+    // falls back to the nearest building (which includes the keep)
+    expect(noDefenses.buildings.map((b) => b.id)).toContain(t?.id);
+  });
+
+  it('sends RAIDERS at the nearest enemy gatherer (the economy)', () => {
+    const t = targetForRole(SquadRole.Raider, 18, 18, intel());
+    expect(t?.id).toBe(intel().gatherers[0].id); // the closer of the two
+  });
+
+  it('returns null for a raider when there are no gatherers (rejoin the body)', () => {
+    const t = targetForRole(SquadRole.Raider, 0, 0, intel({ gatherers: [] }));
+    expect(t).toBeNull();
+  });
+
+  it('MAIN falls back to other buildings once the keep is gone', () => {
+    const noKeep = intel({ keep: null });
+    const t = targetForRole(SquadRole.Main, 91, 94, noKeep);
+    expect(noKeep.buildings.map((b) => b.id)).toContain(t?.id);
+  });
+
+  it('is deterministic — nearest wins by squared distance', () => {
+    const a = targetForRole(SquadRole.Raider, 31, 26, intel());
+    const b = targetForRole(SquadRole.Raider, 31, 26, intel());
+    expect(a?.id).toBe(b?.id);
+    expect(a?.id).toBe(intel().gatherers[1].id); // gatherer2 at (30,25) is nearer
+  });
+});
+
+// ── tactical: raid quota ──────────────────────────────────────────────────────
+
+describe('raidQuota', () => {
+  it('peels off a fraction of the raiders, at least one when raiding', () => {
+    expect(raidQuota(4, 0.34)).toBe(1); // floor(4*0.34)=1
+    expect(raidQuota(8, 0.34)).toBe(2);
+    expect(raidQuota(1, 0.34)).toBe(1); // at least one
+  });
+
+  it('never raids when the profile disables it or no raiders exist', () => {
+    expect(raidQuota(8, 0)).toBe(0);
+    expect(raidQuota(0, 0.5)).toBe(0);
+  });
+
+  it('never sends more raiders than exist', () => {
+    expect(raidQuota(2, 1.0)).toBe(2);
+  });
+});
+
+// ── tactical: muster-before-assault ───────────────────────────────────────────
+
+describe('mustered', () => {
+  it('waits until the army reaches waveSize before committing', () => {
+    expect(mustered(3, 8)).toBe(false);
+    expect(mustered(7, 8)).toBe(false);
+    expect(mustered(8, 8)).toBe(true);
+    expect(mustered(12, 8)).toBe(true);
+  });
+});
+
+// ── tactical: defensive recall ────────────────────────────────────────────────
+
+const tac = (over: Partial<TacticalTuning> = {}): TacticalTuning => ({
+  ...tacticalTuning(AI_PROFILES[2]), // Hard baseline
+  ...over,
+});
+
+const threat = (over: Partial<ThreatState> = {}): ThreatState => ({
+  attackers: 0,
+  fieldArmy: 0,
+  homeArmy: 0,
+  ...over,
+});
+
+describe('shouldRecall', () => {
+  it('does not recall when no enemies are at home', () => {
+    expect(
+      shouldRecall(threat({ attackers: 0, fieldArmy: 10 }), tac({ defendThreat: 3 }))
+    ).toBe(false);
+  });
+
+  it('does not recall when there is no field army to bring back', () => {
+    expect(
+      shouldRecall(threat({ attackers: 6, fieldArmy: 0, homeArmy: 2 }), tac())
+    ).toBe(false);
+  });
+
+  it('recalls when attackers at home outweigh the home defenders', () => {
+    expect(
+      shouldRecall(
+        threat({ attackers: 6, fieldArmy: 10, homeArmy: 1 }),
+        tac({ defendThreat: 3, recallMargin: 0 })
+      )
+    ).toBe(true);
+  });
+
+  it('does NOT recall when the home garrison already covers the attack', () => {
+    // 4 attackers but 4 already home (+ margin) — keep pressing the assault.
+    expect(
+      shouldRecall(
+        threat({ attackers: 4, fieldArmy: 10, homeArmy: 4 }),
+        tac({ defendThreat: 3, recallMargin: 1 })
+      )
+    ).toBe(false);
+  });
+
+  it('an Easy bot tolerates a bigger imbalance before recalling (bluntness)', () => {
+    const easy = tacticalTuning(AI_PROFILES[0]);
+    const hard = tacticalTuning(AI_PROFILES[2]);
+    // a 4v3 raid: Hard (margin 0) recalls, Easy (margin 2) shrugs it off.
+    const t = threat({ attackers: 4, fieldArmy: 10, homeArmy: 3 });
+    expect(shouldRecall(t, hard)).toBe(true);
+    expect(shouldRecall(t, easy)).toBe(false);
+  });
+});
+
+describe('recallCount', () => {
+  it('is zero when no recall is warranted', () => {
+    expect(recallCount(threat({ attackers: 0, fieldArmy: 10 }), tac())).toBe(0);
+  });
+
+  it('brings back enough to match the attack, over what is already home', () => {
+    // 6 attackers, 2 home → need 4 more; field army of 20 with fraction 0.6 caps
+    // at 12, so 4 come back.
+    const n = recallCount(
+      threat({ attackers: 6, fieldArmy: 20, homeArmy: 2 }),
+      tac({ defendThreat: 3, recallMargin: 0, recallFraction: 0.6 })
+    );
+    expect(n).toBe(4);
+  });
+
+  it('never pulls more than the recall fraction of the field army', () => {
+    // huge attack but small field army: fraction 0.5 of 6 = 3 max.
+    const n = recallCount(
+      threat({ attackers: 99, fieldArmy: 6, homeArmy: 0 }),
+      tac({ defendThreat: 3, recallMargin: 0, recallFraction: 0.5 })
+    );
+    expect(n).toBe(3);
+  });
+
+  it('recalls at least one when it recalls at all', () => {
+    const n = recallCount(
+      threat({ attackers: 4, fieldArmy: 1, homeArmy: 3 }),
+      tac({ defendThreat: 3, recallMargin: 0, recallFraction: 0.6 })
+    );
+    expect(n).toBe(1);
+  });
+});
+
+// ── tactical: difficulty shapes behaviour, not resources ──────────────────────
+
+describe('tactical difficulty profiles', () => {
+  it('Easy never raids or scouts; Hard does both', () => {
+    const easy = tacticalTuning(AI_PROFILES[0]);
+    const hard = tacticalTuning(AI_PROFILES[2]);
+    expect(easy.raidFraction).toBe(0);
+    expect(easy.scouts).toBe(false);
+    expect(hard.raidFraction).toBeGreaterThan(0);
+    expect(hard.scouts).toBe(true);
+  });
+
+  it('Hard reacts faster to a home threat than Easy', () => {
+    expect(tacticalTuning(AI_PROFILES[2]).defendReactDelay).toBeLessThan(
+      tacticalTuning(AI_PROFILES[0]).defendReactDelay
+    );
+  });
+
+  it('Hard recalls a larger share of the field army than Easy', () => {
+    expect(tacticalTuning(AI_PROFILES[2]).recallFraction).toBeGreaterThan(
+      tacticalTuning(AI_PROFILES[0]).recallFraction
+    );
   });
 });

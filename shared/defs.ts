@@ -103,6 +103,14 @@ export interface AiProfile {
   defendThreat: number; // enemy combatants near home that trigger Defend
   foodFloor: number; // food balance below which the bot stops adding upkeep
   reservePeasants: number; // extra gatherers added during a food crisis
+  // tactical layer — squad target priority, raids, defensive recall, scouting.
+  // Decision QUALITY + reaction speed only, never a cheat.
+  recallMargin: number; // extra attackers over home defenders before recalling
+  recallFraction: number; // max share of the field army pulled home to defend
+  raidFraction: number; // share of light cavalry peeled off to harass gatherers
+  scouts: boolean; // sends an early scout toward the enemy (Hard only)
+  defendReactDelay: number; // seconds of sustained threat before recalling
+  raidReactDelay: number; // grace period before raids begin
 }
 
 export const AiDifficulty = { Easy: 0, Normal: 1, Hard: 2 } as const;
@@ -113,20 +121,28 @@ export const AI_PROFILES: Record<number, AiProfile> = {
     label: 'Easy',
     decisionInterval: 2.0,
     waveSize: 4, waveInterval: 45, firstWaveDelay: 60,
-    peasantTarget: 6, armyTarget: 6, coreArmy: 3, popBuffer: 1, foodFloorMult: 4,
+    peasantTarget: 7, armyTarget: 6, coreArmy: 4, popBuffer: 2, foodFloorMult: 6,
     woodBuffer: 30, maxTowers: 1,
     wantsCavalry: false, wantsSiege: false, siegeTarget: 0, imamTarget: 0,
     defendThreat: 4, foodFloor: 12, reservePeasants: 2,
+    // slow, blunt defense: recalls late and only a sliver of the army, never raids
+    // or scouts — a gentle foe that mostly throws its main body at the keep.
+    recallMargin: 2, recallFraction: 0.34, raidFraction: 0,
+    scouts: false, defendReactDelay: 6, raidReactDelay: 9999,
   },
   // Normal: steady tempo, mixed army with some cavalry and a single siege engine.
   1: {
     label: 'Normal',
     decisionInterval: 1.0,
     waveSize: 6, waveInterval: 35, firstWaveDelay: 45,
-    peasantTarget: 8, armyTarget: 10, coreArmy: 4, popBuffer: 2, foodFloorMult: 4,
+    peasantTarget: 9, armyTarget: 10, coreArmy: 6, popBuffer: 3, foodFloorMult: 6,
     woodBuffer: 40, maxTowers: 2,
     wantsCavalry: true, wantsSiege: true, siegeTarget: 1, imamTarget: 1,
     defendThreat: 3, foodFloor: 16, reservePeasants: 3,
+    // a measured defender that peels a few raiders once the army is real, recalls
+    // about half the field army on a real attack, but doesn't scout.
+    recallMargin: 1, recallFraction: 0.5, raidFraction: 0.25,
+    scouts: false, defendReactDelay: 3, raidReactDelay: 120,
   },
   // Hard: thinks fast, teches the full tree quickly, counters precisely and
   // brings a siege train to crack the player's walls/keep.
@@ -134,10 +150,14 @@ export const AI_PROFILES: Record<number, AiProfile> = {
     label: 'Hard',
     decisionInterval: 0.6,
     waveSize: 8, waveInterval: 25, firstWaveDelay: 30,
-    peasantTarget: 10, armyTarget: 14, coreArmy: 5, popBuffer: 3, foodFloorMult: 5,
+    peasantTarget: 11, armyTarget: 14, coreArmy: 9, popBuffer: 4, foodFloorMult: 6,
     woodBuffer: 50, maxTowers: 3,
     wantsCavalry: true, wantsSiege: true, siegeTarget: 2, imamTarget: 1,
     defendThreat: 3, foodFloor: 20, reservePeasants: 4,
+    // sharp tactics: raids the enemy economy early, recalls precisely and fast on
+    // any threat, and scouts the map to react to what the player is actually doing.
+    recallMargin: 0, recallFraction: 0.6, raidFraction: 0.34,
+    scouts: true, defendReactDelay: 1, raidReactDelay: 75,
   },
 };
 
@@ -159,6 +179,20 @@ export function plannerTuning(prof: AiProfile): import('./ai.ts').PlannerTuning 
     defendThreat: prof.defendThreat,
     foodFloor: prof.foodFloor,
     reservePeasants: prof.reservePeasants,
+  };
+}
+
+// Build the tactical tuning view from a profile. Same one-place mapping pattern as
+// plannerTuning — the brain reads this for recall / raid / scout decisions.
+export function tacticalTuning(prof: AiProfile): import('./ai.ts').TacticalTuning {
+  return {
+    defendThreat: prof.defendThreat,
+    recallMargin: prof.recallMargin,
+    recallFraction: prof.recallFraction,
+    raidFraction: prof.raidFraction,
+    scouts: prof.scouts,
+    defendReactDelay: prof.defendReactDelay,
+    raidReactDelay: prof.raidReactDelay,
   };
 }
 
