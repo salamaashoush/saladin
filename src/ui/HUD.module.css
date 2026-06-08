@@ -1,0 +1,76 @@
+.hud {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  font-family: var(--sld-font);
+}
+
+.hud > * {
+  pointer-events: auto;
+}
+
+/* Fixed Stronghold-style command bar across the bottom. */
+.bottomBar {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 116px;
+  display: flex;
+  align-items: stretch;
+  gap: 8px;
+  padding: 7px 10px;
+  background: linear-gradient(180deg, rgba(26, 19, 11, 0.92), rgba(16, 12, 7, 0.96));
+  border-top: 2px solid var(--sld-border);
+  box-shadow: 0 -4px 20px rgba(0, 0, 0, 0.45);
+}
+
+.barLeft {
+  width: 190px;
+  flex: none;
+  display: flex;
+}
+
+.barCenter {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 0;
+}
+
+.barRight {
+  flex: none;
+  display: flex;
+}
+
+.status {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  font-size: 1.1rem;
+  color: var(--sld-gold);
+  background: var(--sld-panel);
+  padding: 14px 22px;
+  border-radius: var(--sld-radius);
+  border: 1px solid var(--sld-border);
+}
+
+.addAi {
+  position: absolute;
+  top: 64px;
+  right: 12px;
+  font-family: var(--sld-font);
+  font-size: 0.85rem;
+  color: var(--sld-gold);
+  background: var(--sld-panel);
+  padding: 8px 12px;
+  border-radius: var(--sld-radius);
+  border: 1px solid var(--sld-border);
+  cursor: pointer;
+}
+
+.addAi:hover {
+  border-color: var(--sld-gold);
+}

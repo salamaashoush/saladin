@@ -1,0 +1,131 @@
+.bar {
+  display: flex;
+  align-items: stretch;
+  gap: 12px;
+  height: 100%;
+}
+
+/* a distinct bordered section (Build, Production, Orders) */
+.group {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: space-between;
+  gap: 5px;
+  padding: 5px 9px 7px;
+  border: 1px solid var(--sld-border);
+  border-radius: 10px;
+  background: rgba(0, 0, 0, 0.22);
+}
+
+.groupLabel {
+  font-size: 0.62rem;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--sld-gold);
+  font-weight: 700;
+}
+
+.note {
+  color: var(--sld-ink-faint);
+  font-size: 0.78rem;
+  padding: 0 8px;
+}
+
+/* category tabs (header of the Build group) */
+.tabs {
+  display: flex;
+  gap: 4px;
+}
+
+.tab {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 11px;
+  border: 1px solid transparent;
+  border-radius: 7px;
+  background: rgba(0, 0, 0, 0.35);
+  color: var(--sld-ink-dim);
+  font-weight: 700;
+  font-size: 0.64rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  cursor: pointer;
+}
+
+.tabActive {
+  background: rgba(201, 162, 39, 0.22);
+  border-color: var(--sld-border);
+  color: var(--sld-gold);
+}
+
+/* icon tool buttons */
+.tools {
+  display: flex;
+  gap: 6px;
+  align-items: stretch;
+}
+
+.tool {
+  width: 52px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 1px;
+  padding: 4px 2px 3px;
+  border: 1px solid var(--sld-border);
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.35);
+  color: var(--sld-ink);
+  cursor: pointer;
+  transition: filter 0.1s ease;
+}
+
+.tool:hover:not(:disabled) {
+  filter: brightness(1.18);
+}
+
+.tool:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.toolActive {
+  background: var(--sld-gold-deep);
+  color: #1a1407;
+  border-color: var(--sld-border-strong);
+}
+
+.toolIcon {
+  font-size: 1.3rem;
+  line-height: 1.1;
+}
+
+.toolLabel {
+  font-size: 0.58rem;
+  font-weight: 700;
+}
+
+.toolCost {
+  font-size: 0.54rem;
+  color: var(--sld-ink-dim);
+}
+
+.toolActive .toolCost {
+  color: #4a3a10;
+}
+
+.green {
+  border-color: var(--sld-green);
+}
+
+.red {
+  border-color: var(--sld-red);
+}
+
+.redActive {
+  background: var(--sld-red);
+  color: #fff;
+  border-color: var(--sld-red);
+}
