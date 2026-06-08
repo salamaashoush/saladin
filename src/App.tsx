@@ -45,6 +45,7 @@ function App() {
           onGatherAll={actions.gatherAll}
           onAddAi={() => actions.addAi(1)}
           onLeave={actions.leaveGame}
+          onSetStance={(s) => game?.setSelectedStance(s)}
           onMinimapCanvas={(c) => game?.setMinimapCanvas(c)}
           onMinimapClick={(x, y) => game?.focusWorld(x, y)}
         />

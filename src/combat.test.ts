@@ -1,12 +1,34 @@
 import { describe, it, expect } from 'vitest';
 import {
   effectiveDamage,
+  combatAction,
   DAMAGE_MATRIX,
   UNIT_DEFS,
   UnitKind,
   DamageType,
   ArmorClass,
+  Stance,
 } from '../shared/index.ts';
+
+describe('combatAction (stances)', () => {
+  it('always attacks a target in range, whatever the stance', () => {
+    for (const s of [Stance.Aggressive, Stance.Defensive, Stance.HoldGround])
+      expect(combatAction(s, true, 999, 7)).toBe('attack');
+  });
+
+  it('aggressive chases regardless of distance from home', () => {
+    expect(combatAction(Stance.Aggressive, false, 50, 7)).toBe('approach');
+  });
+
+  it('defensive chases within leash but returns once pulled past it', () => {
+    expect(combatAction(Stance.Defensive, false, 3, 7)).toBe('approach');
+    expect(combatAction(Stance.Defensive, false, 7, 7)).toBe('return');
+  });
+
+  it('hold ground never moves to engage', () => {
+    expect(combatAction(Stance.HoldGround, false, 0, 7)).toBe('hold');
+  });
+});
 
 describe('effectiveDamage', () => {
   it('applies the matrix multiplier and floors to an integer', () => {

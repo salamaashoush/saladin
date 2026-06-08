@@ -34,3 +34,9 @@ export type GatherState = (typeof GatherState)[keyof typeof GatherState];
 
 export const Faction = { Ayyubid: 0, Crusader: 1 } as const;
 export type Faction = (typeof Faction)[keyof typeof Faction];
+
+// Combat posture. Aggressive: hunt within aggro range. Defensive: engage nearby
+// foes but never stray far from where you were posted. HoldGround: never move to
+// fight — strike only what comes within reach.
+export const Stance = { Aggressive: 0, Defensive: 1, HoldGround: 2 } as const;
+export type Stance = (typeof Stance)[keyof typeof Stance];

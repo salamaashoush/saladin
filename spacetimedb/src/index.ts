@@ -57,7 +57,11 @@ import {
   nearestWithin,
   type Located,
 } from '../../shared/sim.ts';
-import { effectiveDamage } from '../../shared/combat.ts';
+import {
+  effectiveDamage,
+  combatAction,
+  DEFENSIVE_LEASH,
+} from '../../shared/combat.ts';
 import { sampleTerrain, treeDensity } from '../../shared/terrain.ts';
 import {
   isPassable,
@@ -78,6 +82,7 @@ import {
   ResourceType,
   GatherState,
   Faction,
+  Stance,
   type UnitKind as UnitKindT,
   type BuildingKind as BuildingKindT,
 } from '../../shared/enums.ts';
@@ -113,6 +118,9 @@ const unit = table(
     hp: t.u32(),
     attackTarget: t.u64(),
     attackCooldown: t.f32(),
+    stance: t.u8(),
+    homeX: t.f32(), // posted position — Defensive units leash to it
+    homeY: t.f32(),
     path: t.array(PathPoint),
     pathIdx: t.u32(),
   }
@@ -278,6 +286,9 @@ function spawnUnitEntity(
     hp: def.maxHp,
     attackTarget: 0n,
     attackCooldown: 0,
+    stance: Stance.Aggressive,
+    homeX: x,
+    homeY: y,
     path: [],
     pathIdx: 0,
   });
@@ -813,12 +824,16 @@ export const moveUnit = spacetimedb.reducer(
     if (!u || !u.owner.equals(ctx.sender)) return;
     const e = ctx.db.entity.entityId.find(entityId);
     if (!e) return;
+    const hx = clampWorld(x);
+    const hy = clampWorld(y);
     ctx.db.unit.entityId.update({
       ...u,
       gatherState: GatherState.Idle,
       targetNode: 0n,
       attackTarget: 0n,
-      ...movePatch(ctx, e.x, e.y, clampWorld(x), clampWorld(y)),
+      homeX: hx,
+      homeY: hy,
+      ...movePatch(ctx, e.x, e.y, hx, hy),
     });
   }
 );
@@ -861,6 +876,26 @@ export const setRally = spacetimedb.reducer(
       rallyX: clampWorld(x),
       rallyY: clampWorld(y),
     });
+  }
+);
+
+// Set combat posture for a batch of the caller's units; posts each unit's home
+// at its current position so Defensive units leash to where they were set.
+export const setStance = spacetimedb.reducer(
+  { entityIds: t.array(t.u64()), stance: t.u8() },
+  (ctx, { entityIds, stance }) => {
+    const s = stance > Stance.HoldGround ? Stance.Aggressive : stance;
+    for (const id of entityIds) {
+      const u = ctx.db.unit.entityId.find(id);
+      if (!u || !u.owner.equals(ctx.sender)) continue;
+      const e = ctx.db.entity.entityId.find(id);
+      ctx.db.unit.entityId.update({
+        ...u,
+        stance: s,
+        homeX: e ? e.x : u.homeX,
+        homeY: e ? e.y : u.homeY,
+      });
+    }
   }
 );
 
@@ -1211,19 +1246,36 @@ export const combatTick = spacetimedb.reducer(
             hasTarget: false,
           });
         }
-      } else if (!u.hasTarget) {
-        ctx.db.unit.entityId.update({
-          ...u,
-          attackTarget: targetId,
-          attackCooldown: cd,
-          ...movePatch(ctx, e.x, e.y, te.x, te.y),
-        });
       } else {
-        ctx.db.unit.entityId.update({
-          ...u,
-          attackTarget: targetId,
-          attackCooldown: cd,
-        });
+        // Out of range — posture decides whether to chase, fall back, or hold.
+        const act = combatAction(
+          u.stance as Stance,
+          false,
+          dist(e.x, e.y, u.homeX, u.homeY),
+          DEFENSIVE_LEASH
+        );
+        if (act === 'approach') {
+          ctx.db.unit.entityId.update({
+            ...u,
+            attackTarget: targetId,
+            attackCooldown: cd,
+            ...(u.hasTarget ? {} : movePatch(ctx, e.x, e.y, te.x, te.y)),
+          });
+        } else if (act === 'return') {
+          ctx.db.unit.entityId.update({
+            ...u,
+            attackTarget: 0n,
+            attackCooldown: cd,
+            ...(u.hasTarget ? {} : movePatch(ctx, e.x, e.y, u.homeX, u.homeY)),
+          });
+        } else {
+          // hold: stand fast, do not chase.
+          ctx.db.unit.entityId.update({
+            ...u,
+            attackTarget: 0n,
+            attackCooldown: cd,
+          });
+        }
       }
     }
 

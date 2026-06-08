@@ -1,18 +1,34 @@
+import { Stance } from '../../shared/index.ts';
 import { useGameStore } from '../store/gameStore';
 import styles from './CommandCard.module.css';
 
-export function CommandCard() {
+const STANCES: Array<[number, string, string]> = [
+  [Stance.Aggressive, '⚔️', 'Aggressive'],
+  [Stance.Defensive, '🛡️', 'Defensive'],
+  [Stance.HoldGround, '⛰️', 'Hold'],
+];
+
+export function CommandCard({
+  onSetStance,
+}: {
+  onSetStance: (stance: number) => void;
+}) {
   const sel = useGameStore((s) => s.selection);
   if (sel.total === 0) return null;
 
   const hpColor =
     sel.avgHp > 0.5 ? '#5b8a3a' : sel.avgHp > 0.25 ? '#c9a227' : '#b6402f';
 
-  const rows: Array<[string, number]> = [
-    ['🧑‍🌾 Peasants', sel.peasants],
-    ['🛡️ Spearmen', sel.spearmen],
-    ['🏹 Archers', sel.archers],
-  ].filter(([, n]) => (n as number) > 0) as Array<[string, number]>;
+  const rows: Array<[string, number]> = (
+    [
+      ['🧑‍🌾 Peasants', sel.peasants],
+      ['🛡️ Spearmen', sel.spearmen],
+      ['🏹 Archers', sel.archers],
+      ['🐎 Knights', sel.knights],
+    ] as Array<[string, number]>
+  ).filter(([, n]) => n > 0);
+
+  const soldiers = sel.spearmen + sel.archers + sel.knights;
 
   return (
     <div className={styles.card}>
@@ -28,6 +44,21 @@ export function CommandCard() {
           </div>
         ))}
       </div>
+      {soldiers > 0 && (
+        <div className={styles.stances}>
+          {STANCES.map(([s, icon, label]) => (
+            <button
+              key={s}
+              type="button"
+              className={styles.stance}
+              title={label}
+              onClick={() => onSetStance(s)}
+            >
+              {icon}
+            </button>
+          ))}
+        </div>
+      )}
       <div className={styles.hpbar}>
         <div
           className={styles.hpfill}

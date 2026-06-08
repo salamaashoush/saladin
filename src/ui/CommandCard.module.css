@@ -47,6 +47,26 @@
   color: #fff;
 }
 
+.stances {
+  display: flex;
+  gap: 4px;
+  margin-top: 6px;
+}
+
+.stance {
+  flex: 1;
+  padding: 3px 0;
+  font-size: 0.9rem;
+  cursor: pointer;
+  background: var(--sld-panel-2);
+  border: 1px solid var(--sld-border);
+  border-radius: var(--sld-radius-sm);
+}
+
+.stance:hover {
+  border-color: var(--sld-gold);
+}
+
 .hpbar {
   margin-top: 6px;
   height: 6px;

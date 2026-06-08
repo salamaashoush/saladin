@@ -20,6 +20,7 @@ export interface HUDProps {
   onGatherAll: () => void;
   onAddAi: () => void;
   onLeave: () => void;
+  onSetStance: (stance: number) => void;
   onMinimapCanvas: (c: HTMLCanvasElement | null) => void;
   onMinimapClick: (x: number, y: number) => void;
 }
@@ -51,7 +52,7 @@ export function HUD(props: HUDProps) {
 
       <div className={styles.bottomBar}>
         <div className={styles.barLeft}>
-          <CommandCard />
+          <CommandCard onSetStance={props.onSetStance} />
         </div>
         <div className={styles.barCenter}>
           <BuildBar

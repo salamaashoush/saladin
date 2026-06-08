@@ -9,6 +9,7 @@ export interface SelectionSummary {
   peasants: number;
   spearmen: number;
   archers: number;
+  knights: number;
   avgHp: number; // 0..1
 }
 
@@ -39,6 +40,7 @@ const EMPTY_SELECTION: SelectionSummary = {
   peasants: 0,
   spearmen: 0,
   archers: 0,
+  knights: 0,
   avgHp: 1,
 };
 

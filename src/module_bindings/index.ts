@@ -45,6 +45,7 @@ import MoveUnitReducer from "./move_unit_reducer";
 import PlaceBuildingReducer from "./place_building_reducer";
 import PlaceWallReducer from "./place_wall_reducer";
 import SetRallyReducer from "./set_rally_reducer";
+import SetStanceReducer from "./set_stance_reducer";
 import StartSkirmishReducer from "./start_skirmish_reducer";
 import TrainUnitReducer from "./train_unit_reducer";
 
@@ -177,6 +178,7 @@ const reducersSchema = __reducers(
   __reducerSchema("place_building", PlaceBuildingReducer),
   __reducerSchema("place_wall", PlaceWallReducer),
   __reducerSchema("set_rally", SetRallyReducer),
+  __reducerSchema("set_stance", SetStanceReducer),
   __reducerSchema("start_skirmish", StartSkirmishReducer),
   __reducerSchema("train_unit", TrainUnitReducer),
 );

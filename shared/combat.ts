@@ -1,6 +1,26 @@
 // Pure combat math — the damage-type × armor matrix and effective-damage rule.
 // Shared by the module (authority) and tests. No SpacetimeDB/Three deps.
-import { DamageType, ArmorClass } from './enums.ts';
+import { DamageType, ArmorClass, Stance } from './enums.ts';
+
+// How far a Defensive unit will wander from its posted position before it breaks
+// off and returns instead of chasing.
+export const DEFENSIVE_LEASH = 7;
+
+export type CombatAct = 'attack' | 'approach' | 'return' | 'hold';
+
+// Decide what an out-of-range (or in-range) combatant does, given its stance and
+// how far it has drifted from home. Pure so the posture rules are unit-testable.
+export function combatAction(
+  stance: Stance,
+  inRange: boolean,
+  distFromHome: number,
+  leash = DEFENSIVE_LEASH
+): CombatAct {
+  if (inRange) return 'attack';
+  if (stance === Stance.HoldGround) return 'hold';
+  if (stance === Stance.Defensive && distFromHome >= leash) return 'return';
+  return 'approach';
+}
 
 // Multiplier applied to base attack for each (damageType, armorClass) pair.
 // Slash chews soft targets but glances off mail/stone; pierce punches leather

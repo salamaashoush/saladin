@@ -121,6 +121,9 @@ export const Unit = __t.object("Unit", {
   hp: __t.u32(),
   attackTarget: __t.u64(),
   attackCooldown: __t.f32(),
+  stance: __t.u8(),
+  homeX: __t.f32(),
+  homeY: __t.f32(),
   get path() {
     return __t.array(PathPoint);
   },

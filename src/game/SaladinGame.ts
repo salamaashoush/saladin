@@ -65,6 +65,7 @@ interface GameConn {
     placeWall: (a: { tiles: Array<{ x: number; y: number }> }) => void;
     demolishBuilding: (a: { entityId: bigint }) => void;
     setRally: (a: { entityId: bigint; x: number; y: number }) => void;
+    setStance: (a: { entityIds: bigint[]; stance: number }) => void;
   };
 }
 
@@ -1218,6 +1219,7 @@ export class SaladinGame {
     let peasants = 0;
     let spearmen = 0;
     let archers = 0;
+    let knights = 0;
     let hpSum = 0;
     let n = 0;
     for (const [id, o] of this.objs) {
@@ -1226,6 +1228,7 @@ export class SaladinGame {
       if (!sel) continue;
       if (o.kind === UnitKind.Spearman) spearmen++;
       else if (o.kind === UnitKind.Archer) archers++;
+      else if (o.kind === UnitKind.Knight) knights++;
       else peasants++;
       if (o.maxHp > 0) {
         hpSum += o.hp / o.maxHp;
@@ -1237,6 +1240,7 @@ export class SaladinGame {
       peasants,
       spearmen,
       archers,
+      knights,
       avgHp: n > 0 ? hpSum / n : 1,
     });
   }
@@ -1443,6 +1447,13 @@ export class SaladinGame {
         return;
       }
     }
+  }
+
+  // Set combat posture on the currently selected units (called from the HUD).
+  setSelectedStance(stance: number) {
+    if (!this.conn || this.selected.size === 0) return;
+    const entityIds = [...this.selected].map((id) => BigInt(id));
+    this.conn.reducers.setStance({ entityIds, stance });
   }
 
   private commandAttack(targetId: bigint) {

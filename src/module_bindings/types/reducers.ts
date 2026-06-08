@@ -17,6 +17,7 @@ import MoveUnitReducer from "../move_unit_reducer";
 import PlaceBuildingReducer from "../place_building_reducer";
 import PlaceWallReducer from "../place_wall_reducer";
 import SetRallyReducer from "../set_rally_reducer";
+import SetStanceReducer from "../set_stance_reducer";
 import StartSkirmishReducer from "../start_skirmish_reducer";
 import TrainUnitReducer from "../train_unit_reducer";
 
@@ -31,6 +32,7 @@ export type MoveUnitParams = __Infer<typeof MoveUnitReducer>;
 export type PlaceBuildingParams = __Infer<typeof PlaceBuildingReducer>;
 export type PlaceWallParams = __Infer<typeof PlaceWallReducer>;
 export type SetRallyParams = __Infer<typeof SetRallyReducer>;
+export type SetStanceParams = __Infer<typeof SetStanceReducer>;
 export type StartSkirmishParams = __Infer<typeof StartSkirmishReducer>;
 export type TrainUnitParams = __Infer<typeof TrainUnitReducer>;
 

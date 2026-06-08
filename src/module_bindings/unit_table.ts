@@ -29,6 +29,9 @@ export default __t.row({
   hp: __t.u32(),
   attackTarget: __t.u64().name("attack_target"),
   attackCooldown: __t.f32().name("attack_cooldown"),
+  stance: __t.u8(),
+  homeX: __t.f32().name("home_x"),
+  homeY: __t.f32().name("home_y"),
   get path() {
     return __t.array(PathPoint);
   },
