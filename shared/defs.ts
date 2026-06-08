@@ -90,14 +90,15 @@ export interface AiProfile {
   knightRatio: number; // 0..1 share trained as (expensive) knights
   cavalryRatio: number; // 0..1 share of Stable production that is cavalry
   siegeTarget: number; // siege engines to build toward (0 = never go siege)
+  imamTarget: number; // support Imams to keep around (0 = never train one)
 }
 
 export const AiDifficulty = { Easy: 0, Normal: 1, Hard: 2 } as const;
 
 export const AI_PROFILES: Record<number, AiProfile> = {
-  0: { label: 'Easy', peasantTarget: 6, armyTarget: 6, waveSize: 4, waveInterval: 45, firstWaveDelay: 60, maxTowers: 1, woodBuffer: 30, archerRatio: 0.3, knightRatio: 0.0, cavalryRatio: 0.0, siegeTarget: 0 },
-  1: { label: 'Normal', peasantTarget: 8, armyTarget: 10, waveSize: 6, waveInterval: 35, firstWaveDelay: 45, maxTowers: 2, woodBuffer: 40, archerRatio: 0.35, knightRatio: 0.2, cavalryRatio: 0.3, siegeTarget: 1 },
-  2: { label: 'Hard', peasantTarget: 10, armyTarget: 14, waveSize: 8, waveInterval: 25, firstWaveDelay: 30, maxTowers: 3, woodBuffer: 50, archerRatio: 0.4, knightRatio: 0.3, cavalryRatio: 0.4, siegeTarget: 2 },
+  0: { label: 'Easy', peasantTarget: 6, armyTarget: 6, waveSize: 4, waveInterval: 45, firstWaveDelay: 60, maxTowers: 1, woodBuffer: 30, archerRatio: 0.3, knightRatio: 0.0, cavalryRatio: 0.0, siegeTarget: 0, imamTarget: 0 },
+  1: { label: 'Normal', peasantTarget: 8, armyTarget: 10, waveSize: 6, waveInterval: 35, firstWaveDelay: 45, maxTowers: 2, woodBuffer: 40, archerRatio: 0.35, knightRatio: 0.2, cavalryRatio: 0.3, siegeTarget: 1, imamTarget: 1 },
+  2: { label: 'Hard', peasantTarget: 10, armyTarget: 14, waveSize: 8, waveInterval: 25, firstWaveDelay: 30, maxTowers: 3, woodBuffer: 50, archerRatio: 0.4, knightRatio: 0.3, cavalryRatio: 0.4, siegeTarget: 2, imamTarget: 1 },
 };
 
 // Themed commanders per faction, assigned to AIs in join order.

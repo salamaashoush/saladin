@@ -133,6 +133,8 @@ export const Unit = __t.object("Unit", {
   attackTarget: __t.u64(),
   attackCooldown: __t.f32(),
   stance: __t.u8(),
+  morale: __t.f32(),
+  routing: __t.bool(),
   homeX: __t.f32(),
   homeY: __t.f32(),
   get path() {

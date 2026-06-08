@@ -18,6 +18,8 @@ export function CommandCard({
 
   const hpColor =
     sel.avgHp > 0.5 ? '#5b8a3a' : sel.avgHp > 0.25 ? '#c9a227' : '#b6402f';
+  const moraleColor =
+    sel.avgMorale > 0.5 ? '#3f73c4' : sel.avgMorale > 0.25 ? '#c9a227' : '#b6402f';
 
   // One row per selected UnitKind, ordered by the roster enum, labelled and
   // iconed straight from UNIT_DEFS — new units appear with no edits here.
@@ -66,6 +68,27 @@ export function CommandCard({
           style={{ width: `${Math.round(sel.avgHp * 100)}%`, background: hpColor }}
         />
       </div>
+      {sel.hasCombat && (
+        <>
+          <div className={styles.barLabel}>
+            <span>Morale</span>
+            {sel.routingCount > 0 && (
+              <span className={styles.routing}>
+                🏳️ {sel.routingCount} routing
+              </span>
+            )}
+          </div>
+          <div className={styles.hpbar}>
+            <div
+              className={styles.hpfill}
+              style={{
+                width: `${Math.round(sel.avgMorale * 100)}%`,
+                background: moraleColor,
+              }}
+            />
+          </div>
+        </>
+      )}
     </div>
   );
 }

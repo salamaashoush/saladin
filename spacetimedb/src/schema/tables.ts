@@ -42,6 +42,8 @@ export const unit = table(
     attackTarget: t.u64(),
     attackCooldown: t.f32(),
     stance: t.u8(),
+    morale: t.f32(), // 0..1 fighting spirit; below ROUT the unit flees home
+    routing: t.bool(), // latched rout state — hysteresis: set <ROUT, cleared >RALLY
     homeX: t.f32(), // posted position — Defensive units leash to it
     homeY: t.f32(),
     path: t.array(PathPoint),

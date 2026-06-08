@@ -10,6 +10,7 @@ export const UnitKind = {
   Crossbowman: 6,
   Ram: 7,
   Mangonel: 8,
+  Imam: 9,
 } as const;
 export type UnitKind = (typeof UnitKind)[keyof typeof UnitKind];
 

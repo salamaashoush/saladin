@@ -80,3 +80,19 @@
   background: var(--sld-green);
   transition: width 0.15s ease;
 }
+
+.barLabel {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-top: 6px;
+  font-size: 0.6rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--sld-ink-dim);
+}
+
+.routing {
+  color: #ff6a4d;
+  font-weight: 700;
+}

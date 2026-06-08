@@ -31,6 +31,8 @@ export default __t.row({
   attackTarget: __t.u64().name("attack_target"),
   attackCooldown: __t.f32().name("attack_cooldown"),
   stance: __t.u8(),
+  morale: __t.f32(),
+  routing: __t.bool(),
   homeX: __t.f32().name("home_x"),
   homeY: __t.f32().name("home_y"),
   get path() {

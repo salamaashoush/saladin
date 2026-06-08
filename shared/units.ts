@@ -30,6 +30,7 @@ export interface UnitDef {
   tint?: number; // mesh tint override; otherwise owner color
   requires?: BuildingKind; // extra tech prereq beyond the training building
   prefersBuildings?: boolean; // siege: hunt structures over soft targets
+  moraleAura?: number; // radius an allied support unit (Imam) steadies morale within (0 = none)
 }
 
 export const UNIT_DEFS: Record<UnitKind, UnitDef> = {
@@ -194,5 +195,23 @@ export const UNIT_DEFS: Record<UnitKind, UnitDef> = {
     tint: 0x5a4632,
     requires: BuildingKind.SiegeWorkshop,
     prefersBuildings: true,
+  },
+  [UnitKind.Imam]: {
+    label: 'Imam',
+    icon: '🕌',
+    speed: 2.6,
+    carry: 0,
+    radius: 0.24,
+    height: 0.85,
+    maxHp: 50,
+    attack: 0, // non-combatant — never fights
+    damageType: DamageType.Blunt,
+    armorClass: ArmorClass.Unarmored,
+    range: 0,
+    attackRate: 0,
+    aggroRange: 0,
+    cost: { food: 40 }, // cheap support, trainable from the Keep
+    tint: 0xe8e2d0,
+    moraleAura: 7, // steadies nearby allies' morale and resists their rout
   },
 };

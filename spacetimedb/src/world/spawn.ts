@@ -18,6 +18,7 @@ import {
   spawnCorner,
   allocSlot,
 } from '../../../shared/defs.ts';
+import { MORALE_MAX } from '../../../shared/morale.ts';
 import { scatterNodes as scatterNodesPure } from '../../../shared/terrain.ts';
 import { findBuildableNear } from '../../../shared/buildings.ts';
 import {
@@ -60,6 +61,8 @@ export function spawnUnitEntity(
     attackTarget: 0n,
     attackCooldown: 0,
     stance: Stance.Aggressive,
+    morale: MORALE_MAX,
+    routing: false,
     homeX: x,
     homeY: y,
     path: [],

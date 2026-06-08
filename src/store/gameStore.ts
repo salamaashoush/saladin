@@ -9,6 +9,8 @@ export interface SelectionSummary {
   byKind: Record<number, number>; // UnitKind -> count; new units appear automatically
   hasCombat: boolean; // any selected unit can attack (gates the stance buttons)
   avgHp: number; // 0..1
+  avgMorale: number; // 0..1 across selected combat units (1 if none)
+  routingCount: number; // selected combat units currently routing
 }
 
 export interface Toast {
@@ -40,6 +42,8 @@ const EMPTY_SELECTION: SelectionSummary = {
   byKind: {},
   hasCombat: false,
   avgHp: 1,
+  avgMorale: 1,
+  routingCount: 0,
 };
 
 let nextToastId = 1;

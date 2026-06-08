@@ -46,9 +46,12 @@ interface RObj {
   ownerHex?: string;
   hp: number;
   maxHp: number;
+  morale: number; // 0..1; -1 for non-units (no morale)
+  routing: boolean;
   tintMat?: THREE.MeshStandardMaterial;
   selRing?: THREE.Mesh;
   hpBar?: THREE.Group;
+  routFlag?: THREE.Object3D; // overhead marker shown while this unit routs
   fromX: number;
   fromZ: number;
   toX: number;
@@ -273,7 +276,14 @@ export class SaladinGame {
     on(
       db.unit,
       (r) =>
-        this.spawnUnit(r.entityId, r.kind, r.hp, r.owner?.toHexString?.()),
+        this.spawnUnit(
+          r.entityId,
+          r.kind,
+          r.hp,
+          r.owner?.toHexString?.(),
+          r.morale,
+          r.routing
+        ),
       (r) => this.removeObj(r.entityId),
       (r) => this.onUnitUpdate(r)
     );
@@ -434,7 +444,29 @@ export class SaladinGame {
     const o = this.objs.get(r.entityId.toString());
     if (!o) return;
     o.hp = r.hp;
+    o.morale = r.morale;
+    this.setRouting(o, !!r.routing);
     this.updateHpBar(o);
+    if (this.selected.has(r.entityId.toString())) this.emitSelection();
+  }
+
+  // Toggle the overhead rout marker on a unit. Lazily built so non-routing units
+  // pay nothing; data-driven height from the unit def keeps it above the hp bar.
+  private setRouting(o: RObj, routing: boolean) {
+    if (routing === o.routing) return;
+    o.routing = routing;
+    if (routing && !o.routFlag) {
+      const def = UNIT_DEFS[o.kind as UnitKind] ?? UNIT_DEFS[UnitKind.Peasant];
+      const flag = new THREE.Sprite(
+        new THREE.SpriteMaterial({ color: 0xff5533, depthTest: false })
+      );
+      flag.scale.set(0.34, 0.34, 1);
+      flag.position.y = def.height + def.radius * 2.4 + 0.72;
+      flag.renderOrder = 6;
+      o.group.add(flag);
+      o.routFlag = flag;
+    }
+    if (o.routFlag) o.routFlag.visible = routing;
   }
 
   private onBuildingUpdate(r: any) {
@@ -459,7 +491,9 @@ export class SaladinGame {
     entityId: bigint,
     kind: number,
     hp: number,
-    ownerHex?: string
+    ownerHex?: string,
+    morale = 1,
+    routing = false
   ) {
     const id = entityId.toString();
     if (this.objs.has(id)) return;
@@ -486,6 +520,8 @@ export class SaladinGame {
       ownerHex,
       hp,
       maxHp: def.maxHp,
+      morale,
+      routing: false,
       tintMat: body.userData.tintMat as THREE.MeshStandardMaterial,
       selRing: ring,
       hpBar,
@@ -499,6 +535,7 @@ export class SaladinGame {
     };
     this.objs.set(id, o);
     this.updateHpBar(o);
+    this.setRouting(o, routing);
   }
 
   private spawnBuilding(
@@ -534,6 +571,8 @@ export class SaladinGame {
       ownerHex,
       hp,
       maxHp: def.maxHp,
+      morale: -1,
+      routing: false,
       tintMat: body.userData.tintMat as THREE.MeshStandardMaterial,
       hpBar,
       fromX: p.x,
@@ -633,6 +672,8 @@ export class SaladinGame {
       kind: resType, // resType drives the minimap color for nodes
       hp: 0,
       maxHp: 0,
+      morale: -1,
+      routing: false,
       fromX: p.x,
       fromZ: p.y,
       toX: p.x,
@@ -733,13 +774,21 @@ export class SaladinGame {
     let hasCombat = false;
     let hpSum = 0;
     let n = 0;
+    let moraleSum = 0;
+    let moraleN = 0;
+    let routingCount = 0;
     for (const [id, o] of this.objs) {
       const sel = this.selected.has(id);
       if (o.selRing) o.selRing.visible = sel;
       if (!sel) continue;
       byKind[o.kind] = (byKind[o.kind] ?? 0) + 1;
       const def = UNIT_DEFS[o.kind as UnitKind];
-      if (def && def.attack > 0) hasCombat = true;
+      if (def && def.attack > 0) {
+        hasCombat = true;
+        moraleSum += o.morale;
+        moraleN++;
+        if (o.routing) routingCount++;
+      }
       if (o.maxHp > 0) {
         hpSum += o.hp / o.maxHp;
         n++;
@@ -750,6 +799,8 @@ export class SaladinGame {
       byKind,
       hasCombat,
       avgHp: n > 0 ? hpSum / n : 1,
+      avgMorale: moraleN > 0 ? moraleSum / moraleN : 1,
+      routingCount,
     });
   }
 

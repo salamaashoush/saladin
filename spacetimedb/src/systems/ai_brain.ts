@@ -57,6 +57,7 @@ export const aiBrain = spacetimedb.reducer(
       const sieges = myUnits.filter(
         (u) => UNIT_DEFS[u.kind as UnitKindT]?.prefersBuildings
       ).length;
+      const imams = myUnits.filter((u) => u.kind === UnitKind.Imam).length;
       const pop = popInfo(ctx, owner);
 
       // Keep the economy busy every tick, steering toward what the bot is short
@@ -109,6 +110,14 @@ export const aiBrain = spacetimedb.reducer(
           const kind =
             ctx.random() < 0.5 ? UnitKind.Mangonel : UnitKind.Ram;
           trainFrom(ctx, owner, siegeWorkshop, kind);
+        } else if (
+          // Once an army is forming, fold in a support Imam to steady morale.
+          barracks &&
+          imams < prof.imamTarget &&
+          soldiers.length >= 2 &&
+          pop.pop < pop.cap
+        ) {
+          trainFrom(ctx, owner, keep, UnitKind.Imam);
         } else if (soldiers.length < prof.armyTarget && pop.pop < pop.cap) {
           // Split production between the barracks (infantry) and the stable
           // (cavalry) by the profile's cavalryRatio.
@@ -145,16 +154,23 @@ export const aiBrain = spacetimedb.reducer(
         }
       }
 
-      // Assault: once an army is mustered and the timer is up, throw everyone at
-      // the nearest enemy keep. movePatch routes them; combat auto-aggro fights.
+      // Assault: once an army is mustered and the timer is up, throw the army
+      // (plus any support Imams) at the nearest enemy keep. movePatch routes
+      // them; combat auto-aggro fights. Routing units are left alone — the rout
+      // logic owns them until they rally, so the brain never fights the flee.
       let waveTimer = bot.waveTimer - AI_BRAIN_DT;
       if (soldiers.length >= prof.waveSize && waveTimer <= 0) {
         const target = nearestEnemyKeep(ctx, owner, ke.x, ke.y);
         if (target) {
-          for (const s of soldiers) {
+          const wave = myUnits.filter(
+            (u) =>
+              (UNIT_DEFS[u.kind as UnitKindT]?.attack ?? 0) > 0 ||
+              u.kind === UnitKind.Imam
+          );
+          for (const s of wave) {
             const su = ctx.db.unit.entityId.find(s.entityId);
             const se = ctx.db.entity.entityId.find(s.entityId);
-            if (!su || !se) continue;
+            if (!su || !se || su.routing) continue;
             ctx.db.unit.entityId.update({
               ...su,
               attackTarget: target.id,

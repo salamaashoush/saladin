@@ -1,6 +1,7 @@
 // Pure combat math — the damage-type × armor matrix and effective-damage rule.
 // Shared by the module (authority) and tests. No SpacetimeDB/Three deps.
 import { DamageType, ArmorClass, Stance } from './enums.ts';
+import { nearestWithin, type Located } from './sim.ts';
 
 // How far a Defensive unit will wander from its posted position before it breaks
 // off and returns instead of chasing.
@@ -67,4 +68,25 @@ export function effectiveDamage(atk: Attacker, armor: ArmorClass): number {
   const base = atk.attack * DAMAGE_MATRIX[atk.damageType][armor];
   const bonus = atk.bonusVsArmor?.[armor] ?? 1;
   return Math.max(1, Math.floor(base * bonus));
+}
+
+// Auto-acquisition target for a combatant at (x,y) with `aggroRange`. Siege
+// engines (prefersBuildings) lock onto the nearest enemy BUILDING first, falling
+// back to units only when no structure is in range; everyone else picks the
+// nearest enemy unit. Pure so the priority rule is unit-testable; the module
+// passes live enemy snapshots and feeds the chosen id back into its damage loop.
+export function acquireTarget(
+  x: number,
+  y: number,
+  aggroRange: number,
+  enemyUnits: ReadonlyArray<Located>,
+  enemyBuildings: ReadonlyArray<Located>,
+  prefersBuildings: boolean
+): Located | null {
+  if (aggroRange <= 0) return null;
+  if (prefersBuildings) {
+    const b = nearestWithin(x, y, enemyBuildings, aggroRange);
+    if (b) return b;
+  }
+  return nearestWithin(x, y, enemyUnits, aggroRange);
 }

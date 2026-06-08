@@ -259,6 +259,46 @@ export function buildUnit(kind: number, color: number): THREE.Group {
         wheel.position.set(sx * h * 0.4, r * 0.38, sz * h * 0.42);
         pivot.add(wheel);
       }
+  } else if (kind === UnitKind.Imam) {
+    // Robed support figure: a flowing robe, a white turban, a small prayer
+    // staff — no horse, no weapon. The tint marks the owner on the robe hem.
+    const robe = new THREE.Mesh(
+      new THREE.ConeGeometry(r * 1.05, h * 1.0, 10),
+      tunic
+    );
+    robe.position.y = h * 0.5;
+    robe.castShadow = true;
+    pivot.add(robe);
+    const sash = new THREE.Mesh(
+      new THREE.CylinderGeometry(r * 0.7, r * 0.75, h * 0.12, 10),
+      new THREE.MeshStandardMaterial({ color: 0x2f7d4f, flatShading: true })
+    );
+    sash.position.y = h * 0.72;
+    pivot.add(sash);
+    const turban = new THREE.Mesh(
+      new THREE.SphereGeometry(r * 0.62, 10, 8),
+      new THREE.MeshStandardMaterial({ color: 0xf2efe6, flatShading: true })
+    );
+    turban.scale.y = 0.72;
+    turban.position.y = h * 1.18;
+    pivot.add(turban);
+    const staff = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.022, 0.022, h * 1.6, 5),
+      wood
+    );
+    staff.position.set(r * 0.95, h * 0.78, 0);
+    pivot.add(staff);
+    const knob = new THREE.Mesh(
+      new THREE.SphereGeometry(0.07, 8, 6),
+      new THREE.MeshStandardMaterial({
+        color: 0xd6b24a,
+        metalness: 0.5,
+        roughness: 0.4,
+        flatShading: true,
+      })
+    );
+    knob.position.set(r * 0.95, h * 1.6, 0);
+    pivot.add(knob);
   } else {
     const cap = new THREE.Mesh(new THREE.ConeGeometry(r * 0.72, r * 0.55, 7), wood);
     cap.position.y = h * 1.2;

@@ -61,7 +61,7 @@ export const BUILDING_DEFS: Record<BuildingKind, BuildingDef> = {
   [BuildingKind.Keep]: B('Keep', 3, 1.8, { wood: 0 }, 1500, false, {
     icon: '🏰',
     pop: 8,
-    trains: [UnitKind.Peasant],
+    trains: [UnitKind.Peasant, UnitKind.Imam],
   }),
   [BuildingKind.Barracks]: B('Barracks', 2, 1.4, { wood: 70, stone: 20 }, 500, true, {
     icon: '🏛️',
