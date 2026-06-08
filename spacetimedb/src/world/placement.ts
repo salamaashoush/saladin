@@ -4,6 +4,7 @@ import type { BuildingKind as BuildingKindT } from '../../../shared/enums.ts';
 import {
   isPassable,
   nearestPassableGrid,
+  nearestReachablePassableGrid,
   findPathGrid,
 } from '../../../shared/pathfinding.ts';
 import {
@@ -56,7 +57,14 @@ export function movePatch(
 ): any {
   const seed = getSeed(ctx);
   const passable = passableWith(seed, buildOccupancy(ctx));
-  const snap = nearestPassableGrid(passable, tx, ty);
+  // Snap the destination to the passable tile nearest the target that is in the
+  // mover's OWN connected region. The plain nearest-passable tile can be a pocket
+  // cut off by water/walls (common on coastal keeps); routing there returns no
+  // path and freezes the unit. Reachable-snap guarantees a walkable approach so a
+  // carrier always reaches its dropoff and the economy never stalls.
+  const snap =
+    nearestReachablePassableGrid(passable, ex, ey, tx, ty) ??
+    nearestPassableGrid(passable, tx, ty);
   const path = findPathGrid(passable, ex, ey, snap.x, snap.y);
   if (path.length === 0) return { hasTarget: false, path: [], pathIdx: 0 };
   return {

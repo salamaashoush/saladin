@@ -15,6 +15,13 @@ export type Passable = (tx: number, ty: number) => boolean;
 const W = WORLD_SIZE;
 const SQRT2 = 1.4142135623730951;
 
+const ORTHO = [
+  [1, 0],
+  [-1, 0],
+  [0, 1],
+  [0, -1],
+];
+
 // Worst-case A* expansions: a long route forced to detour around water can touch
 // most of the grid before reaching the goal. Cap at the full tile count so a
 // valid long path on the 144² map is never abandoned mid-search. (At 96² this
@@ -69,6 +76,65 @@ export function nearestPassableGrid(
     }
   }
   return { x, y };
+}
+
+// The passable tile CLOSEST to (targetX,targetY) that is actually reachable on
+// foot from (fromX,fromY) — i.e. in the same connected passable region. Plain
+// nearestPassableGrid picks the geometrically nearest passable tile, which on
+// coastal/cramped keeps can be a tiny pocket wedged against water on the far side
+// of a wall: the deposit target then sits on an island the gatherer can never
+// reach, findPathGrid returns [], and the carrier freezes (economy stall). This
+// flood-fills the mover's own region (bounded by maxTiles) and returns the
+// in-region tile nearest the target, so the chosen approach is always walkable.
+// Returns null only if the mover stands on an impassable tile with no passable
+// neighbour at all.
+export function nearestReachablePassableGrid(
+  passable: Passable,
+  fromX: number,
+  fromY: number,
+  targetX: number,
+  targetY: number,
+  maxTiles = W * W
+): PathPoint | null {
+  const start = nearestPassableGrid(passable, fromX, fromY);
+  const sx = Math.floor(start.x);
+  const sy = Math.floor(start.y);
+  if (!passable(sx, sy)) return null;
+
+  const gx = Math.floor(targetX);
+  const gy = Math.floor(targetY);
+
+  // BFS the mover's connected region, tracking the closest tile to the goal.
+  const seen = new Uint8Array(W * W);
+  const queue: number[] = [sy * W + sx];
+  seen[sy * W + sx] = 1;
+  let bestX = sx;
+  let bestY = sy;
+  let bestD = (sx - gx) * (sx - gx) + (sy - gy) * (sy - gy);
+  let visited = 0;
+  for (let head = 0; head < queue.length && visited < maxTiles; head++) {
+    const cur = queue[head];
+    visited++;
+    const cx = cur % W;
+    const cy = (cur / W) | 0;
+    const d = (cx - gx) * (cx - gx) + (cy - gy) * (cy - gy);
+    if (d < bestD) {
+      bestD = d;
+      bestX = cx;
+      bestY = cy;
+      if (d === 0) break; // goal tile itself is reachable — can't beat it
+    }
+    for (const [dx, dy] of ORTHO) {
+      const nx = cx + dx;
+      const ny = cy + dy;
+      if (nx < 0 || ny < 0 || nx >= W || ny >= W) continue;
+      const ni = ny * W + nx;
+      if (seen[ni] || !passable(nx, ny)) continue;
+      seen[ni] = 1;
+      queue.push(ni);
+    }
+  }
+  return { x: bestX + 0.5, y: bestY + 0.5 };
 }
 
 function lineOfSight(

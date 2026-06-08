@@ -11,18 +11,28 @@ import { nearestIndex } from '../../../shared/sim.ts';
 import { spacetimedb } from '../schema/db.ts';
 import { aiTimer } from '../schema/tables.ts';
 import { scheduleRefs } from '../schema/schedule_refs.ts';
-import { dist, buildNodes, nearestDropoff } from '../world/util.ts';
-import { movePatch } from '../world/placement.ts';
+import {
+  dist,
+  buildNodes,
+  nearestDropoff,
+  dropoffApproach,
+  getSeed,
+  passableWith,
+} from '../world/util.ts';
+import { movePatch, buildOccupancy } from '../world/placement.ts';
 
 // Gather AI state machine — runs every AI_TICK_MS, sets movement targets.
 export const unitAi = spacetimedb.reducer({ timer: aiTimer.rowType }, (ctx) => {
   const nodes = buildNodes(ctx);
+  const seed = getSeed(ctx);
+  const occ = buildOccupancy(ctx);
 
   // A gatherer whose node is gone heads to the nearest remaining node, and
   // only idles when the whole map is exhausted. Without this, peasants freeze
   // forever the moment their tree is chopped out.
-  const retarget = (u: any, e: any) => {
-    const idx = nearestIndex(e.x, e.y, nodes);
+  const retarget = (u: any, e: any, skipNode: bigint = 0n) => {
+    const pool = skipNode ? nodes.filter((n) => n.id !== skipNode) : nodes;
+    const idx = nearestIndex(e.x, e.y, pool);
     if (idx < 0) {
       ctx.db.unit.entityId.update({
         ...u,
@@ -35,7 +45,7 @@ export const unitAi = spacetimedb.reducer({ timer: aiTimer.rowType }, (ctx) => {
     ctx.db.unit.entityId.update({
       ...u,
       gatherState: GatherState.ToResource,
-      targetNode: nodes[idx].id,
+      targetNode: pool[idx].id,
       hasTarget: false,
     });
   };
@@ -61,10 +71,12 @@ export const unitAi = spacetimedb.reducer({ timer: aiTimer.rowType }, (ctx) => {
           hasTarget: false,
         });
       } else if (!u.hasTarget) {
-        ctx.db.unit.entityId.update({
-          ...u,
-          ...movePatch(ctx, e.x, e.y, ne.x, ne.y),
-        });
+        const patch = movePatch(ctx, e.x, e.y, ne.x, ne.y);
+        // No path to this node (it sits in a region the gatherer can't reach):
+        // pick the next nearest node instead of retrying the same dead end every
+        // tick. retarget skips the current target so we don't relock onto it.
+        if (!patch.hasTarget) retarget(u, e, u.targetNode);
+        else ctx.db.unit.entityId.update({ ...u, ...patch });
       }
     } else if (u.gatherState === GatherState.Harvesting) {
       const node = ctx.db.resourceNode.entityId.find(u.targetNode);
@@ -111,10 +123,17 @@ export const unitAi = spacetimedb.reducer({ timer: aiTimer.rowType }, (ctx) => {
         });
         continue;
       }
-      // The building blocks its own footprint, so the peasant stops at the wall
-      // edge; accept deposits within the footprint radius too.
-      const depositRange = DEPOSIT_RANGE + drop.footprint / 2;
-      if (dist(e.x, e.y, drop.x, drop.y) <= depositRange) {
+      // The building blocks its own footprint, and on a coastal/cramped keep the
+      // only tile a gatherer can actually stand on may be a single perimeter tile
+      // offset from the centre. Measure the deposit range against that REACHABLE
+      // approach tile (not the blocked centre), so the carrier banks the moment it
+      // has walked as close as the terrain allows instead of circling forever.
+      const passable = passableWith(seed, occ);
+      const approach = dropoffApproach(ctx, passable, e.x, e.y, drop);
+      const atApproach = dist(e.x, e.y, approach.x, approach.y) <= DEPOSIT_RANGE;
+      const atCentre =
+        dist(e.x, e.y, drop.x, drop.y) <= DEPOSIT_RANGE + drop.footprint / 2;
+      if (atApproach || atCentre) {
         ctx.db.player.identity.update({
           ...p,
           ...addResource(p, u.carryType as ResourceTypeT, u.carrying),

@@ -1,6 +1,11 @@
 import { WORLD_SIZE } from '../../../shared/constants.ts';
 import { BUILDING_DEFS } from '../../../shared/defs.ts';
-import { isPassable, type Passable } from '../../../shared/pathfinding.ts';
+import {
+  isPassable,
+  nearestReachablePassableGrid,
+  type Passable,
+  type PathPoint,
+} from '../../../shared/pathfinding.ts';
 import {
   GatherState,
   ResourceType,
@@ -72,6 +77,26 @@ export function nearestDropoff(
     }
   }
   return best;
+}
+
+// The tile a gatherer at (x,y) will actually stand on to deposit at `drop`: the
+// passable tile nearest the dropoff centre that is reachable from the gatherer's
+// own region. Falls back to the dropoff centre if the field is fully blocked
+// (degenerate). Used so the deposit-range check measures the REACHABLE approach,
+// not the centre a coastal keep can hide behind its own footprint/water.
+export function dropoffApproach(
+  ctx: any,
+  passable: Passable,
+  x: number,
+  y: number,
+  drop: Dropoff
+): PathPoint {
+  return (
+    nearestReachablePassableGrid(passable, x, y, drop.x, drop.y) ?? {
+      x: drop.x,
+      y: drop.y,
+    }
+  );
 }
 
 export function buildNodes(ctx: any): NodePos[] {

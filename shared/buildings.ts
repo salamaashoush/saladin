@@ -62,26 +62,62 @@ export function footprintCenter(
   return { x: cx + off, y: cy + off };
 }
 
-// Nearest spot where a building's WHOLE footprint sits on passable land. Used
-// for the starting keep so it never overhangs water.
+// True when at least one tile orthogonally bordering a footprint placed at
+// (x,y) is passable — i.e. a gatherer can stand next to the building to deposit.
+// A keep with NO passable neighbour strands every carrier (economy stall), so
+// placement must reject such spots. Pure so the client ghost can preview it.
+export function hasPassableApproach(
+  footprint: number,
+  x: number,
+  y: number,
+  passable: Passable
+): boolean {
+  const tiles = footprintTiles(footprint, x, y);
+  const inFootprint = new Set(tiles.map((t) => t.ty * WORLD_SIZE + t.tx));
+  for (const { tx, ty } of tiles) {
+    for (const [dx, dy] of [
+      [1, 0],
+      [-1, 0],
+      [0, 1],
+      [0, -1],
+    ]) {
+      const nx = tx + dx;
+      const ny = ty + dy;
+      if (inFootprint.has(ny * WORLD_SIZE + nx)) continue;
+      if (passable(nx, ny)) return true;
+    }
+  }
+  return false;
+}
+
+// Nearest spot where a building's WHOLE footprint sits on passable land AND has a
+// passable approach tile beside it. Used for the starting keep so it never
+// overhangs water and a gatherer can always reach it to deposit. Two-pass: prefer
+// a spot with an open approach; only if the search exhausts (no approachable spot
+// anywhere) fall back to any fitting spot so founding never hard-fails.
 export function findBuildableNear(
   seed: number,
   x: number,
   y: number,
   footprint: number
 ): { x: number; y: number } {
+  const pass: Passable = (tx, ty) => isPassable(seed, tx, ty);
   const fits = (cx: number, cy: number) =>
-    footprintTiles(footprint, cx, cy).every((t) => isPassable(seed, t.tx, t.ty));
-  if (fits(x, y)) return footprintCenter(footprint, x, y);
+    footprintTiles(footprint, cx, cy).every((t) => pass(t.tx, t.ty));
+  const good = (cx: number, cy: number) =>
+    fits(cx, cy) && hasPassableApproach(footprint, cx, cy, pass);
+  if (good(x, y)) return footprintCenter(footprint, x, y);
+  let firstFit: { x: number; y: number } | null = null;
   for (let r = 1; r < WORLD_SIZE; r++) {
     for (let a = 0; a < 24; a++) {
       const ang = (a / 24) * Math.PI * 2;
       const nx = x + Math.cos(ang) * r;
       const ny = y + Math.sin(ang) * r;
-      if (fits(nx, ny)) return footprintCenter(footprint, nx, ny);
+      if (good(nx, ny)) return footprintCenter(footprint, nx, ny);
+      if (!firstFit && fits(nx, ny)) firstFit = footprintCenter(footprint, nx, ny);
     }
   }
-  return footprintCenter(footprint, x, y);
+  return firstFit ?? footprintCenter(footprint, x, y);
 }
 
 // Placeable if every footprint tile is passable terrain and not occupied.
