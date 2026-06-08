@@ -19,7 +19,9 @@ import {
   biomePassable,
   biomeBuildable,
   moveCostMul,
+  biomeHeightEmphasis,
 } from './biomes.ts';
+import { type MapBias, NEUTRAL_BIAS } from './presets.ts';
 
 // Re-export the catalog surface so existing `from './terrain.ts'` importers keep
 // working unchanged.
@@ -28,9 +30,13 @@ export {
   BIOME_DEFS,
   BIOME_LABEL,
   BIOME_COLOR,
+  BIOME_SHADE,
+  Decoration,
   biomePassable,
   biomeBuildable,
   moveCostMul,
+  biomeHeightEmphasis,
+  biomeDecoration,
   treeDensity,
   rockDensity,
   gameDensity,
@@ -97,12 +103,23 @@ function classify(h: number, m: number): Biome {
   return Biome.Forest;
 }
 
-// Render elevation in world units: water dips, land rises with height. Named
+// Render elevation in world units: water dips, land rises with height, amplified
+// per-biome so hills/mountains read visually. A render-only MapBias.elevGain
+// scales the whole relief for a preset — this is the CLIENT mesh height only and
+// never feeds the sim, so server/client still agree on where land is. Named
 // `renderHeight` so it does not collide with elevation(seed,x,y) in
-// ./elevation.ts (the gameplay elevation layer). Client mesh code calls this.
-export function renderHeight(h: number): number {
-  if (h < SEA) return -0.4 * ((SEA - h) / SEA) - 0.05;
-  return (h - SEA) * 7;
+// ./elevation.ts (the gameplay elevation layer).
+export function renderHeight(
+  h: number,
+  biome: Biome = Biome.Grassland,
+  bias: MapBias = NEUTRAL_BIAS
+): number {
+  if (h < SEA) return -0.5 * ((SEA - h) / SEA) - 0.05;
+  const base = (h - SEA) * 9;
+  // Square the relief above the lowland baseline so peaks pull away from the
+  // plains; multiply by the biome emphasis and the preset's render elevation gain.
+  const relief = base + base * base * 0.18;
+  return relief * biomeHeightEmphasis(biome) * bias.elevGain;
 }
 
 export function isLand(seed: number, x: number, y: number): boolean {

@@ -1,5 +1,7 @@
 import { useEffect, useRef } from 'react';
-import { WORLD_SIZE } from '../../shared/index.ts';
+import { useTable } from 'spacetimedb/react';
+import { WORLD_SIZE, mapPresetById } from '../../shared/index.ts';
+import { tables } from '../module_bindings';
 import styles from './Minimap.module.css';
 
 interface MinimapProps {
@@ -9,6 +11,8 @@ interface MinimapProps {
 
 export function Minimap({ onCanvas, onClickWorld }: MinimapProps) {
   const ref = useRef<HTMLCanvasElement>(null);
+  const [configs] = useTable(tables.config);
+  const cfg = configs[0];
 
   useEffect(() => {
     onCanvas(ref.current);
@@ -31,6 +35,14 @@ export function Minimap({ onCanvas, onClickWorld }: MinimapProps) {
         className={styles.canvas}
         onMouseDown={handleClick}
       />
+      {cfg && (
+        <span
+          className={styles.mapLabel}
+          title={`Map seed ${cfg.seed} — share to replay this map`}
+        >
+          {mapPresetById(cfg.preset).label} · #{cfg.seed}
+        </span>
+      )}
     </div>
   );
 }

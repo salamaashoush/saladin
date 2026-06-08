@@ -16,6 +16,7 @@ export const init = spacetimedb.init((ctx) => {
     id: 0,
     worldSize: WORLD_SIZE,
     seed,
+    preset: 'continental',
     initialized: true,
     nextBotId: 1n,
   });

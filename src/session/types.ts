@@ -5,6 +5,8 @@ export interface SkirmishConfig {
   name: string;
   faction: number;
   enemies: number[]; // one AiDifficulty per opponent
+  seed: number; // 0 = let the server roll a fresh map seed
+  preset: string; // map preset id (render flavor)
 }
 
 export interface JoinConfig {

@@ -14,4 +14,6 @@ export default {
   name: __t.string(),
   faction: __t.u8(),
   enemies: __t.byteArray(),
+  seed: __t.u32(),
+  preset: __t.string(),
 };

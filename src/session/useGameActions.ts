@@ -32,6 +32,8 @@ export function useGameActions() {
           name: c.name,
           faction: c.faction,
           enemies: new Uint8Array(c.enemies),
+          seed: c.seed >>> 0,
+          preset: c.preset,
         })
       );
     },

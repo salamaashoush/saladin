@@ -205,6 +205,56 @@
   border-color: var(--sld-border-strong);
 }
 
+.presetActive {
+  border-color: var(--sld-border-strong);
+  background: var(--sld-panel);
+  box-shadow: inset 0 0 0 1px var(--sld-border-strong);
+}
+
+.presetHint {
+  font-size: 0.78rem;
+  color: var(--sld-ink-faint);
+  min-height: 1.1em;
+}
+
+.seedRow {
+  display: flex;
+  gap: 8px;
+  align-items: stretch;
+}
+
+.seedInput {
+  flex: 1;
+  font-family: var(--sld-font);
+  font-size: 0.95rem;
+  padding: 9px 12px;
+  color: var(--sld-ink);
+  background: rgba(0, 0, 0, 0.3);
+  border: 1px solid var(--sld-border);
+  border-radius: var(--sld-radius-sm);
+}
+
+.seedInput:focus {
+  outline: none;
+  border-color: var(--sld-border-strong);
+}
+
+.seedBtn {
+  font-family: var(--sld-font);
+  font-size: 0.85rem;
+  padding: 0 14px;
+  cursor: pointer;
+  color: var(--sld-ink);
+  background: var(--sld-panel-2);
+  border: 1px solid var(--sld-border);
+  border-radius: var(--sld-radius-sm);
+  white-space: nowrap;
+}
+
+.seedBtn:hover {
+  border-color: var(--sld-border-strong);
+}
+
 .opponents {
   display: flex;
   flex-direction: column;

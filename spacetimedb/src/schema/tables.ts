@@ -121,6 +121,7 @@ export const config = table(
     id: t.u32().primaryKey(),
     worldSize: t.u32(),
     seed: t.u32(),
+    preset: t.string(), // map preset id — render flavor; client reads it back
     initialized: t.bool(),
     nextBotId: t.u64(), // monotonic source of unique bot identities
   }

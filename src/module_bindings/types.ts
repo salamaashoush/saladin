@@ -52,6 +52,7 @@ export const Config = __t.object("Config", {
   id: __t.u32(),
   worldSize: __t.u32(),
   seed: __t.u32(),
+  preset: __t.string(),
   initialized: __t.bool(),
   nextBotId: __t.u64(),
 });

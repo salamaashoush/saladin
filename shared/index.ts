@@ -5,6 +5,7 @@ export * from './rng.ts';
 export * from './noise.ts';
 export * from './sim.ts';
 export * from './combat.ts';
+export * from './presets.ts';
 export * from './terrain.ts';
 export * from './elevation.ts';
 export * from './pathfinding.ts';

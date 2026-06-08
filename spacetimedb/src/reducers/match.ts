@@ -7,7 +7,12 @@ import {
 import { Faction } from '../../../shared/enums.ts';
 import { spacetimedb } from '../schema/db.ts';
 import { foundPlayer, spawnAi } from '../world/spawn.ts';
-import { resetMatch, clearMatch } from '../world/commands.ts';
+import {
+  resetMatch,
+  clearMatch,
+  regenerateWorld,
+  otherHumansPresent,
+} from '../world/commands.ts';
 import { assignIdleGatherers } from '../world/economy.ts';
 
 // Join the shared world (multiplayer). Founds a base on first call; reconnects
@@ -33,12 +38,22 @@ export const enterGame = spacetimedb.reducer(
   }
 );
 
-// Begin a fresh single-player skirmish: wipe the caller + all bots, reset the
-// map, then found the player and one bot per requested difficulty.
+// Begin a fresh single-player skirmish: wipe the caller + all bots, regenerate
+// the map from the chosen seed (0 = a fresh random one) and preset, then found
+// the player and one bot per requested difficulty. Regeneration is skipped when
+// another human is in the shared world so a skirmish can't reshape their match.
 export const startSkirmish = spacetimedb.reducer(
-  { name: t.string(), faction: t.u8(), enemies: t.array(t.u8()) },
-  (ctx, { name, faction, enemies }) => {
+  {
+    name: t.string(),
+    faction: t.u8(),
+    enemies: t.array(t.u8()),
+    seed: t.u32(),
+    preset: t.string(),
+  },
+  (ctx, { name, faction, enemies, seed, preset }) => {
     resetMatch(ctx, ctx.sender);
+    if (!otherHumansPresent(ctx, ctx.sender))
+      regenerateWorld(ctx, seed, preset);
     const human =
       faction === Faction.Crusader ? Faction.Crusader : Faction.Ayyubid;
     foundPlayer(ctx, ctx.sender, name || 'Amir', human);

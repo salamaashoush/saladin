@@ -25,6 +25,15 @@ import {
   type Passable,
   WORLD_SIZE,
   NODE_KINDS,
+  renderHeight,
+  biomeHeightEmphasis,
+  biomeDecoration,
+  Decoration,
+  MAP_PRESETS,
+  mapPresetById,
+  mapPresetByIndex,
+  biasOf,
+  NEUTRAL_BIAS,
 } from '../shared/index.ts';
 
 const SEED = 12345;
@@ -317,5 +326,82 @@ describe('long-route pathfinding (144² map)', () => {
     const p = findPath(SEED, start!.x, start!.y, goal!.x, goal!.y);
     expect(p.length).toBeGreaterThan(0);
     expect(p[p.length - 1]).toEqual({ x: goal!.x, y: goal!.y });
+  });
+});
+
+// ── render height (client visuals only) ───────────────────────────────────────
+
+describe('renderHeight (render-only relief)', () => {
+  it('dips below zero for water and rises for land', () => {
+    expect(renderHeight(0.2)).toBeLessThan(0);
+    expect(renderHeight(0.7)).toBeGreaterThan(0);
+  });
+
+  it('amplifies high-emphasis biomes above plains at the same raw height', () => {
+    const h = 0.75; // a hills/mountain band height
+    const mountain = renderHeight(h, Biome.Mountain);
+    const grass = renderHeight(h, Biome.Grassland);
+    expect(biomeHeightEmphasis(Biome.Mountain)).toBeGreaterThan(
+      biomeHeightEmphasis(Biome.Grassland)
+    );
+    expect(mountain).toBeGreaterThan(grass);
+  });
+
+  it('scales with a preset elevGain bias but never sinks land below sea', () => {
+    const flat = renderHeight(0.7, Biome.Hills, NEUTRAL_BIAS);
+    const tall = renderHeight(0.7, Biome.Hills, biasOf('highlands'));
+    expect(tall).toBeGreaterThan(flat); // highlands lift relief
+    expect(renderHeight(0.7, Biome.Hills, biasOf('verdant'))).toBeGreaterThan(0);
+  });
+});
+
+// ── biome decoration catalog (cosmetic props, zero DB rows) ───────────────────
+
+describe('biome decoration catalog', () => {
+  it('gives every biome a well-formed decoration entry', () => {
+    for (const b of Object.values(Biome)) {
+      const d = biomeDecoration(b as Biome);
+      expect(Object.values(Decoration)).toContain(d.kind);
+      expect(d.density).toBeGreaterThanOrEqual(0);
+      expect(d.density).toBeLessThanOrEqual(1);
+      // A non-None kind must have a non-zero density and vice versa.
+      if (d.kind === Decoration.None) expect(d.density).toBe(0);
+      else expect(d.density).toBeGreaterThan(0);
+    }
+  });
+
+  it('places palms at the oasis and rocks in the hills', () => {
+    expect(biomeDecoration(Biome.Oasis).kind).toBe(Decoration.Palm);
+    expect(biomeDecoration(Biome.Hills).kind).toBe(Decoration.Rock);
+    expect(biomeDecoration(Biome.DeepWater).kind).toBe(Decoration.None);
+  });
+});
+
+// ── map presets (data-driven render flavor) ───────────────────────────────────
+
+describe('map presets', () => {
+  it('exposes a non-empty catalog with unique ids and a neutral default', () => {
+    expect(MAP_PRESETS.length).toBeGreaterThanOrEqual(3);
+    const ids = new Set(MAP_PRESETS.map((p) => p.id));
+    expect(ids.size).toBe(MAP_PRESETS.length);
+    expect(mapPresetById(MAP_PRESETS[0].id).bias).toEqual(NEUTRAL_BIAS);
+  });
+
+  it('falls back to the first preset for unknown ids', () => {
+    expect(mapPresetById('nope').id).toBe(MAP_PRESETS[0].id);
+    expect(biasOf('nope')).toEqual(NEUTRAL_BIAS);
+  });
+
+  it('indexes presets with wrap-around (stable for the AI/round-robin paths)', () => {
+    expect(mapPresetByIndex(0).id).toBe(MAP_PRESETS[0].id);
+    expect(mapPresetByIndex(MAP_PRESETS.length).id).toBe(MAP_PRESETS[0].id);
+    expect(mapPresetByIndex(-1).id).toBe(
+      MAP_PRESETS[MAP_PRESETS.length - 1].id
+    );
+  });
+
+  it('highlands raises relief and desert dries the moisture', () => {
+    expect(biasOf('highlands').elevGain).toBeGreaterThan(1);
+    expect(biasOf('desert').moistShift).toBeLessThan(0);
   });
 });

@@ -16,7 +16,9 @@ import {
   footprintCenter,
   canPlace,
 } from '../../shared/index.ts';
+import { biasOf, NEUTRAL_BIAS, type MapBias } from '../../shared/index.ts';
 import { buildTerrain, terrainHeight } from './Terrain.ts';
+import { buildVegetation } from './Vegetation.ts';
 import { buildSky, buildOcean, HORIZON } from './Environment.ts';
 import {
   BAR_W,
@@ -89,14 +91,19 @@ export class SaladinGame {
   private readonly raycaster = new THREE.Raycaster();
   private readonly pointer = new THREE.Vector2();
   private terrain: THREE.Object3D; // pickable ground (fallback plane, then chunks)
+  private vegetation?: THREE.Group; // cosmetic instanced props (zero DB rows)
   private readonly sky = buildSky();
   private readonly ocean = buildOcean();
   private seed = 0;
+  private presetId = 'continental';
+  private bias: MapBias = NEUTRAL_BIAS;
   private readonly selBox: HTMLDivElement;
 
   private readonly center = new THREE.Vector3(WORLD_SIZE / 2, 0, WORLD_SIZE / 2);
-  private readonly offset = new THREE.Vector3(28, 38, 28);
-  private viewSize = 17;
+  // Iso vantage scaled up for the 144² map: a taller, farther offset frames the
+  // larger terrain and clears the amplified mountains.
+  private readonly offset = new THREE.Vector3(42, 56, 42);
+  private viewSize = 22;
 
   private readonly objs = new Map<string, RObj>();
   private readonly pos = new Map<string, PosRow>();
@@ -324,21 +331,47 @@ export class SaladinGame {
   }
 
   private onConfig(r: any) {
-    if (this.seed || !r?.seed) return;
+    if (!r?.seed) return;
+    // Rebuild when the seed OR preset changes (a new skirmish regenerates both).
+    const preset = (r.preset as string) || 'continental';
+    if (this.seed === r.seed && this.presetId === preset) return;
     this.seed = r.seed;
-    const t = buildTerrain(this.seed);
+    this.presetId = preset;
+    this.bias = biasOf(preset);
+
+    const t = buildTerrain(this.seed, this.presetId);
     this.scene.remove(this.terrain);
-    this.terrain.traverse((c) => {
-      const m = c as THREE.Mesh;
-      m.geometry?.dispose?.();
-      (m.material as THREE.Material | undefined)?.dispose?.();
-    });
+    this.disposeTree(this.terrain);
     this.terrain = t.group;
     this.scene.add(t.group);
+
+    if (this.vegetation) {
+      this.scene.remove(this.vegetation);
+      this.disposeTree(this.vegetation);
+    }
+    this.vegetation = buildVegetation(this.seed, this.presetId).group;
+    this.scene.add(this.vegetation);
+
+    // The minimap backdrop is cached per seed — drop it so it repaints the new map.
+    if (this.mini) this.mini.bg = undefined;
+
+    // Re-seat everything on the freshly amplified heightmap.
+    for (const o of this.objs.values())
+      o.group.position.y = this.heightAt(o.group.position.x, o.group.position.z);
+  }
+
+  private disposeTree(root: THREE.Object3D) {
+    root.traverse((c) => {
+      const m = c as THREE.Mesh;
+      m.geometry?.dispose?.();
+      const mat = m.material as THREE.Material | THREE.Material[] | undefined;
+      if (Array.isArray(mat)) mat.forEach((x) => x.dispose());
+      else mat?.dispose?.();
+    });
   }
 
   private heightAt(x: number, z: number): number {
-    return this.seed ? terrainHeight(this.seed, x, z) : 0;
+    return this.seed ? terrainHeight(this.seed, x, z, this.bias) : 0;
   }
 
   detach() {
@@ -1245,9 +1278,10 @@ export class SaladinGame {
 
   private onWheel = (e: WheelEvent) => {
     e.preventDefault();
+    // Wider zoom-out ceiling so the player can survey the whole 144² map.
     this.viewSize = Math.max(
-      9,
-      Math.min(55, this.viewSize + Math.sign(e.deltaY) * 2)
+      10,
+      Math.min(85, this.viewSize + Math.sign(e.deltaY) * 2.5)
     );
     this.updateProjection();
   };
@@ -1390,6 +1424,8 @@ export class SaladinGame {
     window.removeEventListener('keyup', this.onKey);
     this.renderer.domElement.removeEventListener('pointerdown', this.onPointerDown);
     this.renderer.domElement.removeEventListener('wheel', this.onWheel);
+    if (this.vegetation) this.disposeTree(this.vegetation);
+    this.disposeTree(this.terrain);
     this.selBox.remove();
     this.renderer.dispose();
     if (this.renderer.domElement.parentElement === this.container)

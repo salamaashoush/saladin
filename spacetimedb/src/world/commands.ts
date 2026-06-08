@@ -1,4 +1,5 @@
 import { BuildingKind } from '../../../shared/enums.ts';
+import { mapPresetById } from '../../../shared/presets.ts';
 import { dist, getSeed } from './util.ts';
 import { scatterNodes } from './spawn.ts';
 
@@ -20,7 +21,7 @@ export function clearOwner(ctx: any, owner: any): void {
 }
 
 // True if a human other than `caller` is in the world (bots have an ai row).
-function otherHumansPresent(ctx: any, caller: any): boolean {
+export function otherHumansPresent(ctx: any, caller: any): boolean {
   for (const p of [...ctx.db.player.iter()])
     if (!p.identity.equals(caller) && !ctx.db.ai.identity.find(p.identity))
       return true;
@@ -32,6 +33,27 @@ export function clearMatch(ctx: any, caller: any): void {
   clearOwner(ctx, caller);
   for (const bot of [...ctx.db.ai.iter()])
     if (bot.host.equals(caller)) clearOwner(ctx, bot.identity);
+}
+
+// Regenerate the world: pick a seed (0 = a fresh random one) and a preset, store
+// both on config, wipe every resource node, and re-scatter from the new seed.
+// Only safe when the caller is alone — guarded by resetMatch. The preset is a
+// render flavor the client reads back; node placement stays seed-driven.
+export function regenerateWorld(
+  ctx: any,
+  seed: number,
+  preset: string
+): void {
+  const cfg = ctx.db.config.id.find(0);
+  const finalSeed =
+    seed > 0 ? seed >>> 0 : ctx.random.integerInRange(1, 2_000_000_000);
+  const presetId = mapPresetById(preset).id;
+  if (cfg) ctx.db.config.id.update({ ...cfg, seed: finalSeed, preset: presetId });
+  for (const n of [...ctx.db.resourceNode.iter()]) {
+    ctx.db.resourceNode.entityId.delete(n.entityId);
+    ctx.db.entity.entityId.delete(n.entityId);
+  }
+  scatterNodes(ctx, finalSeed);
 }
 
 // Tear down the caller's match: the caller plus only the bots they host — never
