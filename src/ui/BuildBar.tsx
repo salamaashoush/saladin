@@ -3,8 +3,12 @@ import {
   UNIT_DEFS,
   BUILDING_DEFS,
   BUILD_CATEGORIES,
+  RESOURCE_DEFS,
+  ResourceType,
   BuildingKind,
   UnitKind,
+  canAfford,
+  type ResourceCost,
 } from '../../shared/index.ts';
 import { useGameStore } from '../store/gameStore';
 import styles from './BuildBar.module.css';
@@ -34,25 +38,47 @@ const UNIT_ICONS: Record<number, string> = {
 interface ToolProps {
   icon: string;
   label: string;
-  cost?: number;
+  cost?: ResourceCost;
   active?: boolean;
   disabled?: boolean;
   cls?: string;
   onClick: () => void;
 }
 
+const RESOURCE_FIELD = {
+  [ResourceType.Wood]: 'wood',
+  [ResourceType.Stone]: 'stone',
+  [ResourceType.Food]: 'food',
+  [ResourceType.Gold]: 'gold',
+} as const satisfies Record<ResourceType, keyof ResourceCost>;
+
+// Render a cost as "12🪵 5🪨 …" over whichever resources the cost names.
+function costParts(cost: ResourceCost): { type: ResourceType; amount: number }[] {
+  return ([ResourceType.Wood, ResourceType.Stone, ResourceType.Food, ResourceType.Gold] as const)
+    .map((type) => ({ type, amount: cost[RESOURCE_FIELD[type]] ?? 0 }))
+    .filter((p) => p.amount > 0);
+}
+
 function Tool({ icon, label, cost, active, disabled, cls, onClick }: ToolProps) {
+  const parts = cost ? costParts(cost) : [];
+  const title = parts.length
+    ? `${label} — ${parts.map((p) => `${p.amount} ${RESOURCE_DEFS[p.type].label}`).join(', ')}`
+    : label;
   return (
     <button
       type="button"
-      title={cost !== undefined ? `${label} — ${cost} wood` : label}
+      title={title}
       disabled={disabled}
       onClick={onClick}
       className={`${styles.tool} ${active ? styles.toolActive : ''} ${cls ?? ''}`}
     >
       <span className={styles.toolIcon}>{icon}</span>
       <span className={styles.toolLabel}>{label}</span>
-      {cost !== undefined && <span className={styles.toolCost}>{cost}🪵</span>}
+      {parts.length > 0 && (
+        <span className={styles.toolCost}>
+          {parts.map((p) => `${p.amount}${RESOURCE_DEFS[p.type].icon}`).join(' ')}
+        </span>
+      )}
     </button>
   );
 }
@@ -69,6 +95,10 @@ export function BuildBar({
   const demolishMode = useGameStore((s) => s.demolishMode);
   const setDemolishMode = useGameStore((s) => s.setDemolishMode);
   const [tab, setTab] = useState(0);
+
+  // Costs this stage are wood-only; affordability checks the wood balance via the
+  // shared contract so adding stone/food/gold costs later needs no UI changes.
+  const stock = { wood, stone: 0, food: 0, gold: 0 };
 
   // The "Orders" group is global (always available).
   const orders = (
@@ -106,7 +136,7 @@ export function BuildBar({
                   icon={UNIT_ICONS[kind]}
                   label={u.label}
                   cost={u.cost}
-                  disabled={wood < u.cost}
+                  disabled={!canAfford(stock, u.cost)}
                   onClick={() => onTrain(selB.id, kind)}
                 />
               );
@@ -154,7 +184,7 @@ export function BuildBar({
                 label={d.label}
                 cost={d.cost}
                 active={active}
-                disabled={!active && wood < d.cost}
+                disabled={!active && !canAfford(stock, d.cost)}
                 onClick={() => setBuildMode(active ? null : kind)}
               />
             );

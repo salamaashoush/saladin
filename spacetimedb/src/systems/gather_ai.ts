@@ -1,9 +1,11 @@
 import { AI_DT, HARVEST_RANGE, DEPOSIT_RANGE, HARVEST_TIME } from '../../../shared/constants.ts';
 import { UNIT_DEFS, BUILDING_DEFS } from '../../../shared/defs.ts';
+import { addResource } from '../../../shared/economy.ts';
 import {
   UnitKind,
   BuildingKind,
   GatherState,
+  type ResourceType as ResourceTypeT,
   type UnitKind as UnitKindT,
 } from '../../../shared/enums.ts';
 import { nearestIndex } from '../../../shared/sim.ts';
@@ -106,7 +108,10 @@ export const unitAi = spacetimedb.reducer({ timer: aiTimer.rowType }, (ctx) => {
       const depositRange =
         DEPOSIT_RANGE + BUILDING_DEFS[BuildingKind.Keep].footprint / 2;
       if (dist(e.x, e.y, keep.x, keep.y) <= depositRange) {
-        ctx.db.player.identity.update({ ...p, wood: p.wood + u.carrying });
+        ctx.db.player.identity.update({
+          ...p,
+          ...addResource(p, u.carryType as ResourceTypeT, u.carrying),
+        });
         const node = ctx.db.resourceNode.entityId.find(u.targetNode);
         if (node) {
           ctx.db.unit.entityId.update({

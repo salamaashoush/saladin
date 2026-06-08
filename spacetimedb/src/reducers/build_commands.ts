@@ -7,6 +7,7 @@ import {
 } from '../../../shared/enums.ts';
 import { isPassable } from '../../../shared/pathfinding.ts';
 import { footprintCenter, canPlace, occupancySet } from '../../../shared/buildings.ts';
+import { canAfford, payCost, refundCost } from '../../../shared/economy.ts';
 import { spacetimedb } from '../schema/db.ts';
 import { WallTile } from '../schema/tables.ts';
 import { getSeed } from '../world/util.ts';
@@ -44,10 +45,12 @@ export const placeWall = spacetimedb.reducer(
     const def = BUILDING_DEFS[BuildingKind.Wall];
     const seed = getSeed(ctx);
     const occ = allBuildingTiles(ctx);
-    let wood = p.wood;
+    // Running balances stamped onto the row once at the end — one update for the
+    // whole dragged line, not one per tile.
+    let bal = { wood: p.wood, stone: p.stone, food: p.food, gold: p.gold };
     let placed = false;
     for (const tile of tiles) {
-      if (wood < def.cost) break;
+      if (!canAfford(bal, def.cost)) break;
       const ok = canPlace(
         BuildingKind.Wall,
         tile.x,
@@ -60,10 +63,10 @@ export const placeWall = spacetimedb.reducer(
       spawnBuilding(ctx, ctx.sender, BuildingKind.Wall, c.x, c.y);
       for (const k of occupancySet([{ kind: BuildingKind.Wall, x: tile.x, y: tile.y }], true))
         occ.add(k);
-      wood -= def.cost;
+      bal = payCost(bal, def.cost);
       placed = true;
     }
-    if (placed) ctx.db.player.identity.update({ ...p, wood });
+    if (placed) ctx.db.player.identity.update({ ...p, ...bal });
   }
 );
 
@@ -77,10 +80,7 @@ export const demolishBuilding = spacetimedb.reducer(
     const def = BUILDING_DEFS[b.kind as BuildingKindT];
     const p = ctx.db.player.identity.find(ctx.sender);
     if (p && def)
-      ctx.db.player.identity.update({
-        ...p,
-        wood: p.wood + Math.floor(def.cost / 2),
-      });
+      ctx.db.player.identity.update({ ...p, ...refundCost(p, def.cost, 0.5) });
     ctx.db.building.entityId.delete(entityId);
     ctx.db.entity.entityId.delete(entityId);
   }

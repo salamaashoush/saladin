@@ -25,6 +25,7 @@ export default __t.row({
   gatherState: __t.u8().name("gather_state"),
   targetNode: __t.u64().name("target_node"),
   carrying: __t.u32(),
+  carryType: __t.u8().name("carry_type"),
   harvestTimer: __t.f32().name("harvest_timer"),
   hp: __t.u32(),
   attackTarget: __t.u64().name("attack_target"),

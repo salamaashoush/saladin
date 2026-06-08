@@ -1,5 +1,6 @@
 export * from './constants.ts';
 export * from './enums.ts';
+export * from './economy.ts';
 export * from './noise.ts';
 export * from './sim.ts';
 export * from './combat.ts';

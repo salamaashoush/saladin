@@ -10,6 +10,7 @@ import {
   ArmorClass,
   type Faction,
 } from './enums.ts';
+import type { ResourceCost } from './economy.ts';
 import type { Vec2 } from './sim.ts';
 
 export interface UnitDef {
@@ -26,7 +27,7 @@ export interface UnitDef {
   range: number; // attack reach in world units
   attackRate: number; // seconds between hits
   aggroRange: number; // auto-acquire enemies within (0 = never auto-aggro)
-  cost: number; // wood to train
+  cost: ResourceCost; // resources to train
   tint?: number; // mesh tint override; otherwise owner color
 }
 
@@ -44,7 +45,7 @@ export const UNIT_DEFS: Record<UnitKind, UnitDef> = {
     range: 0.8,
     attackRate: 1.2,
     aggroRange: 0,
-    cost: 20,
+    cost: { wood: 20 },
   },
   [UnitKind.Spearman]: {
     label: 'Spearman',
@@ -60,7 +61,7 @@ export const UNIT_DEFS: Record<UnitKind, UnitDef> = {
     range: 1.2, // long reach — outranges a knight's blade
     attackRate: 1.0,
     aggroRange: 6,
-    cost: 35,
+    cost: { wood: 35 },
     tint: 0x3a3a3a,
   },
   [UnitKind.Archer]: {
@@ -76,7 +77,7 @@ export const UNIT_DEFS: Record<UnitKind, UnitDef> = {
     range: 5,
     attackRate: 1.4,
     aggroRange: 7,
-    cost: 45,
+    cost: { wood: 45 },
     tint: 0x5a3a1a,
   },
   [UnitKind.Knight]: {
@@ -92,7 +93,7 @@ export const UNIT_DEFS: Record<UnitKind, UnitDef> = {
     range: 1.0,
     attackRate: 1.1,
     aggroRange: 7,
-    cost: 90,
+    cost: { wood: 90 },
     tint: 0x9a8050,
   },
 };
@@ -101,7 +102,7 @@ export interface BuildingDef {
   label: string;
   footprint: number; // tiles per side (integer)
   height: number;
-  cost: number;
+  cost: ResourceCost;
   maxHp: number;
   buildable: boolean;
   pop: number; // population capacity provided
@@ -118,7 +119,7 @@ const B = (
   label: string,
   footprint: number,
   height: number,
-  cost: number,
+  cost: ResourceCost,
   maxHp: number,
   buildable: boolean,
   extra: Partial<BuildingDef> = {}
@@ -141,24 +142,24 @@ const B = (
 });
 
 export const BUILDING_DEFS: Record<BuildingKind, BuildingDef> = {
-  [BuildingKind.Keep]: B('Keep', 3, 1.8, 0, 1500, false, {
+  [BuildingKind.Keep]: B('Keep', 3, 1.8, { wood: 0 }, 1500, false, {
     pop: 8,
     trains: [UnitKind.Peasant],
   }),
-  [BuildingKind.Barracks]: B('Barracks', 2, 1.4, 80, 500, true, {
+  [BuildingKind.Barracks]: B('Barracks', 2, 1.4, { wood: 80 }, 500, true, {
     trains: [UnitKind.Spearman, UnitKind.Archer, UnitKind.Knight],
     armorClass: ArmorClass.Leather, // timber hall — chops faster than stone
   }),
-  [BuildingKind.Tower]: B('Tower', 1, 2.6, 60, 400, true, {
+  [BuildingKind.Tower]: B('Tower', 1, 2.6, { wood: 60 }, 400, true, {
     attack: 9,
     range: 7,
     attackRate: 0.9,
   }),
-  [BuildingKind.Wall]: B('Wall', 1, 1.2, 12, 300, true),
-  [BuildingKind.Gatehouse]: B('Gatehouse', 1, 1.5, 25, 400, true, {
+  [BuildingKind.Wall]: B('Wall', 1, 1.2, { wood: 12 }, 300, true),
+  [BuildingKind.Gatehouse]: B('Gatehouse', 1, 1.5, { wood: 25 }, 400, true, {
     passable: true,
   }),
-  [BuildingKind.House]: B('House', 2, 1.2, 40, 250, true, {
+  [BuildingKind.House]: B('House', 2, 1.2, { wood: 40 }, 250, true, {
     pop: 6,
     armorClass: ArmorClass.Leather,
   }),
@@ -177,13 +178,14 @@ export const BUILD_CATEGORIES: { label: string; icon: string; kinds: BuildingKin
 export interface ResourceDef {
   label: string;
   color: number;
+  icon: string; // emoji shown in HUD/cost badges
 }
 
 export const RESOURCE_DEFS: Record<ResourceType, ResourceDef> = {
-  [ResourceType.Wood]: { label: 'Wood', color: 0x4b7f2f },
-  [ResourceType.Stone]: { label: 'Stone', color: 0x9a9a9a },
-  [ResourceType.Food]: { label: 'Food', color: 0xc9a227 },
-  [ResourceType.Gold]: { label: 'Gold', color: 0xffd24a },
+  [ResourceType.Wood]: { label: 'Wood', color: 0x4b7f2f, icon: '🪵' },
+  [ResourceType.Stone]: { label: 'Stone', color: 0x9a9a9a, icon: '🪨' },
+  [ResourceType.Food]: { label: 'Food', color: 0xc9a227, icon: '🍞' },
+  [ResourceType.Gold]: { label: 'Gold', color: 0xffd24a, icon: '🪙' },
 };
 
 export const FACTION_LABELS: Record<Faction, string> = {

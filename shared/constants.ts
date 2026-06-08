@@ -24,6 +24,9 @@ export const TREE_WOOD = 120;
 
 export const START_PEASANTS = 5;
 export const START_WOOD = 60;
+export const START_STONE = 0;
+export const START_FOOD = 20;
+export const START_GOLD = 0;
 export const PEASANT_COST = 20;
 
 export const MAX_PLAYERS = 4;

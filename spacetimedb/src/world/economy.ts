@@ -10,6 +10,7 @@ import {
   type UnitKind as UnitKindT,
   type BuildingKind as BuildingKindT,
 } from '../../../shared/enums.ts';
+import { canAfford, payCost } from '../../../shared/economy.ts';
 import { nearestIndex } from '../../../shared/sim.ts';
 import { nearestPassableGrid } from '../../../shared/pathfinding.ts';
 import { clampWorld, getSeed, passableWith, buildNodes } from './util.ts';
@@ -71,14 +72,14 @@ export function trainFrom(
   if (!udef) return 'unknown unit';
   const p = ctx.db.player.identity.find(owner);
   if (!p) return 'not in game';
-  if (p.wood < udef.cost) return 'not enough wood';
+  if (!canAfford(p, udef.cost)) return 'not enough resources';
   const pop = popInfo(ctx, owner);
   if (pop.pop >= pop.cap) return 'population full — build houses';
 
   const be = ctx.db.entity.entityId.find(b.entityId);
   const bx = be ? be.x : WORLD_SIZE / 2;
   const by = be ? be.y : WORLD_SIZE / 2;
-  ctx.db.player.identity.update({ ...p, wood: p.wood - udef.cost });
+  ctx.db.player.identity.update({ ...p, ...payCost(p, udef.cost) });
   // Snap the jittered spawn onto passable, unoccupied ground so a building hemmed
   // in by water/walls never strands its trained units on an impassable tile.
   const rawX = clampWorld(bx + (ctx.random() - 0.5) * 2);

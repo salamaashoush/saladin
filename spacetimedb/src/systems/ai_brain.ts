@@ -1,5 +1,6 @@
 import { AI_BRAIN_DT } from '../../../shared/constants.ts';
 import { UNIT_DEFS, BUILDING_DEFS, AI_PROFILES } from '../../../shared/defs.ts';
+import { canAfford } from '../../../shared/economy.ts';
 import {
   UnitKind,
   BuildingKind,
@@ -58,13 +59,13 @@ export const aiBrain = spacetimedb.reducer(
           trainFrom(ctx, owner, keep, UnitKind.Peasant);
         } else if (
           pop.cap - pop.pop <= 1 &&
-          p.wood >= BUILDING_DEFS[BuildingKind.House].cost
+          canAfford(p, BUILDING_DEFS[BuildingKind.House].cost)
         ) {
           const s = aiFindSpot(ctx, BuildingKind.House, ke.x, ke.y);
           if (s) placeFor(ctx, owner, BuildingKind.House, s.x, s.y);
         } else if (
           !barracks &&
-          p.wood >= BUILDING_DEFS[BuildingKind.Barracks].cost
+          canAfford(p, BUILDING_DEFS[BuildingKind.Barracks].cost)
         ) {
           const s = aiFindSpot(ctx, BuildingKind.Barracks, ke.x, ke.y);
           if (s) placeFor(ctx, owner, BuildingKind.Barracks, s.x, s.y);
@@ -83,7 +84,13 @@ export const aiBrain = spacetimedb.reducer(
           trainFrom(ctx, owner, barracks, kind);
         } else if (
           towers < prof.maxTowers &&
-          p.wood >= BUILDING_DEFS[BuildingKind.Tower].cost + prof.woodBuffer
+          // Keep a wood reserve before optional defensive spends.
+          canAfford(p, {
+            ...BUILDING_DEFS[BuildingKind.Tower].cost,
+            wood:
+              (BUILDING_DEFS[BuildingKind.Tower].cost.wood ?? 0) +
+              prof.woodBuffer,
+          })
         ) {
           const s = aiFindSpot(ctx, BuildingKind.Tower, ke.x, ke.y);
           if (s) placeFor(ctx, owner, BuildingKind.Tower, s.x, s.y);

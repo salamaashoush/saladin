@@ -12,6 +12,7 @@ import {
   occupancySet,
   type Occupant,
 } from '../../../shared/buildings.ts';
+import { canAfford, payCost } from '../../../shared/economy.ts';
 import { clampWorld, getSeed, passableWith } from './util.ts';
 import { spawnBuilding } from './spawn.ts';
 
@@ -68,7 +69,7 @@ export function placeFor(
   if (!def || !def.buildable) return 'cannot build that';
   const p = ctx.db.player.identity.find(owner);
   if (!p) return 'not in game';
-  if (p.wood < def.cost) return 'not enough wood';
+  if (!canAfford(p, def.cost)) return 'not enough resources';
 
   const seed = getSeed(ctx);
   const occ = allBuildingTiles(ctx);
@@ -82,7 +83,7 @@ export function placeFor(
   if (!ok) return 'blocked or on water';
 
   const c = footprintCenter(def.footprint, x, y);
-  ctx.db.player.identity.update({ ...p, wood: p.wood - def.cost });
+  ctx.db.player.identity.update({ ...p, ...payCost(p, def.cost) });
   spawnBuilding(ctx, owner, kind, c.x, c.y);
   return null;
 }
