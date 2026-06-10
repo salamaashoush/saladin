@@ -352,17 +352,81 @@ fn render_bark(kind: UnitKind, bark: Bark, variant: u32) -> Vec<f32> {
     out
 }
 
+/// Where `scripts/bake_voices.py` (Chatterbox TTS) drops studio barks. Any
+/// clip found here replaces its procedural twin; anything missing falls back,
+/// so a partial bake — or no bake at all — always leaves a full voice set.
+fn baked_dirs() -> Vec<std::path::PathBuf> {
+    let mut dirs = Vec::new();
+    if let Ok(d) = std::env::var("SALADIN_VOICES") {
+        dirs.push(d.into());
+    }
+    dirs.push("assets/voices".into());
+    if let Ok(exe) = std::env::current_exe()
+        && let Some(dir) = exe.parent()
+    {
+        dirs.push(dir.join("assets/voices"));
+    }
+    dirs
+}
+
+fn bark_name(bark: Bark) -> &'static str {
+    match bark {
+        Bark::Ack => "ack",
+        Bark::Attack => "attack",
+        Bark::Wood => "wood",
+        Bark::Food => "food",
+        Bark::Stone => "stone",
+        Bark::Gold => "gold",
+    }
+}
+
+fn kind_name(kind: UnitKind) -> &'static str {
+    match kind {
+        UnitKind::Peasant => "peasant",
+        UnitKind::Spearman => "spearman",
+        UnitKind::Archer => "archer",
+        UnitKind::Knight => "knight",
+        UnitKind::HorseArcher => "horsearcher",
+        UnitKind::Mamluk => "mamluk",
+        UnitKind::Crossbowman => "crossbowman",
+        UnitKind::Ram => "ram",
+        UnitKind::Mangonel => "mangonel",
+        UnitKind::Imam => "imam",
+    }
+}
+
+fn baked_clip(kind: UnitKind, bark: Bark, variant: u32) -> Option<Vec<u8>> {
+    let name = format!("{}_{}_{}.wav", kind_name(kind), bark_name(bark), variant);
+    for dir in baked_dirs() {
+        if let Ok(bytes) = std::fs::read(dir.join(&name)) {
+            return Some(bytes);
+        }
+    }
+    None
+}
+
 pub fn bake_voices(mut commands: Commands, mut sources: ResMut<Assets<AudioSource>>) {
     let mut clips = HashMap::default();
+    let mut baked = 0;
     for &kind in UnitKind::ALL {
         for bark in [Bark::Ack, Bark::Attack, Bark::Wood, Bark::Food, Bark::Stone, Bark::Gold] {
             let v: Vec<Handle<AudioSource>> = (0..2)
                 .map(|i| {
-                    sources.add(AudioSource { bytes: to_wav(&render_bark(kind, bark, i)).into() })
+                    let bytes = match baked_clip(kind, bark, i) {
+                        Some(b) => {
+                            baked += 1;
+                            b
+                        }
+                        None => to_wav(&render_bark(kind, bark, i)),
+                    };
+                    sources.add(AudioSource { bytes: bytes.into() })
                 })
                 .collect();
             clips.insert((kind as u8, bark as u8), v);
         }
+    }
+    if baked > 0 {
+        info!("voices: {baked} baked TTS clips loaded, rest procedural");
     }
     commands.insert_resource(VoiceBank { clips });
 }

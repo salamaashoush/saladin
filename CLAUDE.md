@@ -61,6 +61,9 @@ cargo run --release -p saladin-protocol --example net_bench -- 2 50000 200
                                        # lockstep benchmark: clients units ticks
 cargo run -p saladin-sim --example mapdump -- <base> <preset> [out.ppm]
                                        # worldgen tuning: biome map + dominant-region dump
+uv run scripts/bake_voices.py          # Chatterbox TTS bark bake -> assets/voices/
+   # (gitignored; engine falls back to procedural formant voices per missing
+   # file — see client/src/audio/voice.rs. TTS_DEVICE=cpu if CUDA acts up.)
 ./shot.sh /tmp/out.png [SALADIN_*=...]   # screenshot harness: builds nothing,
    # rm's the stale shot, runs SALADIN_AUTO=1 (override with SALADIN_AUTO=x in
    # args), FAILS LOUDLY if no screenshot was written. ALWAYS use this over a
