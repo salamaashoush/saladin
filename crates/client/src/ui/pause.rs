@@ -151,7 +151,6 @@ pub fn settings_controls(
             pause_button(p, font, assets, PauseAction::Volume(-1), "-", user.master_volume <= 0.0);
             pause_button(p, font, assets, PauseAction::Volume(1), "+", user.master_volume >= 1.0);
         });
-    label(p, font, "(audio arrives with a later patch)", 10.0, TEXT_DIM);
 
     pause_button(
         p,

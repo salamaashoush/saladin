@@ -125,9 +125,10 @@ impl LobbyState {
     pub fn me(&self) -> Option<&LobbyPlayer> {
         self.players.iter().find(|p| p.id == self.you)
     }
-    /// Everyone except the host must flag ready before the host can start.
+    /// Every human — host included — must flag ready before the match can
+    /// start. The explicit host ready-up prevents accidental insta-starts.
     pub fn all_ready(&self) -> bool {
-        self.players.iter().filter(|p| !p.is_ai && p.id != self.host).all(|p| p.ready)
+        self.players.iter().filter(|p| !p.is_ai).all(|p| p.ready)
     }
     /// Apply one relay frame to this snapshot. Shared by both transports.
     pub fn apply(&mut self, m: &Msg) {

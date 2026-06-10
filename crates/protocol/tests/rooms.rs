@@ -159,6 +159,7 @@ fn lobby_metadata_propagates_and_match_stays_in_sync() {
     assert!(!host.lobby().started, "start refused while guest not ready");
 
     guest.set_ready(true);
+    host.set_ready(true);
     wait_for(|| host.lobby().all_ready(), "ready flag at host");
     host.request_start();
     wait_for(|| host.lobby().started && guest.lobby().started, "match start");
@@ -234,6 +235,7 @@ fn peer_drop_mid_match_notifies_and_lockstep_continues() {
     let mut t2 = TcpTransport::connect(addr, "drops", JoinIntent::Direct).expect("t2");
     wait_for(|| t1.lobby().players.len() == 2, "roster");
     t2.set_ready(true);
+    t1.set_ready(true);
     wait_for(|| t1.lobby().all_ready(), "ready");
     t1.request_start();
     wait_for(|| t1.lobby().started && t2.lobby().started, "start");

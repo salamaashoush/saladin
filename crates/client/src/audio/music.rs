@@ -39,6 +39,10 @@ pub struct MusicState {
     pub rng: Rng32,
 }
 
+/// Marker on the playing phrase so the settings slider can retune it live.
+#[derive(Component)]
+pub struct MusicPhrase;
+
 // ── instruments ──────────────────────────────────────────────────────────────
 
 /// Double-course oud note: two strings a few cents apart, the pick-position
@@ -285,6 +289,7 @@ pub fn bake_music(mut commands: Commands, mut sources: ResMut<Assets<AudioSource
 pub fn sequence_music(
     mut commands: Commands,
     time: Res<Time>,
+    cfg: Res<crate::config::UserConfig>,
     bank: Option<Res<MusicBank>>,
     state: Option<ResMut<MusicState>>,
 ) {
@@ -305,10 +310,11 @@ pub fn sequence_music(
         &bank.phrases[idx]
     };
     commands.spawn((
+        MusicPhrase,
         AudioPlayer(phrase.handle.clone()),
         PlaybackSettings {
             mode: PlaybackMode::Despawn,
-            volume: Volume::Linear(MUSIC_GAIN),
+            volume: Volume::Linear(MUSIC_GAIN * super::master(&cfg)),
             ..default()
         },
     ));

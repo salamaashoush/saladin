@@ -327,6 +327,7 @@ fn one_shot(commands: &mut Commands, h: Handle<AudioSource>, vol: f32, speed: f3
 pub fn projectile_sfx(
     mut commands: Commands,
     bank: Option<Res<SfxBank>>,
+    cfg: Res<crate::config::UserConfig>,
     cam: Res<CameraState>,
     q_new: Query<&crate::fx::Arrow, Added<crate::fx::Arrow>>,
     time: Res<Time>,
@@ -334,9 +335,10 @@ pub fn projectile_sfx(
     mut flip: Local<u32>,
 ) {
     let Some(bank) = bank else { return };
+    let m = super::master(&cfg);
     let now = time.elapsed_secs();
     for a in &q_new {
-        let Some(vol) = earshot(&cam, a.from.x, a.from.y) else { continue };
+        let Some(vol) = earshot(&cam, a.from.x, a.from.y).map(|v| v * m) else { continue };
         if a.stone {
             one_shot(&mut commands, bank.siege_launch.clone(), vol, 1.0);
         } else if now - *last_bow > 0.09 {
@@ -352,13 +354,17 @@ pub fn projectile_sfx(
 pub fn death_sfx(
     mut commands: Commands,
     bank: Option<Res<SfxBank>>,
+    cfg: Res<crate::config::UserConfig>,
     cam: Res<CameraState>,
     q_new: Query<(&Dying, &Transform), Added<Dying>>,
     mut flip: Local<u32>,
 ) {
     let Some(bank) = bank else { return };
+    let m = super::master(&cfg);
     for (d, tf) in &q_new {
-        let Some(vol) = earshot(&cam, tf.translation.x, tf.translation.z) else { continue };
+        let Some(vol) = earshot(&cam, tf.translation.x, tf.translation.z).map(|v| v * m) else {
+            continue;
+        };
         if d.rubble > 0.0 {
             one_shot(&mut commands, bank.collapse.clone(), vol, 1.0);
         } else {
@@ -374,6 +380,7 @@ pub fn death_sfx(
 pub fn crowd_sfx(
     mut commands: Commands,
     bank: Option<Res<SfxBank>>,
+    cfg: Res<crate::config::UserConfig>,
     cam: Res<CameraState>,
     time: Res<Time>,
     q_anim: Query<(&AnimState, &Transform)>,
@@ -382,6 +389,7 @@ pub fn crowd_sfx(
     mut flip: Local<u32>,
 ) {
     let Some(bank) = bank else { return };
+    let m = super::master(&cfg);
     let now = time.elapsed_secs();
     let (mut fights, mut chops) = (0.0_f32, 0.0_f32);
     let (mut fv, mut cv) = (0.0_f32, 0.0_f32);
@@ -399,13 +407,13 @@ pub fn crowd_sfx(
     if fights > 0.0 && now >= *next_clash {
         *flip = flip.wrapping_add(1);
         let h = bank.clash[*flip as usize % bank.clash.len()].clone();
-        one_shot(&mut commands, h, fv * (0.4 + (fights * 0.06).min(0.5)), 0.9 + (*flip % 6) as f32 * 0.035);
+        one_shot(&mut commands, h, fv * m * (0.4 + (fights * 0.06).min(0.5)), 0.9 + (*flip % 6) as f32 * 0.035);
         *next_clash = now + (0.55 / (1.0 + fights * 0.12)).max(0.12);
     }
     if chops > 0.0 && now >= *next_chop {
         *flip = flip.wrapping_add(1);
         let h = bank.chop[*flip as usize % bank.chop.len()].clone();
-        one_shot(&mut commands, h, cv * 0.55, 0.92 + (*flip % 5) as f32 * 0.04);
+        one_shot(&mut commands, h, cv * m * 0.55, 0.92 + (*flip % 5) as f32 * 0.04);
         *next_chop = now + (0.8 / (1.0 + chops * 0.1)).max(0.3);
     }
 }
@@ -430,6 +438,7 @@ pub fn stop_ambience(mut commands: Commands, q: Query<Entity, Or<(With<WindLoop>
 pub fn ambience(
     mut commands: Commands,
     bank: Option<Res<SfxBank>>,
+    cfg: Res<crate::config::UserConfig>,
     cam: Res<CameraState>,
     shore: Option<Res<ShoreList>>,
     time: Res<Time>,
@@ -439,6 +448,7 @@ pub fn ambience(
     mut rng_state: Local<u32>,
 ) {
     let Some(bank) = bank else { return };
+    let m = super::master(&cfg);
     if *rng_state == 0 {
         *rng_state = 0x5EED;
     }
@@ -471,7 +481,7 @@ pub fn ambience(
     // wind swells slightly as you zoom out (higher vantage, more weather)
     let zoom_t = ((cam.view_size - 10.0) / 75.0).clamp(0.0, 1.0);
     if let Ok(mut sink) = q_wind.single_mut() {
-        sink.set_volume(Volume::Linear(AMBIENCE_GAIN * (0.5 + zoom_t * 0.5)));
+        sink.set_volume(Volume::Linear(AMBIENCE_GAIN * m * (0.5 + zoom_t * 0.5)));
     }
 
     // shore proximity drives the lapping loop
@@ -483,7 +493,7 @@ pub fn ambience(
         })
         .unwrap_or(f32::MAX);
     if let Ok(mut sink) = q_wave.single_mut() {
-        let v = if shore_near < 30.0 { (1.0 - shore_near / 30.0) * AMBIENCE_GAIN } else { 0.0 };
+        let v = if shore_near < 30.0 { (1.0 - shore_near / 30.0) * AMBIENCE_GAIN * m } else { 0.0 };
         sink.set_volume(Volume::Linear(v));
     }
 
@@ -493,12 +503,12 @@ pub fn ambience(
         *next_bird = now + rng.range(4.0, 10.0);
         let by_sea = shore_near < 22.0;
         if by_sea && rng.f32() < 0.5 {
-            one_shot(&mut commands, bank.gull.clone(), AMBIENCE_GAIN * 0.9, rng.range(0.9, 1.1));
+            one_shot(&mut commands, bank.gull.clone(), AMBIENCE_GAIN * m * 0.9, rng.range(0.9, 1.1));
         } else if rng.f32() < 0.3 {
-            one_shot(&mut commands, bank.dove.clone(), AMBIENCE_GAIN * 0.8, rng.range(0.92, 1.08));
+            one_shot(&mut commands, bank.dove.clone(), AMBIENCE_GAIN * m * 0.8, rng.range(0.92, 1.08));
         } else if rng.f32() < 0.6 {
             let h = bank.bird[(rng.next_u32() as usize) % bank.bird.len()].clone();
-            one_shot(&mut commands, h, AMBIENCE_GAIN * 0.7, rng.range(0.9, 1.15));
+            one_shot(&mut commands, h, AMBIENCE_GAIN * m * 0.7, rng.range(0.9, 1.15));
         }
     }
     *rng_state = rng.0;

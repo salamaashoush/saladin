@@ -32,6 +32,11 @@ impl TextInput {
         self.filter = filter;
         self
     }
+    /// Spawn already-focused — rebuilds restore the field the user was typing in.
+    pub fn with_focus(mut self, focused: bool) -> Self {
+        self.focused = focused;
+        self
+    }
 }
 
 /// The text node inside the input box (kept in sync by `render_text_inputs`).

@@ -102,7 +102,7 @@ impl Room {
     }
 
     fn all_ready(&self) -> bool {
-        self.humans().filter(|s| s.player.id != self.host).all(|s| s.player.ready)
+        self.humans().all(|s| s.player.ready)
     }
 }
 

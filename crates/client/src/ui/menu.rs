@@ -53,6 +53,9 @@ pub struct MpForm {
     pub name: String,
     pub ip: String,
     pub room: String,
+    /// Which field held focus (0 none, 1 name, 2 ip, 3 room) — restored on
+    /// rebuild so a legitimate rebuild never blurs the field mid-typing.
+    pub focus: u8,
 }
 
 /// Last multiplayer connect error, shown on the multiplayer screen.
@@ -105,7 +108,7 @@ pub fn cleanup_menu(
     digest.0.clear();
 }
 
-/// Mirror typed text back into `MpForm` so screen rebuilds restore it.
+/// Mirror typed text + focus back into `MpForm` so screen rebuilds restore both.
 pub fn sync_mp_form(
     mut form: ResMut<MpForm>,
     q_name: Query<&TextInput, (With<NameInput>, Changed<TextInput>)>,
@@ -114,20 +117,36 @@ pub fn sync_mp_form(
 ) {
     // compare before writing: fresh-spawned inputs count as Changed, and a
     // no-op write would dirty the resource and trigger a rebuild loop
-    if let Ok(t) = q_name.single()
-        && form.name != t.value
-    {
-        form.name = t.value.clone();
+    let mut focus = None;
+    if let Ok(t) = q_name.single() {
+        if form.name != t.value {
+            form.name = t.value.clone();
+        }
+        if t.focused {
+            focus = Some(1);
+        }
     }
-    if let Ok(t) = q_ip.single()
-        && form.ip != t.value
-    {
-        form.ip = t.value.clone();
+    if let Ok(t) = q_ip.single() {
+        if form.ip != t.value {
+            form.ip = t.value.clone();
+        }
+        if t.focused {
+            focus = Some(2);
+        }
     }
-    if let Ok(t) = q_room.single()
-        && form.room != t.value
-    {
-        form.room = t.value.clone();
+    if let Ok(t) = q_room.single() {
+        if form.room != t.value {
+            form.room = t.value.clone();
+        }
+        if t.focused {
+            focus = Some(3);
+        }
+    }
+    // inputs respawn WITH restored focus, so "nothing focused" can only mean
+    // the user blurred (Esc/Enter/click-away) — mirror that too
+    let f = focus.unwrap_or(0);
+    if form.focus != f {
+        form.focus = f;
     }
 }
 
@@ -304,7 +323,12 @@ fn mp_screen(p: &mut ChildSpawnerCommands, font: &UiFont, assets: &UiAssets, for
     }
 
     label(p, font, "Your name", FONT_SM, TEXT_DIM);
-    let name = text_input(p, font, TextInput::new(&form.name, "Player", 24), 220.0);
+    let name = text_input(
+        p,
+        font,
+        TextInput::new(&form.name, "Player", 24).with_focus(form.focus == 1),
+        220.0,
+    );
     p.commands_mut().entity(name).insert(NameInput);
 
     label(p, font, "Local network", FONT_SM, TEXT_DIM);
@@ -313,7 +337,8 @@ fn mp_screen(p: &mut ChildSpawnerCommands, font: &UiFont, assets: &UiAssets, for
         p,
         font,
         TextInput::new(&form.ip, "host ip (e.g. 192.168.1.10)", 45)
-            .with_filter(|c| c.is_ascii_alphanumeric() || c == '.' || c == ':' || c == '-'),
+            .with_filter(|c| c.is_ascii_alphanumeric() || c == '.' || c == ':' || c == '-')
+            .with_focus(form.focus == 2),
         220.0,
     );
     p.commands_mut().entity(ip).insert(IpInput);
@@ -324,7 +349,9 @@ fn mp_screen(p: &mut ChildSpawnerCommands, font: &UiFont, assets: &UiAssets, for
     let room = text_input(
         p,
         font,
-        TextInput::new(&form.room, "room code", 8).with_filter(|c| c.is_ascii_alphanumeric()),
+        TextInput::new(&form.room, "room code", 8)
+            .with_filter(|c| c.is_ascii_alphanumeric())
+            .with_focus(form.focus == 3),
         220.0,
     );
     p.commands_mut().entity(room).insert(RoomInput);
@@ -346,12 +373,25 @@ fn menu_button(
 }
 
 /// The disabled-state of Join buttons depends on live typed text, which the
-/// digest doesn't track — refresh the digest when the emptiness flips.
-pub fn refresh_join_buttons(form: Res<MpForm>, mut digest: ResMut<MenuDigest>, screen: Res<MenuScreen>) {
-    if *screen != MenuScreen::Multiplayer || !form.is_changed() {
+/// digest doesn't track — refresh ONLY when emptiness flips. Clearing on any
+/// form change rebuilt the screen per keystroke and blurred the input.
+pub fn refresh_join_buttons(
+    form: Res<MpForm>,
+    mut digest: ResMut<MenuDigest>,
+    screen: Res<MenuScreen>,
+    mut prev: Local<Option<(bool, bool)>>,
+) {
+    if *screen != MenuScreen::Multiplayer {
+        *prev = None;
         return;
     }
-    digest.0.clear();
+    let now = (form.ip.is_empty(), form.room.is_empty());
+    if *prev != Some(now) {
+        if prev.is_some() {
+            digest.0.clear();
+        }
+        *prev = Some(now);
+    }
 }
 
 fn connect(
@@ -551,6 +591,7 @@ pub enum LobbyAction {
     ToggleReady,
     Faction(Faction),
     AddAi,
+    AiDiff(AiDifficulty),
     RemoveAi(u64),
     CycleSeed,
     CyclePreset,
@@ -559,8 +600,19 @@ pub enum LobbyAction {
 #[derive(Resource, Default)]
 pub struct LobbyDigest(String);
 
+/// Difficulty the host's next "Add AI" uses (picked in the lobby).
+#[derive(Resource)]
+pub struct AiAddDiff(pub AiDifficulty);
+
+impl Default for AiAddDiff {
+    fn default() -> Self {
+        AiAddDiff(AiDifficulty::Normal)
+    }
+}
+
 pub fn setup_lobby(mut commands: Commands, assets: Res<UiAssets>) {
     commands.init_resource::<LobbyDigest>();
+    commands.init_resource::<AiAddDiff>();
     commands.spawn((
         LobbyRoot,
         Node {
@@ -586,6 +638,7 @@ pub fn update_lobby(
     font: Res<UiFont>,
     conn: Res<crate::LobbyConn>,
     mode: Res<LobbyMode>,
+    ai_diff: Res<AiAddDiff>,
     mut digest: ResMut<LobbyDigest>,
     q_root: Query<Entity, With<LobbyRoot>>,
     mut images: ResMut<Assets<Image>>,
@@ -597,8 +650,8 @@ pub fn update_lobby(
     let l = t.lobby();
     drop(guard);
     let key = format!(
-        "{}|{}|{}|{:?}|{:?}|{:?}|{}|{}",
-        l.connected, l.you, l.host, l.players, l.error, l.room_code, l.seed, l.preset
+        "{}|{}|{}|{:?}|{:?}|{:?}|{}|{}|{:?}",
+        l.connected, l.you, l.host, l.players, l.error, l.room_code, l.seed, l.preset, ai_diff.0
     );
     if digest.0 == key {
         return;
@@ -661,60 +714,125 @@ pub fn update_lobby(
                         });
                 }
 
-                // roster
+                // ── players ────────────────────────────────────────────────
+                let humans = l.players.iter().filter(|p| !p.is_ai).count();
+                let ready_n = l.players.iter().filter(|p| !p.is_ai && p.ready).count();
+                p.spawn(Node { height: Val::Px(6.0), ..default() });
+                label(p, &font, &format!("PLAYERS  ({ready_n}/{humans} ready)"), FONT_SM, GOLD);
                 for pl in &l.players {
-                    let mut row = String::new();
-                    if pl.id == l.host && !pl.is_ai {
-                        row.push_str("[host] ");
-                    }
-                    row.push_str(&pl.name);
-                    row.push_str(match pl.faction {
-                        Faction::Ayyubid => " - Ayyubids",
-                        Faction::Crusader => " - Crusaders",
-                    });
-                    if pl.is_ai {
-                        row.push_str(&format!("  (AI {:?})", pl.ai_difficulty));
-                    } else if pl.ready || pl.id == l.host {
-                        row.push_str("  [ready]");
-                    } else {
-                        row.push_str("  [not ready]");
-                    }
-                    let color = if pl.id == l.you { TEXT } else { TEXT_DIM };
-                    p.spawn((Node { flex_direction: FlexDirection::Row, column_gap: Val::Px(6.0), ..default() },))
-                        .with_children(|p| {
-                            label(p, &font, &row, FONT_SM, color);
-                            if is_host && pl.is_ai {
+                    let is_you = pl.id == l.you;
+                    let ready = pl.is_ai || pl.ready;
+                    p.spawn((
+                        Node {
+                            width: Val::Px(380.0),
+                            flex_direction: FlexDirection::Row,
+                            align_items: AlignItems::Center,
+                            column_gap: Val::Px(8.0),
+                            padding: UiRect::axes(Val::Px(8.0), Val::Px(5.0)),
+                            ..default()
+                        },
+                        BackgroundColor(if is_you {
+                            Color::srgba(1.0, 0.85, 0.4, 0.08)
+                        } else {
+                            Color::srgba(0.0, 0.0, 0.0, 0.25)
+                        }),
+                    ))
+                    .with_children(|p| {
+                        // ready lamp
+                        p.spawn((
+                            Node { width: Val::Px(9.0), height: Val::Px(9.0), ..default() },
+                            BackgroundColor(if ready { ACCENT } else { WARN }),
+                        ));
+                        let name = if pl.is_ai {
+                            format!("{}  (AI {:?})", pl.name, pl.ai_difficulty)
+                        } else {
+                            pl.name.clone()
+                        };
+                        label(p, &font, &name, FONT_SM, if is_you { TEXT } else { TEXT_DIM });
+                        if pl.id == l.host && !pl.is_ai {
+                            label(p, &font, "[HOST]", 10.0, GOLD);
+                        }
+                        // spacer pushes the right side out
+                        p.spawn(Node { flex_grow: 1.0, ..default() });
+                        label(
+                            p,
+                            &font,
+                            match pl.faction {
+                                Faction::Ayyubid => "Ayyubids",
+                                Faction::Crusader => "Crusaders",
+                            },
+                            FONT_SM,
+                            TEXT_DIM,
+                        );
+                        if pl.is_ai {
+                            if is_host {
                                 lobby_button(p, &font, &assets, LobbyAction::RemoveAi(pl.id), "x", false);
+                            }
+                        } else {
+                            label(
+                                p,
+                                &font,
+                                if ready { "ready" } else { "..." },
+                                FONT_SM,
+                                if ready { ACCENT } else { WARN },
+                            );
+                        }
+                    });
+                }
+                if is_host {
+                    p.spawn((Node { flex_direction: FlexDirection::Row, column_gap: Val::Px(4.0), align_items: AlignItems::Center, ..default() },))
+                        .with_children(|p| {
+                            lobby_button(p, &font, &assets, LobbyAction::AddAi, "Add AI", l.players.len() >= 8);
+                            for (d, name) in [
+                                (AiDifficulty::Easy, "Easy"),
+                                (AiDifficulty::Normal, "Normal"),
+                                (AiDifficulty::Hard, "Hard"),
+                            ] {
+                                screen_button(p, &font, &assets, LobbyAction::AiDiff(d), name, ai_diff.0 == d, false);
                             }
                         });
                 }
 
-                // your seat
-                label(p, &font, "Your faction", FONT_SM, TEXT_DIM);
+                // ── your seat ──────────────────────────────────────────────
+                p.spawn(Node { height: Val::Px(6.0), ..default() });
+                label(p, &font, "YOUR SEAT", FONT_SM, GOLD);
                 p.spawn((Node { flex_direction: FlexDirection::Row, column_gap: Val::Px(4.0), ..default() },))
                     .with_children(|p| {
                         for (f, name) in [(Faction::Ayyubid, "Ayyubids"), (Faction::Crusader, "Crusaders")] {
                             lobby_faction_button(p, &font, &assets, f, name, my_faction == Some(f));
                         }
                     });
+                // EVERY human readies up — the host included, so a match can
+                // never start by accident
+                lobby_button(
+                    p,
+                    &font,
+                    &assets,
+                    LobbyAction::ToggleReady,
+                    if me_ready { "Ready! (click to unready)" } else { "Ready up" },
+                    false,
+                );
 
+                p.spawn(Node { height: Val::Px(4.0), ..default() });
                 if is_host {
-                    lobby_button(p, &font, &assets, LobbyAction::AddAi, "Add AI opponent", l.players.len() >= 8);
                     let can_start = l.players.len() >= 2 && l.all_ready();
                     lobby_button(p, &font, &assets, LobbyAction::Start, "Start Match", !can_start);
-                    if !l.all_ready() {
-                        label(p, &font, "Waiting for everyone to ready up...", FONT_SM, TEXT_DIM);
+                    if !can_start {
+                        let why = if l.players.len() < 2 {
+                            "Add an AI or wait for a friend to join...".to_string()
+                        } else {
+                            format!("Waiting for ready: {ready_n}/{humans}")
+                        };
+                        label(p, &font, &why, FONT_SM, TEXT_DIM);
                     }
                 } else {
-                    lobby_button(
+                    label(
                         p,
                         &font,
-                        &assets,
-                        LobbyAction::ToggleReady,
-                        if me_ready { "Ready! (click to unready)" } else { "Ready up" },
-                        false,
+                        if me_ready { "Waiting for the host to start..." } else { "Ready up so the host can start" },
+                        FONT_SM,
+                        TEXT_DIM,
                     );
-                    label(p, &font, "Waiting for the host to start...", FONT_SM, TEXT_DIM);
                 }
             }
             lobby_button(p, &font, &assets, LobbyAction::Cancel, "Leave Lobby", false);
@@ -747,10 +865,15 @@ fn lobby_button(
 pub fn lobby_actions(
     q: Query<(&Interaction, &LobbyAction, &Disabled), Changed<Interaction>>,
     conn: Res<crate::LobbyConn>,
+    mut ai_diff: ResMut<AiAddDiff>,
     mut next: ResMut<NextState<GameState>>,
 ) {
     for (i, action, disabled) in &q {
         if *i != Interaction::Pressed || disabled.0 {
+            continue;
+        }
+        if let LobbyAction::AiDiff(d) = action {
+            ai_diff.0 = *d;
             continue;
         }
         let mut guard = conn.0.lock().unwrap();
@@ -769,8 +892,9 @@ pub fn lobby_actions(
                     Some(Faction::Ayyubid) => Faction::Crusader,
                     _ => Faction::Ayyubid,
                 };
-                t.add_ai(AiDifficulty::Normal, f);
+                t.add_ai(ai_diff.0, f);
             }
+            LobbyAction::AiDiff(_) => unreachable!(),
             LobbyAction::RemoveAi(id) => t.remove_ai(id),
             LobbyAction::CycleSeed => {
                 let l = t.lobby();

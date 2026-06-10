@@ -435,6 +435,7 @@ pub fn bake_voices(mut commands: Commands, mut sources: ResMut<Assets<AudioSourc
 pub fn play_voices(
     mut commands: Commands,
     time: Res<Time>,
+    cfg: Res<crate::config::UserConfig>,
     mut queue: ResMut<VoiceQueue>,
     bank: Option<Res<VoiceBank>>,
     mut last: Local<f32>,
@@ -458,7 +459,7 @@ pub fn play_voices(
             AudioPlayer(h),
             PlaybackSettings {
                 mode: PlaybackMode::Despawn,
-                volume: Volume::Linear(VOICE_GAIN),
+                volume: Volume::Linear(VOICE_GAIN * super::master(&cfg)),
                 ..default()
             },
         ));

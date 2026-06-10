@@ -43,7 +43,8 @@ fn tcp_relay_keeps_two_clients_in_sync() {
     assert_eq!(t1.lobby().host, t1.lobby().you, "first client hosts");
 
     t2.set_ready(true);
-    wait_for(|| t1.lobby().all_ready(), "client 2 ready");
+    t1.set_ready(true);
+    wait_for(|| t1.lobby().all_ready(), "both clients ready");
     t1.request_start();
     wait_for(|| t1.lobby().started && t2.lobby().started, "match start");
 
