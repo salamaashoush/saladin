@@ -32,7 +32,9 @@ pub fn resource_node_meshes(res: ResourceType) -> Vec<Mesh> {
     let _ = resource_def(res);
     match res {
         ResourceType::Stone => vec![stone_cluster_a(), stone_cluster_b(), stone_cluster_c()],
-        ResourceType::Food => vec![deer(), boar(), berry_bush(), deer_grazing()],
+        ResourceType::Food => {
+            vec![deer(), boar(), berry_bush(), deer_grazing(), deer_carcass(), boar_carcass()]
+        }
         ResourceType::Gold => vec![gold_vein_a(), gold_vein_b()],
         _ => vec![tree_broadleaf(), tree_conifer(), tree_broadleaf_tall(), tree_olive(), tree_palm()],
     }
@@ -50,6 +52,8 @@ pub const FOOD_DEER: usize = 0;
 pub const FOOD_BOAR: usize = 1;
 pub const FOOD_BERRY: usize = 2;
 pub const FOOD_DEER_GRAZING: usize = 3;
+pub const FOOD_DEER_CARCASS: usize = 4;
+pub const FOOD_BOAR_CARCASS: usize = 5;
 
 /// Coastal food nodes sit on water tiles — render them as a fish school with
 /// a ripple ring instead of a land animal standing on the sea.
@@ -437,6 +441,94 @@ fn boar() -> Mesh {
         for sz in [-1.0f32, 1.0] {
             parts.push(part(cyl8(0.035, 0.045, 0.3), hide_dk, xyz(sx * 0.14, 0.14, sz * 0.3)));
         }
+    }
+    merge(parts)
+}
+
+/// Slaughtered deer lying on its side — shown once the first harvest tick
+/// lands (AoE-style: the animal stops wandering and becomes a carcass).
+fn deer_carcass() -> Mesh {
+    let hide = lin(HIDE_DEER);
+    let hide_dk = lin(HIDE_DEER_DK);
+    let antler = lin(0xb3a380);
+    let mut parts = vec![
+        // body flopped on its side
+        part(
+            sphere_uv(0.26),
+            hide,
+            Transform::from_xyz(0.0, 0.2, -0.05)
+                .with_rotation(Quat::from_rotation_z(1.35))
+                .with_scale(Vec3::new(0.72, 0.85, 1.75)),
+        ),
+        // neck stretched out flat, head on the ground
+        part(
+            cyl8(0.05, 0.08, 0.4),
+            hide,
+            at_rot(0.1, 0.1, 0.42, Quat::from_euler(EulerRot::XYZ, 1.35, 0.0, -0.2)),
+        ),
+        part(
+            sphere_uv(0.1),
+            hide,
+            Transform::from_xyz(0.16, 0.08, 0.62).with_scale(Vec3::new(0.9, 0.8, 1.35)),
+        ),
+        part(sphere_uv(0.09), lin(0xe8ddc8), xyz(-0.06, 0.22, -0.5)),
+    ];
+    // antlers flat on the ground
+    for sz in [-1.0f32, 1.0] {
+        parts.push(part(
+            cyl8(0.016, 0.024, 0.3),
+            antler,
+            at_rot(0.22, 0.05, 0.66 + sz * 0.06, Quat::from_euler(EulerRot::XYZ, sz * 0.5, 0.0, -1.2)),
+        ));
+    }
+    // stiff legs sticking out sideways
+    for (i, sz) in [-1.0f32, -0.35, 0.35, 1.0].into_iter().enumerate() {
+        let lift = if i % 2 == 0 { 0.12 } else { 0.26 };
+        parts.push(part(
+            cyl8(0.022, 0.03, 0.45),
+            hide_dk,
+            at_rot(0.2, lift, sz * 0.3 - 0.05, Quat::from_rotation_z(-1.25)),
+        ));
+    }
+    merge(parts)
+}
+
+/// Slaughtered boar on its side.
+fn boar_carcass() -> Mesh {
+    let hide = lin(0x4f3a28);
+    let hide_dk = lin(0x3a2b1d);
+    let tusk = lin(0xe8e0cc);
+    let mut parts = vec![
+        part(
+            sphere_uv(0.3),
+            hide,
+            Transform::from_xyz(0.0, 0.22, -0.04)
+                .with_rotation(Quat::from_rotation_z(1.35))
+                .with_scale(Vec3::new(0.9, 0.95, 1.6)),
+        ),
+        part(
+            sphere_uv(0.17),
+            hide,
+            Transform::from_xyz(0.1, 0.13, 0.42)
+                .with_rotation(Quat::from_rotation_z(1.1))
+                .with_scale(Vec3::new(0.9, 0.9, 1.1)),
+        ),
+        part(cyl8(0.06, 0.07, 0.12), lin(0x8a6a55), at_rot(0.14, 0.1, 0.58, Quat::from_rotation_x(FRAC_PI_2))),
+    ];
+    for sz in [-1.0f32, 1.0] {
+        parts.push(part(
+            cone(0.018, 0.09, 4),
+            tusk,
+            at_rot(0.18, 0.08, 0.56 + sz * 0.05, Quat::from_euler(EulerRot::XYZ, sz * 0.6, 0.0, -1.0)),
+        ));
+    }
+    for (i, sz) in [-1.0f32, -0.35, 0.35, 1.0].into_iter().enumerate() {
+        let lift = if i % 2 == 0 { 0.1 } else { 0.24 };
+        parts.push(part(
+            cyl8(0.03, 0.04, 0.3),
+            hide_dk,
+            at_rot(0.22, lift, sz * 0.28, Quat::from_rotation_z(-1.3)),
+        ));
     }
     merge(parts)
 }

@@ -20,13 +20,22 @@ const IMPOSTOR_VIEW_SIZE: f32 = 34.0;
 pub const BAR_W: f32 = 0.9;
 pub const BAR_H: f32 = 0.12;
 
+/// One animatable rig part as stored handles: child entity sits at `pivot`,
+/// mesh vertices are pre-translated relative to it.
+#[derive(Clone)]
+pub struct RigHandle {
+    pub group: crate::render::models::RigGroup,
+    pub pivot: Vec3,
+    pub mesh: Handle<Mesh>,
+}
+
 #[derive(Resource)]
 pub struct RenderAssets {
-    /// Base unit meshes (team parts white); per-team copies bake lazily into
-    /// `team_units`/`team_impostors` so detail colors render true.
-    pub units: Vec<Handle<Mesh>>,
+    /// Base unit rigs (team parts white); per-team copies bake lazily into
+    /// `team_rigs`/`team_impostors` so detail colors render true.
+    pub unit_rigs: Vec<Vec<RigHandle>>,
     pub impostors: Vec<Handle<Mesh>>,
-    pub team_units: HashMap<(usize, u32), Handle<Mesh>>,
+    pub team_rigs: HashMap<(usize, u32), Vec<RigHandle>>,
     pub team_impostors: HashMap<(usize, u32), Handle<Mesh>>,
     pub buildings: Vec<Handle<Mesh>>,
     pub nodes: HashMap<ResourceType, Vec<Handle<Mesh>>>,
@@ -190,8 +199,38 @@ pub struct Lerp {
 
 #[derive(Component)]
 pub struct UnitBody {
+    pub group: crate::render::models::RigGroup,
+    pub pivot: Vec3,
+    /// true = the far-zoom merged impostor child (hidden at gameplay zoom).
+    pub impostor_part: bool,
+}
+
+/// Per-unit animation inputs mirrored from the sim each sync — the animator
+/// is pure render math driven by these flags + wall time.
+#[derive(Component)]
+pub struct AnimState {
     pub kind: UnitKind,
-    pub impostor: bool,
+    pub moving: bool,
+    pub combat: bool,
+    pub harvest: bool,
+    pub phase: f32,
+}
+
+/// A live game animal (deer/boar food node): wanders around its sim anchor
+/// (render-only — gatherers still walk to the anchor), grazes at waypoints,
+/// and flops into a carcass the moment the first harvest tick lands.
+#[derive(Component)]
+pub struct AnimalNode {
+    pub anchor: Vec3,
+    pub remaining: i32,
+    pub full: i32,
+    pub carcass: bool,
+    pub stand_mesh: Handle<Mesh>,
+    pub graze_mesh: Handle<Mesh>,
+    pub carcass_mesh: Handle<Mesh>,
+    pub waypoint: Vec3,
+    pub pause: f32,
+    pub rng: u32,
 }
 
 #[derive(Component)]
@@ -257,30 +296,47 @@ fn node_scale(remaining: i32) -> f32 {
 }
 
 impl RenderAssets {
-    /// Lazily bake the (kind, team color) mesh — white team parts recolored,
-    /// every other vertex color kept true. One mesh per pair, so Bevy still
-    /// instances each kind x team batch.
-    pub fn team_mesh(
+    /// Lazily bake the (kind, team color) rig — white team parts recolored,
+    /// every other vertex color kept true. One mesh per (kind, color, group),
+    /// so Bevy still instances each batch.
+    pub fn team_rig(
         &mut self,
         meshes: &mut Assets<Mesh>,
         kind: UnitKind,
         color: u32,
-        impostor: bool,
-    ) -> Handle<Mesh> {
+    ) -> Vec<RigHandle> {
         use crate::render::models::bake_team;
-        let (cache, base) = if impostor {
-            (&mut self.team_impostors, &self.impostors[kind as usize])
-        } else {
-            (&mut self.team_units, &self.units[kind as usize])
-        };
-        cache
+        self.team_rigs
             .entry((kind as usize, color))
             .or_insert_with(|| {
-                let baked = meshes.get(base).map(|m| bake_team(m, color));
-                match baked {
-                    Some(m) => meshes.add(m),
-                    None => base.clone(),
-                }
+                self.unit_rigs[kind as usize]
+                    .iter()
+                    .map(|p| RigHandle {
+                        group: p.group,
+                        pivot: p.pivot,
+                        mesh: match meshes.get(&p.mesh).map(|m| bake_team(m, color)) {
+                            Some(m) => meshes.add(m),
+                            None => p.mesh.clone(),
+                        },
+                    })
+                    .collect()
+            })
+            .clone()
+    }
+
+    pub fn team_impostor(
+        &mut self,
+        meshes: &mut Assets<Mesh>,
+        kind: UnitKind,
+        color: u32,
+    ) -> Handle<Mesh> {
+        use crate::render::models::bake_team;
+        let base = &self.impostors[kind as usize];
+        self.team_impostors
+            .entry((kind as usize, color))
+            .or_insert_with(|| match meshes.get(base).map(|m| bake_team(m, color)) {
+                Some(m) => meshes.add(m),
+                None => base.clone(),
             })
             .clone()
     }
@@ -325,10 +381,19 @@ pub fn sync_render(
     world_cfg: Res<WorldConfig>,
     q_sim: Query<(&GameId, &Pos, Option<&Unit>, Option<&Building>, Option<&ResourceNode>, Option<&Owner>)>,
     q_players: Query<&Player>,
-    mut q_roots: Query<(&mut Lerp, &mut Visibility, &mut Transform), With<RenderRoot>>,
-    mut q_bodies: Query<(&ChildOf, &mut UnitBody, &mut Mesh3d, &mut MeshMaterial3d<StandardMaterial>)>,
-    mut q_rings: Query<(&ChildOf, &mut Visibility), (With<SelRing>, Without<RenderRoot>)>,
-    mut q_routs: Query<(&ChildOf, &mut Visibility), (With<RoutFlag>, Without<RenderRoot>, Without<SelRing>)>,
+    mut q_roots: Query<
+        (&mut Lerp, &mut Visibility, &mut Transform, Option<&mut AnimState>),
+        With<RenderRoot>,
+    >,
+    mut q_bodies: Query<
+        (&ChildOf, &UnitBody, &mut Visibility, &mut MeshMaterial3d<StandardMaterial>),
+        (Without<RenderRoot>, Without<SelRing>, Without<RoutFlag>),
+    >,
+    (mut q_rings, mut q_routs, mut q_animals): (
+        Query<(&ChildOf, &mut Visibility), (With<SelRing>, Without<RenderRoot>)>,
+        Query<(&ChildOf, &mut Visibility), (With<RoutFlag>, Without<RenderRoot>, Without<SelRing>)>,
+        Query<&mut AnimalNode>,
+    ),
 ) {
     let owner_color: HashMap<u64, u32> = q_players
         .iter()
@@ -371,12 +436,17 @@ pub fn sync_render(
                     world,
                 )
             });
-            if let Ok((mut lerp, mut vis, _)) = q_roots.get_mut(root) {
+            if let Ok((mut lerp, mut vis, _, anim)) = q_roots.get_mut(root) {
                 lerp.target = world;
                 if !yaw.is_nan() {
                     lerp.yaw = yaw;
                 }
                 *vis = if u.garrisoned_in != 0 { Visibility::Hidden } else { Visibility::Inherited };
+                if let Some(mut anim) = anim {
+                    anim.moving = u.has_target;
+                    anim.combat = u.attack_target != 0;
+                    anim.harvest = u.gather_state == saladin_sim::GatherState::Harvesting;
+                }
             }
             unit_state.insert(root, (color, selected, u.routing, u.kind));
         } else if let Some(b) = bld {
@@ -394,7 +464,7 @@ pub fn sync_render(
                     ))
                     .id()
             });
-            if let Ok((mut lerp, _, mut tf)) = q_roots.get_mut(root) {
+            if let Ok((mut lerp, _, mut tf, _)) = q_roots.get_mut(root) {
                 lerp.target = world;
                 tf.translation = world; // buildings snap
                 if b.kind == BuildingKind::Wall {
@@ -416,44 +486,69 @@ pub fn sync_render(
             let root = *map.0.entry(gid.0).or_insert_with(|| {
                 // Coastal food sits on water tiles — draw a fish school there,
                 // never a deer standing on the sea.
+                use crate::render::models::props::*;
+                let variants = &assets.nodes[&n.res_type];
+                let roll = (gid.0 ^ (gid.0 >> 17)) as usize;
+                let idx = node_variant(n.res_type, world_cfg.seed, x, z, roll, variants.len());
                 let mesh = if n.res_type == ResourceType::Food && ground < -0.005 {
                     assets.fish_node.clone()
                 } else {
-                    let variants = &assets.nodes[&n.res_type];
-                    let roll = (gid.0 ^ (gid.0 >> 17)) as usize;
-                    let idx = node_variant(n.res_type, world_cfg.seed, x, z, roll, variants.len());
                     variants[idx].clone()
                 };
                 // Deterministic per-node yaw so herds/groves don't all face north.
                 let yaw = ((gid.0 >> 5) % 628) as f32 * 0.01;
-                commands
-                    .spawn((
-                        RenderRoot(gid.0),
-                        Mesh3d(mesh),
-                        MeshMaterial3d(rmats.node[&n.res_type].clone()),
-                        Transform::from_translation(world).with_rotation(Quat::from_rotation_y(yaw)),
-                        Lerp { target: world, yaw, bob_phase: 0.0, bob: false },
-                    ))
-                    .id()
+                let mut e = commands.spawn((
+                    RenderRoot(gid.0),
+                    Mesh3d(mesh),
+                    MeshMaterial3d(rmats.node[&n.res_type].clone()),
+                    Transform::from_translation(world).with_rotation(Quat::from_rotation_y(yaw)),
+                    Lerp { target: world, yaw, bob_phase: 0.0, bob: false },
+                ));
+                // Land game animals get a wander/graze/carcass brain.
+                if n.res_type == ResourceType::Food
+                    && ground >= -0.005
+                    && matches!(idx, FOOD_DEER | FOOD_BOAR | FOOD_DEER_GRAZING)
+                {
+                    let deerish = idx != FOOD_BOAR;
+                    e.insert(AnimalNode {
+                        anchor: world,
+                        remaining: n.remaining,
+                        full: n.remaining,
+                        carcass: false,
+                        stand_mesh: variants[if deerish { FOOD_DEER } else { FOOD_BOAR }].clone(),
+                        graze_mesh: variants[if deerish { FOOD_DEER_GRAZING } else { FOOD_BOAR }].clone(),
+                        carcass_mesh: variants[if deerish { FOOD_DEER_CARCASS } else { FOOD_BOAR_CARCASS }]
+                            .clone(),
+                        waypoint: world,
+                        pause: (gid.0 % 50) as f32 * 0.1,
+                        rng: (gid.0 as u32) | 1,
+                    });
+                }
+                e.id()
             });
-            if let Ok((_, _, mut tf)) = q_roots.get_mut(root) {
-                tf.translation = world;
+            if let Ok((_, _, mut tf, _)) = q_roots.get_mut(root) {
                 tf.scale = Vec3::splat(node_scale(n.remaining));
+            }
+            if let Ok(mut animal) = q_animals.get_mut(root) {
+                animal.remaining = n.remaining;
+            } else if let Ok((_, _, mut tf, _)) = q_roots.get_mut(root) {
+                // static nodes snap to the sim position; animals own their pose
+                tf.translation = world;
             }
         }
     }
 
-    // child passes: body material/LOD, ring + rout visibility
-    for (child_of, mut body, mut mesh, mut mat) in &mut q_bodies {
+    // child passes: body material + impostor LOD visibility, ring + rout
+    for (child_of, body, mut vis, mut mat) in &mut q_bodies {
         let Some(&(color, selected, _routing, _)) = unit_state.get(&child_of.parent()) else { continue };
-        let kind = body.kind;
         let want = rmats.unit_mat(&mut mats, color, selected);
         if mat.0 != want {
             mat.0 = want;
         }
-        if body.impostor != impostor {
-            body.impostor = impostor;
-            mesh.0 = assets.team_mesh(&mut meshes, kind, color, impostor);
+        let show = body.impostor_part == impostor;
+        let want_vis = if show { Visibility::Inherited } else { Visibility::Hidden };
+        if *vis != want_vis {
+            *vis = want_vis;
         }
     }
     for (child_of, mut vis) in &mut q_rings {
@@ -490,24 +585,35 @@ fn spawn_unit_tree(
     let h = def.height.to_num::<f32>();
     let r = def.radius.to_num::<f32>();
     let mat = rmats.unit_mat(mats, color, false);
-    let body_mesh = assets.team_mesh(meshes, kind, color, false);
+    let rig = assets.team_rig(meshes, kind, color);
+    let impostor_mesh = assets.team_impostor(meshes, kind, color);
+    let phase = (id % 1000) as f32 / 1000.0 * std::f32::consts::TAU;
     commands
         .spawn((
             RenderRoot(id),
             Transform::from_translation(world),
             Visibility::Inherited,
-            Lerp {
-                target: world,
-                yaw: 0.0,
-                bob_phase: (id % 1000) as f32 / 1000.0 * std::f32::consts::TAU,
-                bob: true,
-            },
+            Lerp { target: world, yaw: 0.0, bob_phase: phase, bob: true },
+            AnimState { kind, moving: false, combat: false, harvest: false, phase },
         ))
         .with_children(|p| {
+            for part in rig {
+                p.spawn((
+                    UnitBody { group: part.group, pivot: part.pivot, impostor_part: false },
+                    Mesh3d(part.mesh),
+                    MeshMaterial3d(mat.clone()),
+                    Transform::from_translation(part.pivot),
+                ));
+            }
             p.spawn((
-                UnitBody { kind, impostor: false },
-                Mesh3d(body_mesh),
+                UnitBody {
+                    group: crate::render::models::RigGroup::Body,
+                    pivot: Vec3::ZERO,
+                    impostor_part: true,
+                },
+                Mesh3d(impostor_mesh),
                 MeshMaterial3d(mat),
+                Visibility::Hidden,
             ));
             p.spawn((
                 SelRing,
@@ -525,6 +631,156 @@ fn spawn_unit_tree(
             ));
         })
         .id()
+}
+
+/// Procedural unit animation: walk leg-swing, melee/gather chop, ranged aim,
+/// wheel spin, idle sway — all from `AnimState` flags + wall time, zero sim
+/// involvement. Skipped entirely at impostor zoom.
+pub fn animate_units(
+    time: Res<Time>,
+    cam_state: Res<CameraState>,
+    q_roots: Query<(&AnimState, &Children)>,
+    mut q_parts: Query<(&UnitBody, &mut Transform)>,
+) {
+    use crate::render::models::RigGroup as G;
+    if cam_state.view_size >= IMPOSTOR_VIEW_SIZE {
+        return;
+    }
+    let t = time.elapsed_secs();
+    for (anim, children) in &q_roots {
+        let tp = t + anim.phase;
+        let mounted = matches!(anim.kind, UnitKind::Knight | UnitKind::HorseArcher | UnitKind::Mamluk);
+        let ranged = matches!(
+            anim.kind,
+            UnitKind::Archer | UnitKind::Crossbowman | UnitKind::HorseArcher
+        );
+        let walk = if anim.moving { (tp * 7.0).sin() } else { 0.0 };
+        let swing_amp = if mounted { 0.38 } else { 0.55 };
+        // chop / strike cycle: slow raise, sharp fall
+        let strike = {
+            let s = (tp * 4.0).sin();
+            if s > 0.0 { s * s } else { 0.0 }
+        };
+        for child in children.iter() {
+            let Ok((body, mut tf)) = q_parts.get_mut(child) else { continue };
+            if body.impostor_part {
+                continue;
+            }
+            let rot = match body.group {
+                G::Body => Quat::IDENTITY,
+                G::LegL => Quat::from_rotation_x(walk * swing_amp),
+                G::LegR => Quat::from_rotation_x(-walk * swing_amp),
+                G::ArmR => match anim.kind {
+                    UnitKind::Ram => Quat::IDENTITY, // handled via translation below
+                    UnitKind::Mangonel => {
+                        if anim.combat {
+                            Quat::from_rotation_x(strike * 1.25)
+                        } else {
+                            Quat::IDENTITY
+                        }
+                    }
+                    _ if anim.combat && !ranged => {
+                        Quat::from_rotation_x(0.35 - strike * 1.15)
+                    }
+                    _ if anim.harvest => Quat::from_rotation_x(0.3 - strike * 0.9),
+                    _ if anim.moving => Quat::from_rotation_x(-walk * 0.25),
+                    _ => Quat::from_rotation_x((tp * 1.6).sin() * 0.06),
+                },
+                G::ArmL => {
+                    if anim.combat && ranged {
+                        // raise the bow/crossbow to aim
+                        Quat::from_rotation_x(-0.45 - (tp * 3.0).sin().max(0.0) * 0.15)
+                    } else if anim.moving {
+                        Quat::from_rotation_x(walk * 0.25)
+                    } else {
+                        Quat::from_rotation_x((tp * 1.6 + 1.7).sin() * 0.06)
+                    }
+                }
+                g if g.is_wheel() => {
+                    if mounted {
+                        // four horse legs in diagonal trot pairs at their own hips
+                        if anim.moving {
+                            let pair = if matches!(g, G::WheelFL | G::WheelBR) { 1.0 } else { -1.0 };
+                            Quat::from_rotation_x((tp * 9.0).sin() * 0.45 * pair)
+                        } else {
+                            Quat::IDENTITY
+                        }
+                    } else if anim.moving {
+                        Quat::from_rotation_x(t * 5.0)
+                    } else {
+                        tf.rotation // freeze at current spoke angle
+                    }
+                }
+                _ => Quat::IDENTITY,
+            };
+            tf.rotation = rot;
+            // Ram: the slung beam jabs forward (+Z after the rig yaw) on attack.
+            if anim.kind == UnitKind::Ram && body.group == G::ArmR {
+                let jab = if anim.combat { strike * 0.45 } else { 0.0 };
+                tf.translation = body.pivot + Vec3::new(0.0, 0.0, jab);
+            }
+        }
+    }
+}
+
+/// Animal life: live game wanders between waypoints around its sim anchor,
+/// grazing at each stop; the first harvest tick flops it into a carcass at
+/// the anchor and it never moves again. Pure render — the sim only sees the
+/// static node.
+pub fn animate_animals(
+    time: Res<Time>,
+    field: Res<HeightField>,
+    mut q: Query<(&mut AnimalNode, &mut Lerp, &mut Mesh3d, &mut Transform)>,
+) {
+    let dt = time.delta_secs();
+    for (mut a, mut lerp, mut mesh, mut tf) in &mut q {
+        if a.carcass {
+            continue;
+        }
+        if a.remaining < a.full {
+            a.carcass = true;
+            lerp.bob = false;
+            lerp.target = a.anchor;
+            tf.translation = a.anchor;
+            mesh.0 = a.carcass_mesh.clone();
+            continue;
+        }
+        let here = tf.translation;
+        let d = a.waypoint - here;
+        let dist = (d.x * d.x + d.z * d.z).sqrt();
+        if dist > 0.08 {
+            // amble toward the waypoint; interpolate() eases the transform,
+            // so motion + turning stay smooth instead of stepping
+            let step = (0.9 * dt).min(dist);
+            let next = here + Vec3::new(d.x / dist, 0.0, d.z / dist) * step;
+            let y = height_at(&field, next.x, next.z);
+            lerp.target = Vec3::new(next.x, y, next.z);
+            lerp.yaw = d.x.atan2(d.z);
+            lerp.bob = true;
+            if mesh.0 != a.stand_mesh {
+                mesh.0 = a.stand_mesh.clone();
+            }
+        } else {
+            // grazing pause, then pick the next waypoint near the anchor
+            lerp.bob = false;
+            if mesh.0 != a.graze_mesh {
+                mesh.0 = a.graze_mesh.clone();
+            }
+            a.pause -= dt;
+            if a.pause <= 0.0 {
+                // xorshift32 — render-only randomness, never sim state
+                let mut s = a.rng;
+                s ^= s << 13;
+                s ^= s >> 17;
+                s ^= s << 5;
+                a.rng = s;
+                let ang = (s & 0xffff) as f32 / 65535.0 * std::f32::consts::TAU;
+                let rad = 0.5 + ((s >> 16) & 0xff) as f32 / 255.0 * 0.9;
+                a.waypoint = a.anchor + Vec3::new(ang.cos() * rad, 0.0, ang.sin() * rad);
+                a.pause = 1.0 + ((s >> 24) as f32 / 255.0) * 2.5;
+            }
+        }
+    }
 }
 
 /// Ease roots toward their sim targets, apply yaw + idle bob (TS loop body).
@@ -731,7 +987,15 @@ pub fn build_assets(meshes: &mut Assets<Mesh>) -> RenderAssets {
     }
     let fish_node = meshes.add(fish_node_mesh());
     RenderAssets {
-        units: UnitKind::ALL.iter().map(|k| meshes.add(crate::render::models::unit_mesh(*k))).collect(),
+        unit_rigs: UnitKind::ALL
+            .iter()
+            .map(|k| {
+                crate::render::models::unit_rig(*k)
+                    .into_iter()
+                    .map(|p| RigHandle { group: p.group, pivot: p.pivot, mesh: meshes.add(p.mesh) })
+                    .collect()
+            })
+            .collect(),
         impostors: UnitKind::ALL
             .iter()
             .map(|k| meshes.add(crate::render::models::unit_impostor_mesh(*k)))
@@ -740,7 +1004,7 @@ pub fn build_assets(meshes: &mut Assets<Mesh>) -> RenderAssets {
             .iter()
             .map(|k| meshes.add(crate::render::models::building_mesh(*k)))
             .collect(),
-        team_units: HashMap::new(),
+        team_rigs: HashMap::new(),
         team_impostors: HashMap::new(),
         nodes,
         fish_node,

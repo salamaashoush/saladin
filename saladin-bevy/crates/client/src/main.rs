@@ -290,6 +290,8 @@ fn main() {
             render::sync::rebuild_occupancy,
             render::sync::sync_render,
             render::sync::interpolate,
+            render::sync::animate_units,
+            render::sync::animate_animals,
             render::sync::update_hp_bars,
             render::sync::update_building_highlight,
             render::ghost::update_ghost,
@@ -499,13 +501,28 @@ fn main() {
 
 /// Screenshot harness only: conjure one of every unit kind in a line beside
 /// the keep so SALADIN_AUTO=units captures all unit models in one shot.
-fn auto_spawn_units(world: &mut World, mut done: Local<bool>) {
+fn auto_spawn_units(world: &mut World, mut stage: Local<u8>) {
     use saladin_protocol::{MatchId, NextEntityId, Owner, Pos, Unit};
     use saladin_sim::{GatherState, Stance, UnitKind, unit_def};
-    if *done {
+    let t = world.resource::<Time>().elapsed_secs();
+    // stage 2: at t=5 bite a chunk out of the conjured land food nodes so the
+    // carcass transition shows in screenshots
+    if *stage == 1 {
+        if t >= 5.0 {
+            *stage = 2;
+            let mut q = world.query::<&mut saladin_protocol::ResourceNode>();
+            for mut n in q.iter_mut(world) {
+                if n.res_type == saladin_sim::ResourceType::Food && n.remaining == 200 {
+                    n.remaining = 150;
+                }
+            }
+        }
         return;
     }
-    if world.resource::<Time>().elapsed_secs() < 3.0 {
+    if *stage != 0 {
+        return;
+    }
+    if t < 3.0 {
         return;
     }
     let keep = {
@@ -515,7 +532,7 @@ fn auto_spawn_units(world: &mut World, mut done: Local<bool>) {
             .map(|(p, _)| p.pos)
     };
     let Some(kp) = keep else { return };
-    *done = true;
+    *stage = 1;
     // One node of each kind beside the lineup, plus a food node pushed onto
     // the nearest water tile so the fish-school variant shows too.
     {
@@ -566,6 +583,11 @@ fn auto_spawn_units(world: &mut World, mut done: Local<bool>) {
             kp.x + saladin_sim::Fx::from_num(2 + (i as i32 % 5) * 2),
             kp.y + saladin_sim::Fx::from_num(3 + (i as i32 / 5) * 3),
         );
+        // odd kinds march back toward the keep — the straight-line harness
+        // walk has no pathfinding, and the keep's fair-start area is the only
+        // ground guaranteed to be land
+        let walking = i % 2 == 1;
+        let target = if walking { kp } else { pos };
         let id = world.resource_mut::<NextEntityId>().alloc();
         world.spawn((
             GameId(id),
@@ -574,8 +596,8 @@ fn auto_spawn_units(world: &mut World, mut done: Local<bool>) {
             Pos { pos, facing: saladin_sim::Fx::ZERO },
             Unit {
                 kind,
-                target: pos,
-                has_target: false,
+                target,
+                has_target: walking,
                 speed: def.speed,
                 gather_state: GatherState::Idle,
                 target_node: 0,
@@ -684,7 +706,8 @@ fn debug_layout(
 
 fn auto_screenshot(time: Res<Time>, mut done: Local<bool>, mut commands: Commands) {
     use bevy::render::view::window::screenshot::{Screenshot, save_to_disk};
-    if *done || time.elapsed_secs() < 6.0 {
+    let at = std::env::var("SALADIN_SHOT_AT").ok().and_then(|s| s.parse().ok()).unwrap_or(6.0);
+    if *done || time.elapsed_secs() < at {
         return;
     }
     *done = true;

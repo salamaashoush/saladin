@@ -152,6 +152,23 @@ Every gameplay fix ships with a test (`crates/protocol/tests/`).
   the card grid. Absolute bottom-anchored panels need explicit min_height.
 - Render = shared mesh+material handles per kind×team so Bevy
   auto-instances; sim→render reconciliation in `render/sync.rs`.
+- Units are RIGS, not single meshes: `unit_rig(kind)` returns parts tagged
+  `RigGroup` (Body/legs/arms/wheel slots) with joint pivots; mesh verts are
+  pivot-relative, one child entity per part (still instanced per
+  kind×team×group). `animate_units` drives walk/chop/aim/wheel-spin/gallop
+  procedurally from `AnimState` (mirrored sim flags: has_target,
+  attack_target, Harvesting) + wall time. Team color BAKES into white verts
+  (`bake_team`) — unit material stays white; a colored material would tint
+  wood/steel/skin green-plastic again. Units face +Z when moving — author
+  models forward = +Z (the ram is yawed in `unit_rig` because it was built
+  +X). Wheel axles along X. Mounted: wheel-group slots are the four horse
+  legs (per-leg hip pivots — a shared pivot sweeps sawhorse arcs); rider is
+  authored foot-size then shrunk `RIDER_SCALE` about the saddle.
+- Animal food nodes wander render-only (`AnimalNode` + `animate_animals`):
+  graze/stand mesh swap at waypoints around the SIM anchor (gatherers walk
+  to the anchor), and on the first harvest tick (remaining < first-seen)
+  they swap to a carcass mesh and stop forever — AoE-style. Never write
+  sim state from any of this.
 - The embedded `ui.ttf` (DejaVu) has no emoji glyphs AND the atlas pre-warm
   is ASCII-only — never put non-ASCII in UI strings (em dashes included).
 - Config (`~/.config/saladin/config.toml`): player name, relay address,
