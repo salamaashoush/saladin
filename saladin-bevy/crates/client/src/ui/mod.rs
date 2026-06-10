@@ -4,5 +4,6 @@
 pub mod actions;
 pub mod hud;
 pub mod menu;
+pub mod text_input;
 pub mod theme;
 pub mod widgets;

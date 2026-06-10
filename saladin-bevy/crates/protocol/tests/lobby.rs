@@ -31,14 +31,16 @@ fn tcp_relay_keeps_two_clients_in_sync() {
     spawn_host_relay(addr).expect("relay binds");
     std::thread::sleep(Duration::from_millis(100));
 
-    let mut t1 = TcpTransport::connect(addr).expect("client 1 connects");
-    let mut t2 = TcpTransport::connect(addr).expect("client 2 connects");
+    let mut t1 = TcpTransport::connect(addr, "A", JoinIntent::Direct).expect("client 1 connects");
+    let mut t2 = TcpTransport::connect(addr, "B", JoinIntent::Direct).expect("client 2 connects");
     wait_for(
         || t1.lobby().players.len() == 2 && t2.lobby().players.len() == 2,
         "both clients in the lobby roster",
     );
     assert_eq!(t1.lobby().host, t1.lobby().you, "first client hosts");
 
+    t2.set_ready(true);
+    wait_for(|| t1.lobby().all_ready(), "client 2 ready");
     t1.request_start();
     wait_for(|| t1.lobby().started && t2.lobby().started, "match start");
 

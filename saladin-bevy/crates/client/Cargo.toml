@@ -16,6 +16,11 @@ saladin-sim.workspace = true
 # the audio crates we don't use yet). The protocol/sim crates depend on the same
 # 0.18 bevy_* subcrates, which cargo unifies with this umbrella.
 bevy = { version = "0.19.0-rc.2", features = ["x11", "wayland"] }
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+local-ip-address = "0.6"
 
 [features]
 dev = ["bevy/dynamic_linking"]

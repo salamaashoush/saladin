@@ -7,9 +7,12 @@
 pub mod commands;
 pub mod components;
 pub mod net;
+pub mod net_msg;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod net_tcp;
 pub mod net_ws;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod relay_core;
 pub mod save;
 pub mod systems;
 
@@ -17,7 +20,11 @@ pub mod systems;
 pub use net_tcp::{TcpTransport, run_relay, spawn_host_relay};
 #[cfg(not(target_arch = "wasm32"))]
 pub use net_ws::run_relay_ws;
-pub use net_ws::{LobbyState, WsTransport};
+pub use net_msg::{
+    JoinIntent, LobbyPlayer, LobbyState, PROTOCOL_VERSION, ROOM_CODE_ALPHABET, ROOM_CODE_LEN,
+    RejectReason, normalize_room_code,
+};
+pub use net_ws::WsTransport;
 
 pub use commands::{CommandQueue, PlayerCommand, apply_commands, scatter_world_nodes};
 pub use components::*;

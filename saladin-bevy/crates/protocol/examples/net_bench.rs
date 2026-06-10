@@ -122,12 +122,15 @@ struct ClientReport {
 }
 
 fn run_client(addr: &str, is_host: bool, want_clients: usize, units: usize, ticks: u64) -> ClientReport {
-    let mut t = TcpTransport::connect(addr).expect("connect");
-    // lobby: host waits for the full roster then starts
+    let mut t = TcpTransport::connect(addr, "bench", JoinIntent::Direct).expect("connect");
+    if !is_host {
+        t.set_ready(true);
+    }
+    // lobby: host waits for the full ready roster then starts
     let deadline = Instant::now() + Duration::from_secs(30);
     while !t.lobby().started {
         assert!(Instant::now() < deadline, "lobby timed out");
-        if is_host && t.lobby().players.len() == want_clients {
+        if is_host && t.lobby().players.len() == want_clients && t.lobby().all_ready() {
             t.request_start();
         }
         std::thread::sleep(Duration::from_millis(5));

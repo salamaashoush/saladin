@@ -7,6 +7,7 @@ use bevy::diagnostic::FrameTimeDiagnosticsPlugin;
 use bevy::prelude::*;
 
 mod camera;
+mod config;
 mod environment;
 mod fx;
 mod input;
@@ -60,6 +61,19 @@ pub enum GameState {
 /// the lockstep transport) when the host starts the match.
 #[derive(Resource, Default)]
 pub struct LobbyConn(pub std::sync::Mutex<Option<saladin_protocol::TcpTransport>>);
+
+/// Everything `setup_world` needs for a multiplayer match, captured from the
+/// relay's `Welcome` by `lobby_poll`: the host's map pick plus this client's
+/// seat and (host only) the AI seats it must originate commands for.
+#[derive(Resource, Clone)]
+pub struct PendingMatch {
+    pub seed: u32,
+    pub preset: u8,
+    pub name: String,
+    pub faction: Faction,
+    pub is_host: bool,
+    pub ais: Vec<(u64, AiDifficulty, Faction)>,
+}
 
 /// Default port for hosted games.
 pub const HOST_PORT: u16 = 5000;
@@ -171,8 +185,23 @@ fn main() {
     .init_resource::<ui::hud::HudDigest>()
     .init_resource::<ui::hud::Toasts>()
     .init_resource::<ui::menu::MenuDigest>()
+    .init_resource::<ui::menu::MenuScreen>()
+    .init_resource::<ui::menu::MpForm>()
+    .init_resource::<ui::menu::MpError>()
+    .init_resource::<ui::menu::LobbyMode>()
+    .init_resource::<ui::text_input::CursorBlink>()
+    .insert_resource(config::load())
     .init_resource::<perf::PerfVisible>()
     .add_systems(Startup, (perf::setup_perf, input::spawn_drag_box, ui::widgets::prewarm_font_atlas))
+    .add_systems(
+        Update,
+        (
+            ui::text_input::focus_text_inputs,
+            ui::text_input::type_into_inputs,
+            ui::text_input::render_text_inputs,
+        )
+            .chain(),
+    )
     .init_resource::<LobbyConn>()
     // lobby (multiplayer pre-match)
     .add_systems(OnEnter(GameState::Lobby), ui::menu::setup_lobby)
@@ -186,7 +215,14 @@ fn main() {
     .add_systems(OnExit(GameState::Menu), ui::menu::cleanup_menu)
     .add_systems(
         Update,
-        (ui::menu::update_menu, ui::menu::menu_actions).run_if(in_state(GameState::Menu)),
+        (
+            ui::menu::sync_mp_form,
+            ui::menu::refresh_join_buttons,
+            ui::menu::update_menu,
+            ui::menu::menu_actions,
+        )
+            .chain()
+            .run_if(in_state(GameState::Menu)),
     )
     // match lifecycle
     .add_systems(
@@ -209,7 +245,7 @@ fn main() {
             minimap::update_minimap_viewport,
             minimap::minimap_click,
             input::pointer_input,
-            input::keyboard_input,
+            input::keyboard_input.run_if(not(ui::text_input::any_input_focused)),
             input::update_drag_box,
             selection::publish_selection,
         )
@@ -271,7 +307,11 @@ fn main() {
     // starts the match.
     if let Some(addr) = connect {
         let addr = if addr.contains(':') { addr } else { format!("{addr}:{HOST_PORT}") };
-        match saladin_protocol::TcpTransport::connect(&addr) {
+        let name = {
+            let user = app.world().resource::<config::UserConfig>();
+            if user.player_name.is_empty() { "Player".to_string() } else { user.player_name.clone() }
+        };
+        match saladin_protocol::TcpTransport::connect(&addr, &name, saladin_protocol::JoinIntent::Direct) {
             Ok(t) => {
                 app.insert_resource(LobbyConn(std::sync::Mutex::new(Some(t))));
                 app.insert_state(GameState::Lobby);
@@ -280,11 +320,40 @@ fn main() {
         }
     }
     let _ = multiplayer;
-    // SALADIN_AUTO=1: skip the menu and save a framebuffer screenshot at ~6s —
-    // headless render verification for CI / agent runs.
-    if std::env::var("SALADIN_AUTO").is_ok() {
-        app.insert_state(GameState::Playing);
-        app.add_systems(Update, auto_screenshot);
+    // SALADIN_AUTO: headless render verification for CI / agent runs — save a
+    // framebuffer screenshot to /tmp/saladin_shot.png at ~6s. Values:
+    //   1     skip the menu, shoot in-game
+    //   menu  shoot the main menu
+    //   mp    shoot the multiplayer screen
+    //   lobby host a LAN lobby and shoot it
+    match std::env::var("SALADIN_AUTO").as_deref() {
+        Ok("1") => {
+            app.insert_state(GameState::Playing);
+            app.add_systems(Update, auto_screenshot);
+        }
+        Ok("menu") => {
+            app.add_systems(Update, auto_screenshot);
+        }
+        Ok("mp") => {
+            app.insert_resource(ui::menu::MenuScreen::Multiplayer);
+            app.add_systems(Update, auto_screenshot);
+        }
+        Ok("lobby") => {
+            let bind = format!("0.0.0.0:{HOST_PORT}");
+            if saladin_protocol::spawn_host_relay(&bind).is_ok()
+                && let Ok(t) = saladin_protocol::TcpTransport::connect(
+                    &format!("127.0.0.1:{HOST_PORT}"),
+                    "Saladin",
+                    saladin_protocol::JoinIntent::Direct,
+                )
+            {
+                app.insert_resource(LobbyConn(std::sync::Mutex::new(Some(t))));
+                app.insert_resource(ui::menu::LobbyMode::LanHost { ips: config::lan_ips() });
+                app.insert_state(GameState::Lobby);
+            }
+            app.add_systems(Update, auto_screenshot);
+        }
+        _ => {}
     }
     app.run();
 }
@@ -311,8 +380,23 @@ fn lobby_poll(world: &mut World) {
         return;
     }
     let t = world.resource_mut::<LobbyConn>().0.lock().unwrap().take().unwrap();
-    let you = t.lobby().you;
-    println!("match starting — you are player {you}");
+    let l = t.lobby();
+    let you = l.you;
+    println!("match starting — you are player {you}, seed {}", l.seed);
+    let me = l.me().cloned();
+    world.insert_resource(PendingMatch {
+        seed: l.seed.max(1),
+        preset: l.preset,
+        name: me.as_ref().map(|m| m.name.clone()).unwrap_or_else(|| format!("Player {you}")),
+        faction: me.map(|m| m.faction).unwrap_or(Faction::Ayyubid),
+        is_host: l.is_host(),
+        ais: l
+            .players
+            .iter()
+            .filter(|p| p.is_ai)
+            .map(|p| (p.id, p.ai_difficulty, p.faction))
+            .collect(),
+    });
     world.insert_resource(LocalPlayer(you));
     world.insert_resource(Multiplayer(true));
     world.insert_resource(Net {
@@ -354,23 +438,44 @@ fn setup_world(world: &mut World) {
         eprintln!("save file missing/corrupt — starting a fresh skirmish");
     }
 
+    if multiplayer {
+        // the host's Welcome fixes the seed + roster for everyone
+        let pm = world.resource::<PendingMatch>().clone();
+        world.resource_mut::<WorldConfig>().seed = pm.seed;
+        scatter_world_nodes(world, 1);
+        let inp = &mut world.resource_mut::<LocalInput>().0;
+        // each client originates only its OWN join; the relay broadcasts it
+        inp.push(PlayerCommand::Join { player_id: local, name: pm.name.clone(), faction: pm.faction, match_id: 1 });
+        // AI seats are originated by the host alone (still deterministic: the
+        // commands travel the lockstep stream like any other input)
+        if pm.is_host {
+            for (id, difficulty, faction) in &pm.ais {
+                inp.push(PlayerCommand::AddAi {
+                    player_id: *id,
+                    host: local,
+                    difficulty: *difficulty,
+                    faction: *faction,
+                    match_id: 1,
+                });
+            }
+        }
+        return;
+    }
+
     world.resource_mut::<WorldConfig>().seed = cfg.seed.max(1);
     // worldgen is deterministic + identical on every client (seeded, not networked)
     scatter_world_nodes(world, 1);
     let enemy = enemy_faction(cfg.faction);
     let inp = &mut world.resource_mut::<LocalInput>().0;
-    // each client originates only its OWN join; the relay broadcasts it
     inp.push(PlayerCommand::Join { player_id: local, name: "You".into(), faction: cfg.faction, match_id: 1 });
-    if !multiplayer {
-        for i in 0..cfg.opponents {
-            inp.push(PlayerCommand::AddAi {
-                player_id: 1000 + i as u64,
-                host: local,
-                difficulty: cfg.difficulty,
-                faction: enemy,
-                match_id: 1,
-            });
-        }
+    for i in 0..cfg.opponents {
+        inp.push(PlayerCommand::AddAi {
+            player_id: 1000 + i as u64,
+            host: local,
+            difficulty: cfg.difficulty,
+            faction: enemy,
+            match_id: 1,
+        });
     }
 }
 

@@ -1,29 +1,76 @@
-//! Main menu + skirmish setup (port of Menu.tsx/MainMenu.tsx/SkirmishSetup.tsx/
-//! OpponentList.tsx): faction picker, opponent list with per-rival difficulty,
-//! map seed cycling, and the start button. Multiplayer lobby arrives with the
-//! websocket transport phase.
+//! Menu screens: Main → Singleplayer (skirmish setup) / Multiplayer (host LAN,
+//! join by IP, host internet room, join room) — plus the multiplayer lobby
+//! (names, factions, ready flags, AI seats, host map pick) and the game-over
+//! overlay. Screens rebuild via the digest pattern; text-input values live in
+//! `MpForm` so rebuilds never eat typed text.
 
+use super::text_input::{TextInput, text_input};
 use super::theme::*;
 use super::widgets::{Disabled, label};
-use crate::{GameState, MenuConfig, UiFont};
+use crate::{GameState, MenuConfig, UiFont, config};
 use bevy::prelude::*;
+use saladin_protocol::JoinIntent;
 use saladin_sim::{AiDifficulty, Faction};
 
 #[derive(Component)]
 pub struct MenuRoot;
 
+/// Which menu page is showing while `GameState::Menu`.
+#[derive(Resource, Default, Clone, Copy, PartialEq, Eq, Debug)]
+pub enum MenuScreen {
+    #[default]
+    Main,
+    Singleplayer,
+    Multiplayer,
+}
+
 /// Menu-only actions (kept separate from the HUD's `UiAction`).
 #[derive(Component, Clone, Copy, PartialEq)]
 pub enum MenuAction {
+    Goto(MenuScreen),
+    Quit,
     LoadGame,
-    HostGame,
+    // singleplayer setup
     Faction(Faction),
     AddOpponent,
     RemoveOpponent,
     Difficulty(AiDifficulty),
     CycleSeed,
     Start,
+    // multiplayer entries
+    HostLan,
+    JoinIp,
+    HostInternet,
+    JoinRoom,
 }
+
+/// Text-field backing store: survives digest rebuilds of the screen tree.
+#[derive(Resource, Default)]
+pub struct MpForm {
+    pub name: String,
+    pub ip: String,
+    pub room: String,
+}
+
+/// Last multiplayer connect error, shown on the multiplayer screen.
+#[derive(Resource, Default)]
+pub struct MpError(pub Option<String>);
+
+/// How we got into the lobby — drives what the lobby screen shows.
+#[derive(Resource, Clone, Default, PartialEq, Debug)]
+pub enum LobbyMode {
+    #[default]
+    Joined,
+    LanHost { ips: Vec<String> },
+    InternetHost,
+}
+
+#[derive(Component)]
+pub struct NameInput;
+#[derive(Component)]
+pub struct IpInput;
+#[derive(Component)]
+pub struct RoomInput;
 
 /// Digest for rebuild-on-change.
 #[derive(Resource, Default, PartialEq)]
@@ -44,21 +91,57 @@ pub fn setup_menu(mut commands: Commands) {
     ));
 }
 
-pub fn cleanup_menu(mut commands: Commands, q: Query<Entity, With<MenuRoot>>, mut digest: ResMut<MenuDigest>) {
+pub fn cleanup_menu(
+    mut commands: Commands,
+    q: Query<Entity, With<MenuRoot>>,
+    mut digest: ResMut<MenuDigest>,
+) {
     for e in &q {
         commands.entity(e).despawn();
     }
     digest.0.clear();
 }
 
+/// Mirror typed text back into `MpForm` so screen rebuilds restore it.
+pub fn sync_mp_form(
+    mut form: ResMut<MpForm>,
+    q_name: Query<&TextInput, (With<NameInput>, Changed<TextInput>)>,
+    q_ip: Query<&TextInput, (With<IpInput>, Changed<TextInput>)>,
+    q_room: Query<&TextInput, (With<RoomInput>, Changed<TextInput>)>,
+) {
+    // compare before writing: fresh-spawned inputs count as Changed, and a
+    // no-op write would dirty the resource and trigger a rebuild loop
+    if let Ok(t) = q_name.single()
+        && form.name != t.value
+    {
+        form.name = t.value.clone();
+    }
+    if let Ok(t) = q_ip.single()
+        && form.ip != t.value
+    {
+        form.ip = t.value.clone();
+    }
+    if let Ok(t) = q_room.single()
+        && form.room != t.value
+    {
+        form.room = t.value.clone();
+    }
+}
+
 pub fn update_menu(
     mut commands: Commands,
     font: Res<UiFont>,
     cfg: Res<MenuConfig>,
+    screen: Res<MenuScreen>,
+    form: Res<MpForm>,
+    err: Res<MpError>,
     mut digest: ResMut<MenuDigest>,
     q_root: Query<Entity, With<MenuRoot>>,
 ) {
-    let key = format!("{:?}|{:?}|{}|{}", cfg.faction, cfg.opponents, cfg.difficulty as u8, cfg.seed);
+    let key = format!(
+        "{:?}|{:?}|{:?}|{}|{}|{:?}",
+        *screen, cfg.faction, cfg.opponents, cfg.difficulty as u8, cfg.seed, err.0
+    );
     if digest.0 == key {
         return;
     }
@@ -73,51 +156,98 @@ pub fn update_menu(
                 row_gap: Val::Px(7.0),
                 padding: UiRect::all(Val::Px(16.0)),
                 border: UiRect::all(Val::Px(1.0)),
+                min_width: Val::Px(340.0),
                 ..default()
             },
             BackgroundColor(PANEL_BG),
             BorderColor::all(PANEL_BORDER),
         ))
-        .with_children(|p| {
-            label(p, &font, "SALADIN", 30.0, GOLD);
-            label(p, &font, "A real-time strategy of the Crusades", FONT_SM, TEXT_DIM);
-
-            label(p, &font, "Faction", FONT_SM, TEXT_DIM);
-            p.spawn((Node { flex_direction: FlexDirection::Row, column_gap: Val::Px(4.0), ..default() },))
-                .with_children(|p| {
-                    for (f, name) in [(Faction::Ayyubid, "Ayyubids"), (Faction::Crusader, "Crusaders")] {
-                        menu_button(p, &font, MenuAction::Faction(f), name, cfg.faction == f, false);
-                    }
-                });
-
-            label(p, &font, &format!("Opponents: {}", cfg.opponents), FONT_SM, TEXT_DIM);
-            p.spawn((Node { flex_direction: FlexDirection::Row, column_gap: Val::Px(4.0), ..default() },))
-                .with_children(|p| {
-                    menu_button(p, &font, MenuAction::RemoveOpponent, "-", false, cfg.opponents <= 1);
-                    menu_button(p, &font, MenuAction::AddOpponent, "+", false, cfg.opponents >= 7);
-                });
-
-            label(p, &font, "Difficulty", FONT_SM, TEXT_DIM);
-            p.spawn((Node { flex_direction: FlexDirection::Row, column_gap: Val::Px(4.0), ..default() },))
-                .with_children(|p| {
-                    for (d, name) in [
-                        (AiDifficulty::Easy, "Easy"),
-                        (AiDifficulty::Normal, "Normal"),
-                        (AiDifficulty::Hard, "Hard"),
-                    ] {
-                        menu_button(p, &font, MenuAction::Difficulty(d), name, cfg.difficulty == d, false);
-                    }
-                });
-
-            menu_button(p, &font, MenuAction::CycleSeed, &format!("Map seed: {}", cfg.seed), false, false);
-            menu_button(p, &font, MenuAction::Start, "Begin the Campaign", false, false);
-            if crate::save_exists() {
-                menu_button(p, &font, MenuAction::LoadGame, "Load Game", false, false);
-            }
-            menu_button(p, &font, MenuAction::HostGame, "Host Game (LAN)", false, false);
-            label(p, &font, "Friends join with: saladin-client connect <your-ip>", 10.0, TEXT_DIM);
+        .with_children(|p| match *screen {
+            MenuScreen::Main => main_screen(p, &font),
+            MenuScreen::Singleplayer => sp_screen(p, &font, &cfg),
+            MenuScreen::Multiplayer => mp_screen(p, &font, &form, &err),
         });
     });
+}
+
+fn main_screen(p: &mut ChildSpawnerCommands, font: &UiFont) {
+    label(p, font, "SALADIN", 30.0, GOLD);
+    label(p, font, "A real-time strategy of the Crusades", FONT_SM, TEXT_DIM);
+    menu_button(p, font, MenuAction::Goto(MenuScreen::Singleplayer), "Singleplayer", false, false);
+    menu_button(p, font, MenuAction::Goto(MenuScreen::Multiplayer), "Multiplayer", false, false);
+    menu_button(p, font, MenuAction::LoadGame, "Load Game", false, !crate::save_exists());
+    menu_button(p, font, MenuAction::Quit, "Quit", false, false);
+}
+
+fn sp_screen(p: &mut ChildSpawnerCommands, font: &UiFont, cfg: &MenuConfig) {
+    label(p, font, "SKIRMISH", FONT_LG, GOLD);
+
+    label(p, font, "Faction", FONT_SM, TEXT_DIM);
+    p.spawn((Node { flex_direction: FlexDirection::Row, column_gap: Val::Px(4.0), ..default() },))
+        .with_children(|p| {
+            for (f, name) in [(Faction::Ayyubid, "Ayyubids"), (Faction::Crusader, "Crusaders")] {
+                menu_button(p, font, MenuAction::Faction(f), name, cfg.faction == f, false);
+            }
+        });
+
+    label(p, font, &format!("Opponents: {}", cfg.opponents), FONT_SM, TEXT_DIM);
+    p.spawn((Node { flex_direction: FlexDirection::Row, column_gap: Val::Px(4.0), ..default() },))
+        .with_children(|p| {
+            menu_button(p, font, MenuAction::RemoveOpponent, "-", false, cfg.opponents <= 1);
+            menu_button(p, font, MenuAction::AddOpponent, "+", false, cfg.opponents >= 7);
+        });
+
+    label(p, font, "Difficulty", FONT_SM, TEXT_DIM);
+    p.spawn((Node { flex_direction: FlexDirection::Row, column_gap: Val::Px(4.0), ..default() },))
+        .with_children(|p| {
+            for (d, name) in [
+                (AiDifficulty::Easy, "Easy"),
+                (AiDifficulty::Normal, "Normal"),
+                (AiDifficulty::Hard, "Hard"),
+            ] {
+                menu_button(p, font, MenuAction::Difficulty(d), name, cfg.difficulty == d, false);
+            }
+        });
+
+    menu_button(p, font, MenuAction::CycleSeed, &format!("Map seed: {}", cfg.seed), false, false);
+    menu_button(p, font, MenuAction::Start, "Begin the Campaign", false, false);
+    menu_button(p, font, MenuAction::Goto(MenuScreen::Main), "Back", false, false);
+}
+
+fn mp_screen(p: &mut ChildSpawnerCommands, font: &UiFont, form: &MpForm, err: &MpError) {
+    label(p, font, "MULTIPLAYER", FONT_LG, GOLD);
+    if let Some(e) = &err.0 {
+        label(p, font, e, FONT_SM, WARN);
+    }
+
+    label(p, font, "Your name", FONT_SM, TEXT_DIM);
+    let name = text_input(p, font, TextInput::new(&form.name, "Player", 24), 220.0);
+    p.commands_mut().entity(name).insert(NameInput);
+
+    label(p, font, "Local network", FONT_SM, TEXT_DIM);
+    menu_button(p, font, MenuAction::HostLan, "Host LAN Game", false, false);
+    let ip = text_input(
+        p,
+        font,
+        TextInput::new(&form.ip, "host ip (e.g. 192.168.1.10)", 45)
+            .with_filter(|c| c.is_ascii_alphanumeric() || c == '.' || c == ':' || c == '-'),
+        220.0,
+    );
+    p.commands_mut().entity(ip).insert(IpInput);
+    menu_button(p, font, MenuAction::JoinIp, "Join by IP", false, form.ip.is_empty());
+
+    label(p, font, "Internet (via relay)", FONT_SM, TEXT_DIM);
+    menu_button(p, font, MenuAction::HostInternet, "Host Internet Game", false, false);
+    let room = text_input(
+        p,
+        font,
+        TextInput::new(&form.room, "room code", 8).with_filter(|c| c.is_ascii_alphanumeric()),
+        220.0,
+    );
+    p.commands_mut().entity(room).insert(RoomInput);
+    menu_button(p, font, MenuAction::JoinRoom, "Join Room", false, form.room.is_empty());
+
+    menu_button(p, font, MenuAction::Goto(MenuScreen::Main), "Back", false, false);
 }
 
 fn menu_button(
@@ -151,41 +281,122 @@ fn menu_button(
     .with_children(|p| label(p, font, title, FONT_MD, if disabled { TEXT_DIM } else { TEXT }));
 }
 
+/// The disabled-state of Join buttons depends on live typed text, which the
+/// digest doesn't track — refresh the digest when the emptiness flips.
+pub fn refresh_join_buttons(form: Res<MpForm>, mut digest: ResMut<MenuDigest>, screen: Res<MenuScreen>) {
+    if *screen != MenuScreen::Multiplayer || !form.is_changed() {
+        return;
+    }
+    digest.0.clear();
+}
+
+fn connect(
+    addr: &str,
+    name: &str,
+    intent: JoinIntent,
+) -> Result<saladin_protocol::TcpTransport, String> {
+    saladin_protocol::TcpTransport::connect(addr, name, intent).map_err(|e| match e.kind() {
+        std::io::ErrorKind::ConnectionRefused => format!("connection refused by {addr}"),
+        std::io::ErrorKind::TimedOut => format!("connection to {addr} timed out"),
+        _ => e.to_string(),
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
 pub fn menu_actions(
     q: Query<(&Interaction, &MenuAction, &Disabled), Changed<Interaction>>,
     mut cfg: ResMut<MenuConfig>,
+    mut user: ResMut<config::UserConfig>,
+    mut screen: ResMut<MenuScreen>,
+    mut form: ResMut<MpForm>,
+    mut err: ResMut<MpError>,
     conn: Res<crate::LobbyConn>,
+    mut mode: ResMut<LobbyMode>,
     mut next: ResMut<NextState<GameState>>,
+    mut app_exit: MessageWriter<AppExit>,
 ) {
     for (i, action, disabled) in &q {
         if *i != Interaction::Pressed || disabled.0 {
             continue;
         }
-        match *action {
+        match action {
+            MenuAction::Goto(s) => {
+                if *s == MenuScreen::Multiplayer && form.name.is_empty() {
+                    form.name = user.player_name.clone();
+                }
+                err.0 = None;
+                *screen = *s;
+            }
+            MenuAction::Quit => {
+                app_exit.write(AppExit::Success);
+            }
             MenuAction::LoadGame => {
                 cfg.load = true;
                 next.set(GameState::Playing);
             }
-            MenuAction::HostGame => {
-                let bind = format!("0.0.0.0:{}", crate::HOST_PORT);
-                match saladin_protocol::spawn_host_relay(&bind)
-                    .and_then(|_| saladin_protocol::TcpTransport::connect(&format!("127.0.0.1:{}", crate::HOST_PORT)))
-                {
-                    Ok(t) => {
-                        *conn.0.lock().unwrap() = Some(t);
-                        next.set(GameState::Lobby);
-                    }
-                    Err(e) => eprintln!("host failed: {e}"),
-                }
-            }
-            MenuAction::Faction(f) => cfg.faction = f,
+            MenuAction::Faction(f) => cfg.faction = *f,
             MenuAction::AddOpponent => cfg.opponents = (cfg.opponents + 1).min(7),
             MenuAction::RemoveOpponent => cfg.opponents = cfg.opponents.saturating_sub(1).max(1),
-            MenuAction::Difficulty(d) => cfg.difficulty = d,
-            MenuAction::CycleSeed => cfg.seed = cfg.seed.wrapping_mul(1664525).wrapping_add(1013904223) % 100_000,
+            MenuAction::Difficulty(d) => cfg.difficulty = *d,
+            MenuAction::CycleSeed => {
+                cfg.seed = cfg.seed.wrapping_mul(1664525).wrapping_add(1013904223) % 100_000
+            }
             MenuAction::Start => next.set(GameState::Playing),
+            MenuAction::HostLan | MenuAction::JoinIp | MenuAction::HostInternet | MenuAction::JoinRoom => {
+                remember_name(&mut user, &form);
+                let name = display_name(&user);
+                let (addr, intent, new_mode) = match action {
+                    MenuAction::HostLan => {
+                        let bind = format!("0.0.0.0:{}", crate::HOST_PORT);
+                        if let Err(e) = saladin_protocol::spawn_host_relay(&bind) {
+                            err.0 = Some(format!("could not host: {e}"));
+                            continue;
+                        }
+                        (
+                            format!("127.0.0.1:{}", crate::HOST_PORT),
+                            JoinIntent::Direct,
+                            LobbyMode::LanHost { ips: config::lan_ips() },
+                        )
+                    }
+                    MenuAction::JoinIp => {
+                        let ip = form.ip.trim();
+                        let addr = if ip.contains(':') { ip.to_string() } else { format!("{ip}:{}", crate::HOST_PORT) };
+                        (addr, JoinIntent::Direct, LobbyMode::Joined)
+                    }
+                    MenuAction::HostInternet => {
+                        (user.relay_addr.clone(), JoinIntent::CreateRoom, LobbyMode::InternetHost)
+                    }
+                    MenuAction::JoinRoom => (
+                        user.relay_addr.clone(),
+                        JoinIntent::JoinRoom { code: form.room.clone() },
+                        LobbyMode::Joined,
+                    ),
+                    _ => unreachable!(),
+                };
+                match connect(&addr, &name, intent) {
+                    Ok(t) => {
+                        *conn.0.lock().unwrap() = Some(t);
+                        *mode = new_mode;
+                        err.0 = None;
+                        next.set(GameState::Lobby);
+                    }
+                    Err(e) => err.0 = Some(e),
+                }
+            }
         }
     }
+}
+
+fn remember_name(user: &mut config::UserConfig, form: &MpForm) {
+    let name = form.name.trim();
+    if user.player_name != name {
+        user.player_name = name.to_string();
+        config::save(user);
+    }
+}
+
+fn display_name(user: &config::UserConfig) -> String {
+    if user.player_name.is_empty() { "Player".into() } else { user.player_name.clone() }
 }
 
 /// Game-over overlay with a back-to-menu button.
@@ -261,6 +472,11 @@ pub struct LobbyRoot;
 pub enum LobbyAction {
     Start,
     Cancel,
+    ToggleReady,
+    Faction(Faction),
+    AddAi,
+    RemoveAi(u64),
+    CycleSeed,
 }
 
 #[derive(Resource, Default)]
@@ -292,18 +508,26 @@ pub fn update_lobby(
     mut commands: Commands,
     font: Res<UiFont>,
     conn: Res<crate::LobbyConn>,
+    mode: Res<LobbyMode>,
     mut digest: ResMut<LobbyDigest>,
     q_root: Query<Entity, With<LobbyRoot>>,
 ) {
     let guard = conn.0.lock().unwrap();
     let Some(t) = guard.as_ref() else { return };
     let l = t.lobby();
-    let key = format!("{}|{}|{}|{:?}|{:?}", l.connected, l.you, l.host, l.players, l.error);
+    drop(guard);
+    let key = format!(
+        "{}|{}|{}|{:?}|{:?}|{:?}|{}|{}",
+        l.connected, l.you, l.host, l.players, l.error, l.room_code, l.seed, l.preset
+    );
     if digest.0 == key {
         return;
     }
     digest.0 = key;
     let Ok(root) = q_root.single() else { return };
+    let is_host = l.is_host();
+    let me_ready = l.me().map(|m| m.ready).unwrap_or(false);
+    let my_faction = l.me().map(|m| m.faction);
     commands.entity(root).despawn_related::<Children>();
     commands.entity(root).with_children(|p| {
         p.spawn((
@@ -313,6 +537,7 @@ pub fn update_lobby(
                 row_gap: Val::Px(7.0),
                 padding: UiRect::all(Val::Px(16.0)),
                 border: UiRect::all(Val::Px(1.0)),
+                min_width: Val::Px(380.0),
                 ..default()
             },
             BackgroundColor(PANEL_BG),
@@ -325,21 +550,110 @@ pub fn update_lobby(
             } else if !l.connected {
                 label(p, &font, "Connecting...", FONT_SM, TEXT_DIM);
             } else {
-                label(p, &font, &format!("You are player {}", l.you), FONT_SM, TEXT);
-                label(p, &font, &format!("Players in lobby: {}", l.players.len()), FONT_SM, TEXT);
-                for pid in &l.players {
-                    let tag = if *pid == l.host { " (host)" } else { "" };
-                    label(p, &font, &format!("Player {pid}{tag}"), FONT_SM, TEXT_DIM);
+                // how friends get in
+                match &*mode {
+                    LobbyMode::LanHost { ips } => {
+                        if ips.is_empty() {
+                            label(p, &font, "Friends join with your LAN IP", FONT_SM, TEXT_DIM);
+                        } else {
+                            label(p, &font, &format!("Friends join: {}", ips.join("  or  ")), FONT_SM, ACCENT);
+                        }
+                    }
+                    LobbyMode::InternetHost => {
+                        if let Some(code) = &l.room_code {
+                            label(p, &font, &format!("ROOM CODE: {code}"), FONT_LG, ACCENT);
+                            label(p, &font, "Friends pick Join Room and enter this code", FONT_SM, TEXT_DIM);
+                        }
+                    }
+                    LobbyMode::Joined => {}
                 }
-                if l.you == l.host {
-                    lobby_button(p, &font, LobbyAction::Start, "Start Match", l.players.len() < 2);
+
+                label(p, &font, &format!("Map seed: {}", l.seed), FONT_SM, TEXT_DIM);
+                if is_host {
+                    lobby_button(p, &font, LobbyAction::CycleSeed, "Cycle seed", false);
+                }
+
+                // roster
+                for pl in &l.players {
+                    let mut row = String::new();
+                    if pl.id == l.host && !pl.is_ai {
+                        row.push_str("[host] ");
+                    }
+                    row.push_str(&pl.name);
+                    row.push_str(match pl.faction {
+                        Faction::Ayyubid => " - Ayyubids",
+                        Faction::Crusader => " - Crusaders",
+                    });
+                    if pl.is_ai {
+                        row.push_str(&format!("  (AI {:?})", pl.ai_difficulty));
+                    } else if pl.ready || pl.id == l.host {
+                        row.push_str("  [ready]");
+                    } else {
+                        row.push_str("  [not ready]");
+                    }
+                    let color = if pl.id == l.you { TEXT } else { TEXT_DIM };
+                    p.spawn((Node { flex_direction: FlexDirection::Row, column_gap: Val::Px(6.0), ..default() },))
+                        .with_children(|p| {
+                            label(p, &font, &row, FONT_SM, color);
+                            if is_host && pl.is_ai {
+                                lobby_button(p, &font, LobbyAction::RemoveAi(pl.id), "x", false);
+                            }
+                        });
+                }
+
+                // your seat
+                label(p, &font, "Your faction", FONT_SM, TEXT_DIM);
+                p.spawn((Node { flex_direction: FlexDirection::Row, column_gap: Val::Px(4.0), ..default() },))
+                    .with_children(|p| {
+                        for (f, name) in [(Faction::Ayyubid, "Ayyubids"), (Faction::Crusader, "Crusaders")] {
+                            lobby_faction_button(p, &font, f, name, my_faction == Some(f));
+                        }
+                    });
+
+                if is_host {
+                    lobby_button(p, &font, LobbyAction::AddAi, "Add AI opponent", l.players.len() >= 8);
+                    let can_start = l.players.len() >= 2 && l.all_ready();
+                    lobby_button(p, &font, LobbyAction::Start, "Start Match", !can_start);
+                    if !l.all_ready() {
+                        label(p, &font, "Waiting for everyone to ready up...", FONT_SM, TEXT_DIM);
+                    }
                 } else {
+                    lobby_button(
+                        p,
+                        &font,
+                        LobbyAction::ToggleReady,
+                        if me_ready { "Ready! (click to unready)" } else { "Ready up" },
+                        false,
+                    );
                     label(p, &font, "Waiting for the host to start...", FONT_SM, TEXT_DIM);
                 }
             }
             lobby_button(p, &font, LobbyAction::Cancel, "Leave Lobby", false);
         });
     });
+}
+
+fn lobby_faction_button(
+    p: &mut ChildSpawnerCommands,
+    font: &UiFont,
+    f: Faction,
+    name: &str,
+    active: bool,
+) {
+    p.spawn((
+        Button,
+        LobbyAction::Faction(f),
+        Disabled(false),
+        Node {
+            padding: UiRect::axes(Val::Px(10.0), Val::Px(5.0)),
+            border: UiRect::all(Val::Px(1.0)),
+            justify_content: JustifyContent::Center,
+            ..default()
+        },
+        BackgroundColor(if active { BTN_BG_ACTIVE } else { BTN_BG }),
+        BorderColor::all(if active { ACCENT } else { PANEL_BORDER }),
+    ))
+    .with_children(|p| label(p, font, name, FONT_MD, TEXT));
 }
 
 fn lobby_button(
@@ -374,14 +688,32 @@ pub fn lobby_actions(
         if *i != Interaction::Pressed || disabled.0 {
             continue;
         }
+        let mut guard = conn.0.lock().unwrap();
+        let Some(t) = guard.as_mut() else { continue };
         match *action {
-            LobbyAction::Start => {
-                if let Some(t) = conn.0.lock().unwrap().as_mut() {
-                    t.request_start();
-                }
+            LobbyAction::Start => t.request_start(),
+            LobbyAction::ToggleReady => {
+                let ready = t.lobby().me().map(|m| m.ready).unwrap_or(false);
+                t.set_ready(!ready);
+            }
+            LobbyAction::Faction(f) => t.set_faction(f),
+            LobbyAction::AddAi => {
+                let l = t.lobby();
+                // alternate AI factions against the host's pick for variety
+                let f = match l.me().map(|m| m.faction) {
+                    Some(Faction::Ayyubid) => Faction::Crusader,
+                    _ => Faction::Ayyubid,
+                };
+                t.add_ai(AiDifficulty::Normal, f);
+            }
+            LobbyAction::RemoveAi(id) => t.remove_ai(id),
+            LobbyAction::CycleSeed => {
+                let l = t.lobby();
+                let seed = l.seed.wrapping_mul(1664525).wrapping_add(1013904223) % 100_000;
+                t.set_map(seed.max(1), l.preset);
             }
             LobbyAction::Cancel => {
-                *conn.0.lock().unwrap() = None;
+                *guard = None;
                 next.set(GameState::Menu);
             }
         }
