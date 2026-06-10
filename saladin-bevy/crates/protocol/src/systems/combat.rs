@@ -442,7 +442,7 @@ pub fn combat(
             };
             let dmg = effective_damage(&atk, armor);
             if def.ranged {
-                shots.0.push(Shot { from: a.pos, to: tpos });
+                shots.0.push(Shot { from: a.pos, to: tpos, stone: a.kind == UnitKind::Mangonel });
             }
             if t_is_unit {
                 let j = s.uidx[&target_id] as usize;
@@ -553,7 +553,7 @@ pub fn combat(
                 bonus_vs_armor: [Fx::ONE; 4],
             };
             let dmg = effective_damage(&atk, armor);
-            shots.0.push(Shot { from: b.pos, to: best_pos });
+            shots.0.push(Shot { from: b.pos, to: best_pos, stone: false });
             let old = s.uhp[j];
             let new = (old - dmg).max(0);
             s.uhp[j] = new;

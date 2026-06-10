@@ -116,6 +116,8 @@ pub struct StateHash(pub u64);
 pub struct Shot {
     pub from: saladin_sim::V2,
     pub to: saladin_sim::V2,
+    /// Mangonel boulder (ballistic arc + impact dust) instead of an arrow.
+    pub stone: bool,
 }
 
 /// Render-only firing events from the most recent combat tick. Replaces the old

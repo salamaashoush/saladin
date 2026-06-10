@@ -202,6 +202,73 @@ fn squashed(m: Mesh, y: f32) -> Mesh {
     m.transformed_by(Transform::from_scale(Vec3::new(1.0, y, 1.0)))
 }
 
+// ── building damage dressing ────────────────────────────────────────────────
+
+/// Flat dark scorch splat stamped onto damaged walls/roofs.
+pub fn scorch_mesh() -> Mesh {
+    merge(vec![
+        part(squashed(icosahedron(0.3), 0.18), lin(0x2e2922), xyz(0.0, 0.0, 0.0)),
+        part(squashed(icosahedron(0.18), 0.2), lin(0x1f1b16), xyz(0.2, 0.01, 0.12)),
+    ])
+}
+
+/// A small spill of broken masonry + one snapped beam for the heavy-damage
+/// stage.
+pub fn rubble_chunk_mesh() -> Mesh {
+    merge(vec![
+        part(
+            dodecahedron(0.16),
+            lin(0x8a8d91),
+            Transform::from_xyz(0.0, 0.08, 0.0).with_scale(Vec3::new(1.1, 0.6, 0.9)),
+        ),
+        part(icosahedron(0.1), lin(0x797d82), xyz(0.2, 0.05, 0.12)),
+        part(icosahedron(0.08), lin(0x94979b), xyz(-0.16, 0.04, 0.14)),
+        part(
+            boxy(0.07, 0.07, 0.5),
+            lin(0x5a3a22),
+            at_rot(0.05, 0.1, -0.05, Quat::from_euler(EulerRot::XYZ, 0.25, 0.7, 0.12)),
+        ),
+    ])
+}
+
+/// Collapsed-building mound: masonry heap + leaning charred beams. Scaled by
+/// the building's footprint at use.
+pub fn rubble_pile_mesh() -> Mesh {
+    let stone = lin(0x86898d);
+    let stone_dk = lin(0x74777b);
+    let beam = lin(0x4a3522);
+    let mut parts = vec![part(
+        squashed(icosahedron(0.55), 0.45),
+        stone,
+        xyz(0.0, 0.16, 0.0),
+    )];
+    for (i, &(x, z)) in [(0.35f32, 0.2f32), (-0.3, 0.3), (0.15, -0.38), (-0.38, -0.18), (0.45, -0.1)]
+        .iter()
+        .enumerate()
+    {
+        let c = if i % 2 == 0 { stone_dk } else { stone };
+        parts.push(part(
+            dodecahedron(0.16 + (i % 3) as f32 * 0.05),
+            c,
+            Transform::from_xyz(x, 0.1, z)
+                .with_rotation(Quat::from_rotation_y(i as f32 * 1.1))
+                .with_scale(Vec3::new(1.0, 0.65, 1.0)),
+        ));
+    }
+    // charred beams jutting out of the heap
+    parts.push(part(
+        boxy(0.09, 0.09, 0.9),
+        beam,
+        at_rot(0.1, 0.32, 0.0, Quat::from_euler(EulerRot::XYZ, 0.9, 0.4, 0.0)),
+    ));
+    parts.push(part(
+        boxy(0.08, 0.08, 0.7),
+        beam,
+        at_rot(-0.2, 0.26, 0.1, Quat::from_euler(EulerRot::XYZ, -0.7, -0.8, 0.0)),
+    ));
+    merge(parts)
+}
+
 // ── stone outcrops ───────────────────────────────────────────────────────────
 
 /// Weathered grey cluster: one big slab leaning, two companions, pebbles.

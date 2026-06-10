@@ -266,7 +266,107 @@ pub fn build_terrain_mesh(seed: u32) -> Mesh {
     let mut indices: Vec<u32> = Vec::with_capacity(((hi - lo) * (hi - lo) * 6) as usize);
     for ty in lo..hi {
         for tx in lo..hi {
+            // the playable interior is covered by the half-tile detail grid below
+            if tx >= 0 && ty >= 0 && tx < n && ty < n {
+                continue;
+            }
             let (a, b, c, d) = (idx(tx, ty), idx(tx + 1, ty), idx(tx + 1, ty + 1), idx(tx, ty + 1));
+            indices.extend_from_slice(&[a, c, b, a, d, c]);
+        }
+    }
+
+    // ── half-tile detail grid over the playable map ──────────────────────────
+    // Twice the vertex density inside [0, n] so biome edges, slope shading and
+    // patch mottling stop smearing across whole tiles at gameplay zoom. The
+    // apron stays coarse; boundary half-verts are forced onto the apron edge's
+    // straight line so the seam can't crack.
+    let m = (n * 2 + 1) as usize;
+    let base = positions.len() as u32;
+    let mut hgrid = vec![0f32; m * m];
+    let mut hnorm = vec![0f32; m * m];
+    let mut biomes = vec![Biome::DeepWater; m * m];
+    for iy in 0..m {
+        for ix in 0..m {
+            let fx = Fx::from_num(ix as f32 * 0.5);
+            let fy = Fx::from_num(iy as f32 * 0.5);
+            let s = sample_terrain(seed, fx, fy);
+            let i = iy * m + ix;
+            biomes[i] = s.biome;
+            hnorm[i] = s.height.to_num::<f32>();
+            hgrid[i] =
+                render_height(s.height, biome_height_emphasis(s.biome), seed_bias(seed).elev_gain)
+                    .to_num::<f32>();
+        }
+    }
+    // seam weld: edge half-verts sit exactly on the apron edge's interpolation
+    for iy in 0..m {
+        for ix in 0..m {
+            let on_edge = ix == 0 || iy == 0 || ix == m - 1 || iy == m - 1;
+            if !on_edge {
+                continue;
+            }
+            let i = iy * m + ix;
+            if ix % 2 == 1 {
+                hgrid[i] = (hgrid[i - 1] + hgrid[i + 1]) * 0.5;
+            } else if iy % 2 == 1 {
+                hgrid[i] = (hgrid[i - m] + hgrid[i + m]) * 0.5;
+            }
+        }
+    }
+    // bilinear shore distance over the per-tile field
+    let shore_at = |x: f32, y: f32| -> f32 {
+        let sx = (x - 0.5).clamp(0.0, (n - 1) as f32);
+        let sy = (y - 0.5).clamp(0.0, (n - 1) as f32);
+        let (x0, y0) = (sx.floor() as i32, sy.floor() as i32);
+        let (x1, y1) = ((x0 + 1).min(n - 1), (y0 + 1).min(n - 1));
+        let (tx, ty) = (sx - x0 as f32, sy - y0 as f32);
+        let d = |gx: i32, gy: i32| shore_dist[(gy * n + gx) as usize];
+        let a = d(x0, y0) * (1.0 - tx) + d(x1, y0) * tx;
+        let b = d(x0, y1) * (1.0 - tx) + d(x1, y1) * tx;
+        a * (1.0 - ty) + b * ty
+    };
+    for iy in 0..m {
+        for ix in 0..m {
+            let i = iy * m + ix;
+            let (x, y) = (ix as f32 * 0.5, iy as f32 * 0.5);
+            let h_raw = hgrid[i];
+            positions.push([x, h_raw * TERRAIN_SCALE, y]);
+
+            let biome = biomes[i];
+            let water = matches!(biome, Biome::DeepWater | Biome::ShallowWater | Biome::River);
+            let sw = swell(x.floor() as i32, y.floor() as i32);
+            let c = if water {
+                water_color(biome, shore_at(x, y), sw)
+            } else {
+                let patch = fbm(
+                    Fx::from_num(x) * Fx::lit("0.07"),
+                    Fx::from_num(y) * Fx::lit("0.07"),
+                    seed ^ 0x9a55,
+                    2,
+                )
+                .to_num::<f32>();
+                biome_color(biome, hnorm[i], h_raw, sea, patch)
+            };
+
+            // slope tint from grid neighbours (0.5-step gradient, scaled to
+            // match the apron's 1-tile contrast)
+            let hx = hgrid[i + if ix + 1 < m { 1 } else { 0 }];
+            let hz = hgrid[i + if iy + 1 < m { m } else { 0 }];
+            let lit = Vec3::new((h_raw - hx) * 2.0, 1.0, (h_raw - hz) * 2.0).normalize().dot(sun);
+            let shade_mul = 0.86 + lit.clamp(-1.0, 1.0) * 0.16;
+            let grain_amp = if water { 0.07 } else { 0.05 };
+            let dither =
+                (hash2(ix as i32, iy as i32, seed ^ 0x5eed).to_num::<f32>() - 0.5) * grain_amp;
+            let mul = (shade_mul + dither).max(0.55);
+            colors.push([c[0] * mul, c[1] * mul, c[2] * mul, 1.0]);
+        }
+    }
+    for ty in 0..(m - 1) {
+        for tx in 0..(m - 1) {
+            let a = base + (ty * m + tx) as u32;
+            let b = a + 1;
+            let d = a + m as u32;
+            let c = d + 1;
             indices.extend_from_slice(&[a, c, b, a, d, c]);
         }
     }

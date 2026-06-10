@@ -292,6 +292,7 @@ fn main() {
             render::sync::interpolate,
             render::sync::animate_units,
             render::sync::animate_animals,
+            render::sync::animate_fish,
             render::sync::animate_dying,
             render::sync::building_damage_fx,
             render::sync::tick_particles,
@@ -301,6 +302,7 @@ fn main() {
             render::ghost::update_demolish_overlay,
             fx::spawn_arrows,
             fx::fly_arrows,
+            fx::melee_strike_dust,
         )
             .run_if(in_state(GameState::Playing)),
     )
@@ -913,7 +915,7 @@ fn setup_visuals(
         ui_assets.ring.clone(),
         ui_assets.flag.clone(),
     ));
-    commands.insert_resource(fx::build_arrow_assets(&mut meshes));
+    commands.insert_resource(fx::build_arrow_assets(&mut meshes, &mut materials));
 }
 
 fn check_gameover(

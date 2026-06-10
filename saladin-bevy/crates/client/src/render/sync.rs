@@ -44,6 +44,9 @@ pub struct RenderAssets {
     pub carry_sack: Handle<Mesh>,
     pub puff: Handle<Mesh>,
     pub flame: Handle<Mesh>,
+    pub scorch: Handle<Mesh>,
+    pub rubble_chunk: Handle<Mesh>,
+    pub rubble_pile: Handle<Mesh>,
     pub ring: Handle<Mesh>,
     pub bar_quad: Handle<Mesh>,
     pub rout_quad: Handle<Mesh>,
@@ -231,6 +234,17 @@ pub struct AnimState {
     pub combat: bool,
     pub harvest: bool,
     pub carrying: bool,
+    pub phase: f32,
+    /// sim walk speed — leg swing cadence scales with it so cavalry gallops
+    /// faster than a trundling ram
+    pub stride: f32,
+}
+
+/// Fish-school food node: the school slowly circles its ripple rings and
+/// bobs with the water.
+#[derive(Component)]
+pub struct FishNode {
+    pub base_y: f32,
     pub phase: f32,
 }
 
@@ -487,6 +501,7 @@ pub fn sync_render(
                             span: def.footprint as f32 * 0.55,
                             roof: def.height.to_num::<f32>(),
                             acc: [0.0; 2],
+                            applied: 0,
                         },
                     ))
                     .id()
@@ -521,11 +536,8 @@ pub fn sync_render(
                 let variants = &assets.nodes[&n.res_type];
                 let roll = (gid.0 ^ (gid.0 >> 17)) as usize;
                 let idx = node_variant(n.res_type, world_cfg.seed, x, z, roll, variants.len());
-                let mesh = if n.res_type == ResourceType::Food && ground < -0.005 {
-                    assets.fish_node.clone()
-                } else {
-                    variants[idx].clone()
-                };
+                let fishy = n.res_type == ResourceType::Food && ground < -0.005;
+                let mesh = if fishy { assets.fish_node.clone() } else { variants[idx].clone() };
                 // Deterministic per-node yaw so herds/groves don't all face north.
                 let yaw = ((gid.0 >> 5) % 628) as f32 * 0.01;
                 let mut e = commands.spawn((
@@ -535,6 +547,9 @@ pub fn sync_render(
                     Transform::from_translation(world).with_rotation(Quat::from_rotation_y(yaw)),
                     Lerp { target: world, yaw, bob_phase: 0.0, turn: false, hop: false },
                 ));
+                if fishy {
+                    e.insert(FishNode { base_y: ground, phase: (gid.0 % 628) as f32 * 0.01 });
+                }
                 // Land game animals get a wander/graze/carcass brain.
                 if n.res_type == ResourceType::Food
                     && ground >= -0.005
@@ -603,11 +618,16 @@ pub fn sync_render(
     let gone: Vec<u64> = map.0.keys().copied().filter(|id| !seen.contains(id)).collect();
     for id in gone {
         if let Some(e) = map.0.remove(&id) {
-            let fall = q_roots.get(e).map(|(_, _, _, anim, _)| anim.is_some()).unwrap_or(false);
+            let (fall, rubble) = q_roots
+                .get(e)
+                .map(|(_, _, _, anim, dmg)| {
+                    (anim.is_some(), dmg.map(|d| (d.span * 1.4).max(0.9)).unwrap_or(0.0))
+                })
+                .unwrap_or((false, 0.0));
             commands
                 .entity(e)
                 .remove::<(Lerp, AnimState, AnimalNode)>()
-                .insert(Dying { t: 0.0, fall });
+                .insert(Dying { t: 0.0, fall, rubble });
         }
     }
 }
@@ -618,6 +638,9 @@ pub fn sync_render(
 pub struct Dying {
     pub t: f32,
     pub fall: bool,
+    /// >0 = a destroyed building: swap to the rubble pile at this scale and
+    /// linger before sinking.
+    pub rubble: f32,
 }
 
 /// Building health mirrored for staged damage FX: light smoke under 75%,
@@ -629,6 +652,8 @@ pub struct DamageState {
     pub roof: f32,
     /// spawn-accumulator phases (smoke, flame)
     pub acc: [f32; 2],
+    /// highest damage-dressing stage applied (1 = scorch, 2 = rubble+beams)
+    pub applied: u8,
 }
 
 /// Short-lived cosmetic particle (smoke puff / flame tongue).
@@ -646,12 +671,51 @@ pub fn building_damage_fx(
     mut commands: Commands,
     assets: Res<RenderAssets>,
     rmats: Res<RenderMaterials>,
-    mut q: Query<(&mut DamageState, &Transform)>,
+    mut q: Query<(Entity, &mut DamageState, &Transform)>,
 ) {
     let dt = time.delta_secs();
-    for (mut d, tf) in &mut q {
+    for (entity, mut d, tf) in &mut q {
         if d.ratio >= 0.75 {
             continue;
+        }
+        // Damage dressing: stamp scorch marks at 50%, strew rubble + snapped
+        // beams at 25%. Children of the root, so they collapse with it.
+        let want_stage = if d.ratio < 0.25 { 2 } else if d.ratio < 0.5 { 1 } else { 0 };
+        if want_stage > d.applied {
+            let from = d.applied;
+            d.applied = want_stage;
+            let span = d.span;
+            let salt0 = tf.translation.x * 3.3 + tf.translation.z * 9.1;
+            let h01 = |k: f32| ((k * 43758.5453).sin() * 0.5 + 0.5).abs();
+            let mat = rmats.node[&ResourceType::Stone].clone();
+            commands.entity(entity).with_children(|p| {
+                if from < 1 && want_stage >= 1 {
+                    for i in 0..3 {
+                        let k = salt0 + i as f32 * 2.7;
+                        let ang = h01(k) * std::f32::consts::TAU;
+                        p.spawn((
+                            Mesh3d(assets.scorch.clone()),
+                            MeshMaterial3d(mat.clone()),
+                            Transform::from_xyz(ang.cos() * span * 0.8, 0.06 + h01(k + 1.0) * 0.2, ang.sin() * span * 0.8)
+                                .with_rotation(Quat::from_rotation_y(ang))
+                                .with_scale(Vec3::splat(0.8 + span * 0.4)),
+                        ));
+                    }
+                }
+                if want_stage >= 2 {
+                    for i in 0..3 {
+                        let k = salt0 + 31.7 + i as f32 * 3.9;
+                        let ang = h01(k) * std::f32::consts::TAU;
+                        p.spawn((
+                            Mesh3d(assets.rubble_chunk.clone()),
+                            MeshMaterial3d(mat.clone()),
+                            Transform::from_xyz(ang.cos() * span * 1.05, 0.02, ang.sin() * span * 1.05)
+                                .with_rotation(Quat::from_rotation_y(h01(k + 5.0) * 6.28))
+                                .with_scale(Vec3::splat(0.9 + span * 0.3)),
+                        ));
+                    }
+                }
+            });
         }
         let heavy = d.ratio < 0.25;
         let smoke_rate = if heavy { 3.0 } else if d.ratio < 0.5 { 1.6 } else { 0.7 };
@@ -731,21 +795,31 @@ fn ease_out(k: f32) -> f32 {
 pub fn animate_dying(
     time: Res<Time>,
     mut commands: Commands,
-    mut q: Query<(Entity, &mut Dying, &mut Transform)>,
+    assets: Res<RenderAssets>,
+    mut q: Query<(Entity, &mut Dying, &mut Transform, Option<&mut Mesh3d>)>,
 ) {
     let dt = time.delta_secs();
-    for (e, mut d, mut tf) in &mut q {
+    for (e, mut d, mut tf, mesh) in &mut q {
         let prev = d.t;
+        // destroyed buildings collapse into a rubble pile that lingers
+        if d.rubble > 0.0 && prev == 0.0 {
+            if let Some(mut mesh) = mesh {
+                mesh.0 = assets.rubble_pile.clone();
+                tf.scale = Vec3::splat(d.rubble);
+                commands.entity(e).despawn_related::<Children>();
+            }
+        }
         d.t += dt;
         if d.fall {
             // incremental local pitch so the unit falls along its facing
             let pitch = |t: f32| -1.5 * ease_out(t / 0.45);
             tf.rotate_local_x(pitch(d.t) - pitch(prev));
         }
-        if d.t > 0.7 {
+        let (sink_at, end) = if d.rubble > 0.0 { (4.0, 7.0) } else { (0.7, 2.0) };
+        if d.t > sink_at {
             tf.translation.y -= 0.55 * dt;
         }
-        if d.t > 2.0 {
+        if d.t > end {
             commands.entity(e).despawn();
         }
     }
@@ -776,7 +850,15 @@ fn spawn_unit_tree(
             Transform::from_translation(world),
             Visibility::Inherited,
             Lerp { target: world, yaw: 0.0, bob_phase: phase, turn: true, hop: false },
-            AnimState { kind, moving: false, combat: false, harvest: false, carrying: false, phase },
+            AnimState {
+                kind,
+                moving: false,
+                combat: false,
+                harvest: false,
+                carrying: false,
+                phase,
+                stride: unit_def(kind).speed.to_num::<f32>(),
+            },
         ))
         .with_children(|p| {
             for part in rig {
@@ -854,7 +936,8 @@ pub fn animate_units(
             anim.kind,
             UnitKind::Archer | UnitKind::Crossbowman | UnitKind::HorseArcher
         );
-        let walk = if anim.moving { (tp * 7.0).sin() } else { 0.0 };
+        let gait = 3.5 + anim.stride * 2.4;
+        let walk = if anim.moving { (tp * gait).sin() } else { 0.0 };
         let swing_amp = if mounted { 0.38 } else { 0.55 };
         // chop / strike cycle: slow raise, sharp fall
         let strike = {
@@ -908,7 +991,7 @@ pub fn animate_units(
                         // four horse legs in diagonal trot pairs at their own hips
                         if anim.moving {
                             let pair = if matches!(g, G::WheelFL | G::WheelBR) { 1.0 } else { -1.0 };
-                            Quat::from_rotation_x((tp * 9.0).sin() * 0.45 * pair)
+                            Quat::from_rotation_x((tp * (gait * 1.35)).sin() * 0.45 * pair)
                         } else {
                             Quat::IDENTITY
                         }
@@ -989,6 +1072,15 @@ pub fn animate_animals(
                 a.pause = 1.0 + ((s >> 24) as f32 / 255.0) * 2.5;
             }
         }
+    }
+}
+
+/// Fish schools idle: slow circling spin + gentle bob on the water.
+pub fn animate_fish(time: Res<Time>, mut q: Query<(&FishNode, &mut Transform)>) {
+    let t = time.elapsed_secs();
+    for (f, mut tf) in &mut q {
+        tf.rotation = Quat::from_rotation_y((t * 0.35 + f.phase) % std::f32::consts::TAU);
+        tf.translation.y = f.base_y + ((t * 1.7 + f.phase).sin()) * 0.04;
     }
 }
 
@@ -1220,6 +1312,9 @@ pub fn build_assets(meshes: &mut Assets<Mesh>) -> RenderAssets {
         carry_sack: meshes.add(crate::render::models::units::carry_sack_mesh()),
         puff: meshes.add(Sphere::new(1.0).mesh().uv(6, 5)),
         flame: meshes.add(Cone { radius: 0.5, height: 1.0 }.mesh().resolution(5).build()),
+        scorch: meshes.add(crate::render::models::props::scorch_mesh()),
+        rubble_chunk: meshes.add(crate::render::models::props::rubble_chunk_mesh()),
+        rubble_pile: meshes.add(crate::render::models::props::rubble_pile_mesh()),
         // flat ground quad; the dashed-ring texture does the shaping
         ring: meshes.add(Plane3d::default().mesh().size(1.0, 1.0).build()),
         bar_quad: meshes.add(Mesh::from(Rectangle::new(BAR_W, BAR_H))),
