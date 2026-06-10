@@ -1,6 +1,6 @@
 use bevy_app::prelude::*;
 use saladin_sim::{
-    AiDifficulty, BuildingKind, Faction, Fx, GatherState, NEUTRAL_BIAS, ResourceType, START_FOOD,
+    AiDifficulty, BuildingKind, Faction, Fx, GatherState, ResourceType, START_FOOD,
     START_GOLD, START_STONE, START_WOOD, Stance, Stockpile, UnitKind, V2, ZERO, is_passable,
     unit_def,
 };
@@ -147,7 +147,7 @@ fn find_land_block(seed: u32) -> (i32, i32) {
 fn peasant_harvests_tree_and_banks_at_keep() {
     let mut app = build();
     let seed = 1u32;
-    app.world_mut().insert_resource(WorldConfig { seed, bias: NEUTRAL_BIAS });
+    app.world_mut().insert_resource(WorldConfig { seed });
     let (cx, cy) = find_land_block(seed);
     let f = |n: i32| Fx::from_num(n);
     let h = Fx::lit("0.5");
@@ -244,7 +244,7 @@ fn spawn_combatant(app: &mut App, id: u64, owner: u64, pos: V2) {
 #[test]
 fn combat_scales_to_hundreds_of_units() {
     let mut app = build();
-    app.world_mut().insert_resource(WorldConfig { seed: 1, bias: NEUTRAL_BIAS });
+    app.world_mut().insert_resource(WorldConfig { seed: 1 });
     let seed = 1;
     let f = |n: i32| Fx::from_num(n);
     let h = Fx::lit("0.5");
@@ -287,7 +287,7 @@ fn combat_scales_to_hundreds_of_units() {
 fn adjacent_enemies_fight() {
     let mut app = build();
     let seed = 1u32;
-    app.world_mut().insert_resource(WorldConfig { seed, bias: NEUTRAL_BIAS });
+    app.world_mut().insert_resource(WorldConfig { seed });
     let (cx, cy) = find_land_block(seed);
     let f = |n: i32| Fx::from_num(n);
     let h = Fx::lit("0.5");
@@ -308,7 +308,7 @@ fn adjacent_enemies_fight() {
 #[test]
 fn join_command_founds_base_and_economy_runs() {
     let mut app = build();
-    app.world_mut().insert_resource(WorldConfig { seed: 1, bias: NEUTRAL_BIAS });
+    app.world_mut().insert_resource(WorldConfig { seed: 1 });
     scatter_world_nodes(app.world_mut(), 1);
     app.world_mut().resource_mut::<CommandQueue>().0.push(PlayerCommand::Join {
         player_id: 1,
@@ -343,7 +343,7 @@ fn join_command_founds_base_and_economy_runs() {
 #[test]
 fn ai_bot_founds_base_and_trains() {
     let mut app = build();
-    app.world_mut().insert_resource(WorldConfig { seed: 1, bias: NEUTRAL_BIAS });
+    app.world_mut().insert_resource(WorldConfig { seed: 1 });
     scatter_world_nodes(app.world_mut(), 1);
     app.world_mut().resource_mut::<CommandQueue>().0.push(PlayerCommand::AddAi {
         player_id: 1000,

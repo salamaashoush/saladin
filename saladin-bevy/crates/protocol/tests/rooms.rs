@@ -4,7 +4,7 @@
 
 use bevy_app::prelude::*;
 use saladin_protocol::*;
-use saladin_sim::{AiDifficulty, Faction, NEUTRAL_BIAS};
+use saladin_sim::{AiDifficulty, Faction};
 use std::time::{Duration, Instant};
 
 fn build(seed: u32) -> App {
@@ -12,7 +12,7 @@ fn build(seed: u32) -> App {
     app.add_plugins(SimPlugin);
     app.finish();
     app.cleanup();
-    app.world_mut().insert_resource(WorldConfig { seed, bias: NEUTRAL_BIAS });
+    app.world_mut().insert_resource(WorldConfig { seed });
     scatter_world_nodes(app.world_mut(), 1);
     app
 }
@@ -230,6 +230,7 @@ fn peer_drop_mid_match_notifies_and_lockstep_continues() {
     std::thread::sleep(Duration::from_millis(100));
 
     let mut t1 = TcpTransport::connect(addr, "stays", JoinIntent::Direct).expect("t1");
+    wait_for(|| t1.lobby().you != 0, "t1 seated first (hosts)");
     let mut t2 = TcpTransport::connect(addr, "drops", JoinIntent::Direct).expect("t2");
     wait_for(|| t1.lobby().players.len() == 2, "roster");
     t2.set_ready(true);

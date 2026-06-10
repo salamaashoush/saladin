@@ -57,7 +57,7 @@ mod tests {
 
     #[test]
     fn cell_math() {
-        assert_eq!(CELLS_PER_ROW, 36);
+        assert_eq!(CELLS_PER_ROW, WORLD_SIZE / CELL_SIZE);
         assert_eq!(cell_of(crate::fx!("0"), crate::fx!("0")), 0);
         assert_eq!(cell_of(crate::fx!("4"), crate::fx!("0")), 1);
         // edge clamps in-range

@@ -5,6 +5,7 @@ pub mod actions;
 pub mod hud;
 pub mod menu;
 pub mod pause;
+pub mod preview;
 pub mod text_input;
 pub mod theme;
 pub mod widgets;

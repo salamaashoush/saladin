@@ -5,7 +5,7 @@
 use bevy_app::prelude::*;
 use saladin_protocol::*;
 use saladin_sim::{
-    BuildingKind, Faction, Fx, GatherState, NEUTRAL_BIAS, ResourceType, Stance, Stockpile,
+    BuildingKind, Faction, Fx, GatherState, ResourceType, Stance, Stockpile,
     UnitKind, V2, ZERO, building_def, dist2, is_passable, region_at, unit_def,
 };
 
@@ -14,7 +14,7 @@ fn build(seed: u32) -> App {
     app.add_plugins(SimPlugin);
     app.finish();
     app.cleanup();
-    app.world_mut().insert_resource(WorldConfig { seed, bias: NEUTRAL_BIAS });
+    app.world_mut().insert_resource(WorldConfig { seed });
     app
 }
 

@@ -9,7 +9,12 @@ use saladin_sim::*;
 /// `scatterNodes`). Reproducible: every client lays the same forest.
 pub fn scatter_world_nodes(world: &mut World, match_id: u64) {
     let seed = world.resource::<WorldConfig>().seed;
-    for n in scatter_nodes(seed, &node_kinds()) {
+    let mut nodes = scatter_nodes(seed, &node_kinds());
+    // fair starts: top every spawn slot up to the guaranteed minimum of
+    // wood/stone/food within FAIR_RADIUS — mirrored across players
+    let extra = fair_start_nodes(seed, &nodes, MAX_PLAYERS, TREE_WOOD, STONE_YIELD, FOOD_YIELD);
+    nodes.extend(extra);
+    for n in nodes {
         let id = world.resource_mut::<NextEntityId>().alloc();
         world.spawn((
             GameId(id),
@@ -129,7 +134,8 @@ pub(crate) fn found_player(world: &mut World, player_id: u64, name: &str, factio
         q.iter(world).filter(|(_, m)| m.0 == match_id).map(|(p, _)| p.slot as i32).collect()
     };
     let slot = alloc_slot(&used, MAX_PLAYERS as i32).max(0);
-    let corner = spawn_corner(slot as usize);
+    // snapped to the dominant landmass — same anchor the fair-start scatter used
+    let corner = start_point(seed, slot as usize);
 
     let occ = building_occupancy(world, true);
     let passable = |tx: i32, ty: i32| is_passable(seed, tx, ty) && !occ.contains(&tile_key(tx, ty));

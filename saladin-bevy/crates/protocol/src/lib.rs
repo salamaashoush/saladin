@@ -34,7 +34,7 @@ use bevy_app::prelude::*;
 use bevy_ecs::prelude::*;
 use bevy_ecs::schedule::ScheduleLabel;
 use bevy_platform::collections::HashMap;
-use saladin_sim::{AStar, MapBias, MatchStatus, NEUTRAL_BIAS, Rng, match_simulates};
+use saladin_sim::{AStar, MatchStatus, Rng, match_simulates};
 
 /// The schedule that advances the simulation exactly one base tick (50 ms of
 /// game time). Run it N times to simulate N ticks — deterministically.
@@ -90,16 +90,16 @@ impl GameIndex {
     }
 }
 
-/// World generation parameters, fixed at match start.
+/// World generation parameters, fixed at match start. The seed carries the
+/// map preset in its top bits (`saladin_sim::compose_seed`).
 #[derive(Resource, Clone, Debug)]
 pub struct WorldConfig {
     pub seed: u32,
-    pub bias: MapBias,
 }
 
 impl Default for WorldConfig {
     fn default() -> Self {
-        WorldConfig { seed: 1, bias: NEUTRAL_BIAS }
+        WorldConfig { seed: 1 }
     }
 }
 

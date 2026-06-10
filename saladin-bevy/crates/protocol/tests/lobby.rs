@@ -4,7 +4,7 @@
 
 use bevy_app::prelude::*;
 use saladin_protocol::*;
-use saladin_sim::{AiDifficulty, Faction, NEUTRAL_BIAS};
+use saladin_sim::{AiDifficulty, Faction};
 use std::time::{Duration, Instant};
 
 fn build() -> App {
@@ -12,7 +12,7 @@ fn build() -> App {
     app.add_plugins(SimPlugin);
     app.finish();
     app.cleanup();
-    app.world_mut().insert_resource(WorldConfig { seed: 1, bias: NEUTRAL_BIAS });
+    app.world_mut().insert_resource(WorldConfig { seed: 1 });
     scatter_world_nodes(app.world_mut(), 1);
     app
 }
@@ -32,6 +32,9 @@ fn tcp_relay_keeps_two_clients_in_sync() {
     std::thread::sleep(Duration::from_millis(100));
 
     let mut t1 = TcpTransport::connect(addr, "A", JoinIntent::Direct).expect("client 1 connects");
+    // seat order = handshake order; wait for client 1's seat before joining
+    // (mirrors the real flow: the host sits in the lobby before anyone joins)
+    wait_for(|| t1.lobby().you != 0, "client 1 seated");
     let mut t2 = TcpTransport::connect(addr, "B", JoinIntent::Direct).expect("client 2 connects");
     wait_for(
         || t1.lobby().players.len() == 2 && t2.lobby().players.len() == 2,

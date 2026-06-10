@@ -35,11 +35,11 @@ pub fn node_kinds() -> Vec<ScatterRule> {
     let food_fish = (FOOD_NODES as f64 * 0.4).round() as i32;
     let food_game = FOOD_NODES - food_fish;
     vec![
-        ScatterRule { res_type: ResourceType::Wood, count: TREE_COUNT, yield_: TREE_WOOD, density: tree_density, coastal_only: false },
-        ScatterRule { res_type: ResourceType::Stone, count: STONE_NODES, yield_: STONE_YIELD, density: rock_density, coastal_only: false },
-        ScatterRule { res_type: ResourceType::Food, count: food_game, yield_: FOOD_YIELD, density: game_density, coastal_only: false },
-        ScatterRule { res_type: ResourceType::Food, count: food_fish, yield_: FOOD_YIELD, density: fish_density, coastal_only: true },
-        ScatterRule { res_type: ResourceType::Gold, count: GOLD_NODES, yield_: GOLD_YIELD, density: gold_density, coastal_only: false },
+        ScatterRule { res_type: ResourceType::Wood, count: TREE_COUNT, yield_: TREE_WOOD, density: tree_density, coastal_only: false, clustered: true },
+        ScatterRule { res_type: ResourceType::Stone, count: STONE_NODES, yield_: STONE_YIELD, density: rock_density, coastal_only: false, clustered: false },
+        ScatterRule { res_type: ResourceType::Food, count: food_game, yield_: FOOD_YIELD, density: game_density, coastal_only: false, clustered: false },
+        ScatterRule { res_type: ResourceType::Food, count: food_fish, yield_: FOOD_YIELD, density: fish_density, coastal_only: true, clustered: false },
+        ScatterRule { res_type: ResourceType::Gold, count: GOLD_NODES, yield_: GOLD_YIELD, density: gold_density, coastal_only: false, clustered: false },
     ]
 }
 

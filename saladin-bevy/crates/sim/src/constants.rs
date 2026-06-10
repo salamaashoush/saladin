@@ -1,7 +1,7 @@
 use crate::math::Fx;
 
 /// World is a square of `WORLD_SIZE` tiles (TILE == 1 world unit).
-pub const WORLD_SIZE: i32 = 144;
+pub const WORLD_SIZE: i32 = 288;
 pub const TILE: Fx = crate::fx!("1");
 
 // Scheduled-system rates (ms) and their derived dt in seconds.
@@ -24,13 +24,13 @@ pub const DEPOSIT_RANGE: Fx = crate::fx!("1.1");
 pub const HARVEST_TIME: Fx = crate::fx!("1.2");
 
 // Resource node counts per map and per-node yields.
-pub const TREE_COUNT: i32 = 540;
+pub const TREE_COUNT: i32 = 2160;
 pub const TREE_WOOD: i32 = 120;
-pub const STONE_NODES: i32 = 135;
+pub const STONE_NODES: i32 = 540;
 pub const STONE_YIELD: i32 = 200;
-pub const GOLD_NODES: i32 = 40;
+pub const GOLD_NODES: i32 = 160;
 pub const GOLD_YIELD: i32 = 140;
-pub const FOOD_NODES: i32 = 90;
+pub const FOOD_NODES: i32 = 360;
 pub const FOOD_YIELD: i32 = 160;
 
 // Food economy: every owned unit eats FOOD_PER_UNIT per economy tick; an empty
@@ -49,5 +49,5 @@ pub const START_GOLD: i32 = 0;
 pub const PEASANT_COST: i32 = 20;
 
 pub const MAX_PLAYERS: usize = 8;
-pub const SPAWN_MARGIN: i32 = 24;
+pub const SPAWN_MARGIN: i32 = 40;
 pub const SPAWN_CLUSTER: Fx = crate::fx!("2.2");

@@ -19,6 +19,9 @@ pub enum Biome {
     Mountain = 9,
     Snow = 10,
     Oasis = 11,
+    River = 12,
+    Ford = 13,
+    Cliff = 14,
 }
 
 /// Cosmetic prop kinds the client scatters per biome (client-only dressing).
@@ -71,7 +74,7 @@ const fn d(tree: Fx, rock: Fx, game: Fx, fish: Fx, gold: Fx) -> Density {
 }
 const NONE_DENS: Density = d(Z, Z, Z, Z, Z);
 
-const BIOME_DEFS: [BiomeDef; 12] = [
+const BIOME_DEFS: [BiomeDef; 15] = [
     // DeepWater
     BiomeDef {
         label: "Sea",
@@ -215,6 +218,43 @@ const BIOME_DEFS: [BiomeDef; 12] = [
         height_emphasis: crate::fx!("0.7"),
         decoration: DecoSpec { kind: Decoration::Palm, density: crate::fx!("0.3") },
         density: d(crate::fx!("0.45"), Z, crate::fx!("0.35"), crate::fx!("0.2"), Z),
+    },
+    // River — carved freshwater channel; impassable except at fords
+    BiomeDef {
+        label: "River",
+        color: 0x3e8fb5,
+        shade: 0x2c7299,
+        passable: false,
+        buildable: false,
+        move_cost_mul: Fx::MAX,
+        height_emphasis: crate::fx!("1"),
+        decoration: DecoSpec { kind: Decoration::Reeds, density: crate::fx!("0.12") },
+        density: d(Z, Z, Z, crate::fx!("0.5"), Z),
+    },
+    // Ford — shallow river crossing: walkable, slow, never buildable (keeps the
+    // chokepoint a chokepoint instead of a tower platform)
+    BiomeDef {
+        label: "Ford",
+        color: 0x9ec1a8,
+        shade: 0x7ba287,
+        passable: true,
+        buildable: false,
+        move_cost_mul: crate::fx!("1.6"),
+        height_emphasis: crate::fx!("0.5"),
+        decoration: DecoSpec { kind: Decoration::Reeds, density: crate::fx!("0.08") },
+        density: NONE_DENS,
+    },
+    // Cliff — an elevation step too steep to walk; ramps interrupt it
+    BiomeDef {
+        label: "Cliff",
+        color: 0x6e6258,
+        shade: 0x4a423b,
+        passable: false,
+        buildable: false,
+        move_cost_mul: Fx::MAX,
+        height_emphasis: crate::fx!("2.2"),
+        decoration: DecoSpec { kind: Decoration::Boulder, density: crate::fx!("0.2") },
+        density: d(Z, crate::fx!("0.3"), Z, Z, crate::fx!("0.2")),
     },
 ];
 

@@ -9,7 +9,7 @@
 use bevy_app::prelude::*;
 use saladin_protocol::*;
 use saladin_sim::{
-    Faction, Fx, GatherState, NEUTRAL_BIAS, ResourceType, Stance, Stockpile, UnitKind, V2, ZERO,
+    Faction, Fx, GatherState, ResourceType, Stance, Stockpile, UnitKind, V2, ZERO,
     is_passable, unit_def,
 };
 use std::time::{Duration, Instant};
@@ -19,7 +19,7 @@ fn build_world() -> App {
     app.add_plugins(SimPlugin);
     app.finish();
     app.cleanup();
-    app.world_mut().insert_resource(WorldConfig { seed: 1, bias: NEUTRAL_BIAS });
+    app.world_mut().insert_resource(WorldConfig { seed: 1 });
     scatter_world_nodes(app.world_mut(), 1);
     app
 }

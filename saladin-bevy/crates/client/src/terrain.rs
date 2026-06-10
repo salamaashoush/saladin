@@ -3,6 +3,7 @@ use bevy::mesh::{Indices, PrimitiveTopology};
 use bevy::prelude::*;
 use saladin_sim::{
     Biome, Fx, WORLD_SIZE, biome_def, biome_height_emphasis, hash2, render_height, sample_terrain,
+    seed_bias,
 };
 
 /// Precomputed per-tile render heights — sampled once at match start so the hot
@@ -19,7 +20,7 @@ const TERRAIN_SCALE: f32 = 0.5;
 
 fn sample_height(seed: u32, x: Fx, y: Fx) -> f32 {
     let s = sample_terrain(seed, x, y);
-    render_height(s.height, biome_height_emphasis(s.biome), Fx::ONE).to_num::<f32>() * TERRAIN_SCALE
+    render_height(s.height, biome_height_emphasis(s.biome), seed_bias(seed).elev_gain).to_num::<f32>() * TERRAIN_SCALE
 }
 
 pub fn build_height_field(seed: u32) -> HeightField {
@@ -64,7 +65,7 @@ const SEA_LEVEL: f32 = 0.38;
 /// this so contrast matches the source look regardless of TERRAIN_SCALE.
 fn raw_height(seed: u32, vx: i32, vy: i32) -> f32 {
     let s = sample_terrain(seed, Fx::from_num(vx), Fx::from_num(vy));
-    render_height(s.height, biome_height_emphasis(s.biome), Fx::ONE).to_num::<f32>()
+    render_height(s.height, biome_height_emphasis(s.biome), seed_bias(seed).elev_gain).to_num::<f32>()
 }
 
 /// Biome base blended toward its shade by elevation, plus snow-cap whitening
@@ -99,7 +100,7 @@ pub fn build_terrain_mesh(seed: u32) -> Mesh {
         for vx in 0..=n {
             let s = sample_terrain(seed, Fx::from_num(vx), Fx::from_num(vy));
             let h_raw =
-                render_height(s.height, biome_height_emphasis(s.biome), Fx::ONE).to_num::<f32>();
+                render_height(s.height, biome_height_emphasis(s.biome), seed_bias(seed).elev_gain).to_num::<f32>();
             positions.push([vx as f32, h_raw * TERRAIN_SCALE, vy as f32]);
 
             let c = biome_color(s.biome, s.height.to_num::<f32>(), h_raw);

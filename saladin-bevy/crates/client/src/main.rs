@@ -87,13 +87,22 @@ pub struct MenuConfig {
     pub faction: Faction,
     pub difficulty: AiDifficulty,
     pub seed: u32,
+    /// Index into `saladin_sim::MAP_PRESETS` (travels in the seed's top bits).
+    pub preset: u8,
     /// Start the next match by restoring the save file instead of a fresh world.
     pub load: bool,
 }
 
 impl Default for MenuConfig {
     fn default() -> Self {
-        MenuConfig { opponents: 1, faction: Faction::Ayyubid, difficulty: AiDifficulty::Normal, seed: 1, load: false }
+        MenuConfig {
+            opponents: 1,
+            faction: Faction::Ayyubid,
+            difficulty: AiDifficulty::Normal,
+            seed: 1,
+            preset: 0,
+            load: false,
+        }
     }
 }
 
@@ -197,6 +206,7 @@ fn main() {
     .init_resource::<ui::menu::MpError>()
     .init_resource::<ui::menu::LobbyMode>()
     .init_resource::<ui::text_input::CursorBlink>()
+    .init_resource::<ui::preview::PreviewCache>()
     .init_resource::<perf::PerfVisible>()
     .add_systems(Startup, (perf::setup_perf, input::spawn_drag_box, ui::widgets::prewarm_font_atlas))
     .add_systems(
@@ -360,9 +370,24 @@ fn main() {
     //   menu  shoot the main menu
     //   mp    shoot the multiplayer screen
     //   lobby host a LAN lobby and shoot it
+    // SALADIN_SEED / SALADIN_PRESET override the menu defaults (screenshot runs)
+    if let Ok(s) = std::env::var("SALADIN_SEED")
+        && let Ok(seed) = s.parse::<u32>()
+    {
+        app.world_mut().resource_mut::<MenuConfig>().seed = seed;
+    }
+    if let Ok(s) = std::env::var("SALADIN_PRESET")
+        && let Ok(preset) = s.parse::<u8>()
+    {
+        app.world_mut().resource_mut::<MenuConfig>().preset = preset;
+    }
     match std::env::var("SALADIN_AUTO").as_deref() {
         Ok("1") => {
             app.insert_state(GameState::Playing);
+            app.add_systems(Update, auto_screenshot);
+        }
+        Ok("sp") => {
+            app.insert_resource(ui::menu::MenuScreen::Singleplayer);
             app.add_systems(Update, auto_screenshot);
         }
         Ok("menu") => {
@@ -495,7 +520,7 @@ fn setup_world(world: &mut World) {
     if multiplayer {
         // the host's Welcome fixes the seed + roster for everyone
         let pm = world.resource::<PendingMatch>().clone();
-        world.resource_mut::<WorldConfig>().seed = pm.seed;
+        world.resource_mut::<WorldConfig>().seed = saladin_sim::compose_seed(pm.seed.max(1), pm.preset);
         scatter_world_nodes(world, 1);
         let inp = &mut world.resource_mut::<LocalInput>().0;
         // each client originates only its OWN join; the relay broadcasts it
@@ -516,7 +541,7 @@ fn setup_world(world: &mut World) {
         return;
     }
 
-    world.resource_mut::<WorldConfig>().seed = cfg.seed.max(1);
+    world.resource_mut::<WorldConfig>().seed = saladin_sim::compose_seed(cfg.seed.max(1), cfg.preset);
     // worldgen is deterministic + identical on every client (seeded, not networked)
     scatter_world_nodes(world, 1);
     let enemy = enemy_faction(cfg.faction);

@@ -37,6 +37,7 @@ pub enum MenuAction {
     RemoveOpponent,
     Difficulty(AiDifficulty),
     CycleSeed,
+    Preset(u8),
     Start,
     // multiplayer entries
     HostLan,
@@ -140,14 +141,17 @@ pub fn update_menu(
     user: Res<config::UserConfig>,
     mut digest: ResMut<MenuDigest>,
     q_root: Query<Entity, With<MenuRoot>>,
+    mut images: ResMut<Assets<Image>>,
+    mut previews: ResMut<super::preview::PreviewCache>,
 ) {
     let key = format!(
-        "{:?}|{:?}|{:?}|{}|{}|{:?}|{}|{:.2}|{:.2}",
+        "{:?}|{:?}|{:?}|{}|{}|{}|{:?}|{}|{:.2}|{:.2}",
         *screen,
         cfg.faction,
         cfg.opponents,
         cfg.difficulty as u8,
         cfg.seed,
+        cfg.preset,
         err.0,
         user.edge_scroll,
         user.ui_scale,
@@ -175,7 +179,11 @@ pub fn update_menu(
         ))
         .with_children(|p| match *screen {
             MenuScreen::Main => main_screen(p, &font),
-            MenuScreen::Singleplayer => sp_screen(p, &font, &cfg),
+            MenuScreen::Singleplayer => {
+                let seed = saladin_sim::compose_seed(cfg.seed.max(1), cfg.preset);
+                let preview = super::preview::preview_handle(&mut previews, &mut images, seed);
+                sp_screen(p, &font, &cfg, preview);
+            }
             MenuScreen::Multiplayer => mp_screen(p, &font, &form, &err),
             MenuScreen::Settings => {
                 label(p, &font, "SETTINGS", FONT_LG, GOLD);
@@ -196,7 +204,7 @@ fn main_screen(p: &mut ChildSpawnerCommands, font: &UiFont) {
     menu_button(p, font, MenuAction::Quit, "Quit", false, false);
 }
 
-fn sp_screen(p: &mut ChildSpawnerCommands, font: &UiFont, cfg: &MenuConfig) {
+fn sp_screen(p: &mut ChildSpawnerCommands, font: &UiFont, cfg: &MenuConfig, preview: Handle<Image>) {
     label(p, font, "SKIRMISH", FONT_LG, GOLD);
 
     label(p, font, "Faction", FONT_SM, TEXT_DIM);
@@ -226,7 +234,22 @@ fn sp_screen(p: &mut ChildSpawnerCommands, font: &UiFont, cfg: &MenuConfig) {
             }
         });
 
-    menu_button(p, font, MenuAction::CycleSeed, &format!("Map seed: {}", cfg.seed), false, false);
+    label(p, font, "Map", FONT_SM, TEXT_DIM);
+    p.spawn((Node { flex_direction: FlexDirection::Row, column_gap: Val::Px(4.0), ..default() },))
+        .with_children(|p| {
+            for (i, preset) in saladin_sim::MAP_PRESETS.iter().enumerate() {
+                menu_button(p, font, MenuAction::Preset(i as u8), preset.label, cfg.preset == i as u8, false);
+            }
+        });
+    label(
+        p,
+        font,
+        saladin_sim::map_preset_by_index(cfg.preset as i32).description,
+        10.0,
+        TEXT_DIM,
+    );
+    super::preview::preview_node(p, preview);
+    menu_button(p, font, MenuAction::CycleSeed, &format!("New seed (now: {})", cfg.seed), false, false);
     menu_button(p, font, MenuAction::Start, "Begin the Campaign", false, false);
     menu_button(p, font, MenuAction::Goto(MenuScreen::Main), "Back", false, false);
 }
@@ -358,6 +381,7 @@ pub fn menu_actions(
             MenuAction::CycleSeed => {
                 cfg.seed = cfg.seed.wrapping_mul(1664525).wrapping_add(1013904223) % 100_000
             }
+            MenuAction::Preset(i) => cfg.preset = *i,
             MenuAction::Start => next.set(GameState::Loading),
             MenuAction::HostLan | MenuAction::JoinIp | MenuAction::HostInternet | MenuAction::JoinRoom => {
                 remember_name(&mut user, &form);
@@ -517,6 +541,7 @@ pub enum LobbyAction {
     AddAi,
     RemoveAi(u64),
     CycleSeed,
+    CyclePreset,
 }
 
 #[derive(Resource, Default)]
@@ -551,6 +576,8 @@ pub fn update_lobby(
     mode: Res<LobbyMode>,
     mut digest: ResMut<LobbyDigest>,
     q_root: Query<Entity, With<LobbyRoot>>,
+    mut images: ResMut<Assets<Image>>,
+    mut previews: ResMut<super::preview::PreviewCache>,
 ) {
     let guard = conn.0.lock().unwrap();
     let Some(t) = guard.as_ref() else { return };
@@ -608,9 +635,19 @@ pub fn update_lobby(
                     LobbyMode::Joined => {}
                 }
 
-                label(p, &font, &format!("Map seed: {}", l.seed), FONT_SM, TEXT_DIM);
+                let preset = saladin_sim::map_preset_by_index(l.preset as i32);
+                label(p, &font, &format!("Map: {} - seed {}", preset.label, l.seed), FONT_SM, TEXT_DIM);
+                let composed = saladin_sim::compose_seed(l.seed.max(1), l.preset);
+                super::preview::preview_node(
+                    p,
+                    super::preview::preview_handle(&mut previews, &mut images, composed),
+                );
                 if is_host {
-                    lobby_button(p, &font, LobbyAction::CycleSeed, "Cycle seed", false);
+                    p.spawn((Node { flex_direction: FlexDirection::Row, column_gap: Val::Px(4.0), ..default() },))
+                        .with_children(|p| {
+                            lobby_button(p, &font, LobbyAction::CycleSeed, "New seed", false);
+                            lobby_button(p, &font, LobbyAction::CyclePreset, "Next map type", false);
+                        });
                 }
 
                 // roster
@@ -751,6 +788,11 @@ pub fn lobby_actions(
                 let l = t.lobby();
                 let seed = l.seed.wrapping_mul(1664525).wrapping_add(1013904223) % 100_000;
                 t.set_map(seed.max(1), l.preset);
+            }
+            LobbyAction::CyclePreset => {
+                let l = t.lobby();
+                let next = (l.preset + 1) % saladin_sim::MAP_PRESETS.len() as u8;
+                t.set_map(l.seed, next);
             }
             LobbyAction::Cancel => {
                 *guard = None;

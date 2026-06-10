@@ -3,7 +3,7 @@
 use bevy_app::prelude::*;
 use saladin_protocol::*;
 use saladin_sim::{
-    AiDifficulty, BuildingKind, Faction, NEUTRAL_BIAS, Stockpile, V2, ZERO, building_def,
+    AiDifficulty, BuildingKind, Faction, Stockpile, V2, ZERO, building_def,
 };
 
 fn build() -> App {
@@ -11,7 +11,7 @@ fn build() -> App {
     app.add_plugins(SimPlugin);
     app.finish();
     app.cleanup();
-    app.world_mut().insert_resource(WorldConfig { seed: 1, bias: NEUTRAL_BIAS });
+    app.world_mut().insert_resource(WorldConfig { seed: 1 });
     scatter_world_nodes(app.world_mut(), 1);
     app
 }

@@ -3,14 +3,14 @@
 
 use bevy_app::prelude::*;
 use saladin_protocol::*;
-use saladin_sim::{AiDifficulty, Faction, NEUTRAL_BIAS};
+use saladin_sim::{AiDifficulty, Faction};
 
 fn build() -> App {
     let mut app = App::new();
     app.add_plugins(SimPlugin);
     app.finish();
     app.cleanup();
-    app.world_mut().insert_resource(WorldConfig { seed: 1, bias: NEUTRAL_BIAS });
+    app.world_mut().insert_resource(WorldConfig { seed: 1 });
     app
 }
 

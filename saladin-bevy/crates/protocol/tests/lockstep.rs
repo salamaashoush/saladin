@@ -1,6 +1,6 @@
 use bevy_app::prelude::*;
 use saladin_protocol::*;
-use saladin_sim::{Faction, NEUTRAL_BIAS};
+use saladin_sim::{Faction};
 use std::collections::HashMap;
 
 fn world_app() -> App {
@@ -8,7 +8,7 @@ fn world_app() -> App {
     app.add_plugins(SimPlugin);
     app.finish();
     app.cleanup();
-    app.world_mut().insert_resource(WorldConfig { seed: 1, bias: NEUTRAL_BIAS });
+    app.world_mut().insert_resource(WorldConfig { seed: 1 });
     // identical deterministic worldgen on every client
     scatter_world_nodes(app.world_mut(), 1);
     app

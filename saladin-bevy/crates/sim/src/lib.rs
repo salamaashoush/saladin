@@ -49,9 +49,10 @@ pub use pathfinding::{
     nearest_reachable_passable_grid,
 };
 pub use terrain::{
-    ScatterRule, ScatteredNode, TerrainSample, find_land_near, is_coastal, is_land, is_passable,
-    node_reachable, passable_grid, region_at, region_grid, render_height, sample_terrain,
-    scatter_nodes,
+    FAIR_MIN_FOOD, FAIR_MIN_STONE, FAIR_MIN_WOOD, FAIR_RADIUS, ScatterRule, ScatteredNode,
+    TerrainSample, compose_seed, fair_start_nodes, find_land_near, is_coastal, is_land,
+    is_passable, node_reachable, passable_grid, region_at, region_grid, render_height,
+    dominant_region, sample_terrain, scatter_nodes, seed_base, seed_bias, seed_preset, start_point,
 };
 pub use buildings::{
     Occupant, Tile, can_place, find_buildable_near, footprint_center, footprint_tiles,
