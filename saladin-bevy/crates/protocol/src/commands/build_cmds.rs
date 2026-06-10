@@ -98,7 +98,9 @@ pub(crate) fn own_building_positions(world: &mut World, owner: u64) -> Vec<V2> {
 
 /// Place `kind` at `pos` — the full `check_place` rule set (buildable biome,
 /// node/building occupancy, waterside, town radius, approach) + prereq + cost.
-pub(crate) fn build(world: &mut World, owner: u64, kind: BuildingKind, pos: V2) -> bool {
+/// `facing` = quarter turns; square footprints make rotation purely visual,
+/// but it rides the command so every client renders the same yaw.
+pub(crate) fn build(world: &mut World, owner: u64, kind: BuildingKind, pos: V2, facing: u8) -> bool {
     let def = building_def(kind);
     if !def.buildable {
         return false;
@@ -129,7 +131,14 @@ pub(crate) fn build(world: &mut World, owner: u64, kind: BuildingKind, pos: V2) 
         return false;
     }
     let center = footprint_center(def.footprint, pos.x, pos.y);
-    spawn::spawn_building(world, owner, kind, center, match_id);
+    let id = spawn::spawn_building(world, owner, kind, center, match_id);
+    if facing % 4 != 0 {
+        let yaw = saladin_sim::fx!("1.5707963") * Fx::from_num(facing % 4);
+        let mut q = world.query::<(&GameId, &mut Pos)>();
+        if let Some((_, mut p)) = q.iter_mut(world).find(|(g, _)| g.0 == id) {
+            p.facing = yaw;
+        }
+    }
     true
 }
 

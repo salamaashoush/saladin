@@ -27,7 +27,7 @@ pub enum PlayerCommand {
     Move { player_id: u64, unit: u64, target: V2 },
     SetStance { player_id: u64, unit: u64, stance: Stance },
     Train { player_id: u64, kind: UnitKind },
-    Build { player_id: u64, kind: BuildingKind, pos: V2 },
+    Build { player_id: u64, kind: BuildingKind, pos: V2, facing: u8 },
     Gather { player_id: u64, unit: u64, node: u64 },
     Attack { player_id: u64, unit: u64, target: u64 },
     SetRally { player_id: u64, building: u64, target: V2 },
@@ -67,8 +67,8 @@ pub fn apply_commands(world: &mut World) {
             PlayerCommand::Train { player_id, kind } => {
                 build_cmds::train(world, player_id, kind);
             }
-            PlayerCommand::Build { player_id, kind, pos } => {
-                build_cmds::build(world, player_id, kind, pos);
+            PlayerCommand::Build { player_id, kind, pos, facing } => {
+                build_cmds::build(world, player_id, kind, pos, facing);
             }
             PlayerCommand::Gather { player_id, unit, node } => {
                 unit_cmds::gather(world, player_id, unit, node)

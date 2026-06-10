@@ -34,6 +34,10 @@ pub struct DragState {
 #[derive(Resource, Default)]
 pub struct WallDrag(pub Option<(i32, i32)>);
 
+/// Ghost orientation in quarter turns; R cycles it while placing a building.
+#[derive(Resource, Default, Clone, Copy)]
+pub struct GhostRot(pub u8);
+
 #[derive(Resource, Default)]
 pub struct DemolishDrag {
     pub painting: bool,
@@ -54,22 +58,28 @@ pub struct DragBoxUi;
 // ── small helpers (ports of input.ts) ────────────────────────────────────────
 
 /// Straight tile line from s to e along the dominant axis (clamped length).
+/// Orthogonally-connected staircase line from `s` to `e` (Bresenham with
+/// either-or steps, never diagonal jumps) — walls drag in ANY direction and
+/// still seal, because every consecutive pair shares an edge.
 pub fn line_tiles(s: (i32, i32), e: (i32, i32)) -> Vec<(i32, i32)> {
-    let dx = e.0 - s.0;
-    let dy = e.1 - s.1;
-    let mut out = Vec::new();
-    if dx.abs() >= dy.abs() {
-        let n = dx.abs().min(MAX_WALL_LEN);
-        let step = dx.signum();
-        for i in 0..=n {
-            out.push((s.0 + step * i, s.1));
+    let mut out = vec![s];
+    let (mut x, mut y) = s;
+    let dx = (e.0 - s.0).abs();
+    let dy = (e.1 - s.1).abs();
+    let sx = (e.0 - s.0).signum();
+    let sy = (e.1 - s.1).signum();
+    let mut err = dx - dy;
+    while (x, y) != e && out.len() <= MAX_WALL_LEN as usize {
+        if 2 * err > -dy && x != e.0 {
+            err -= dy;
+            x += sx;
+        } else if y != e.1 {
+            err += dx;
+            y += sy;
+        } else {
+            break;
         }
-    } else {
-        let n = dy.abs().min(MAX_WALL_LEN);
-        let step = dy.signum();
-        for i in 0..=n {
-            out.push((s.0, s.1 + step * i));
-        }
+        out.push((x, y));
     }
     out
 }
@@ -206,6 +216,7 @@ pub fn pointer_input(
     local: Res<LocalPlayer>,
     cfg: Res<saladin_protocol::WorldConfig>,
     (mut mode, mut input, mut selection): (ResMut<InputMode>, ResMut<LocalInput>, ResMut<Selection>),
+    ghost_rot: Res<GhostRot>,
     (mut drag, mut wall_drag, mut demolish, mut last_click): (
         ResMut<DragState>,
         ResMut<WallDrag>,
@@ -263,13 +274,13 @@ pub fn pointer_input(
                 if kind == BuildingKind::Wall {
                     wall_drag.0 = Some((g.x.floor() as i32, g.z.floor() as i32));
                 } else {
-                    commit_build(kind, g.x, g.z, None, me, cfg.seed, &q_buildings, &mut input);
+                    commit_build(kind, g.x, g.z, None, me, cfg.seed, ghost_rot.0, &q_buildings, &mut input);
                 }
             }
         }
         if mouse.just_released(MouseButton::Left) && kind == BuildingKind::Wall {
             if let (Some(start), Some(g)) = (wall_drag.0.take(), ground) {
-                commit_build(kind, g.x, g.z, Some(start), me, cfg.seed, &q_buildings, &mut input);
+                commit_build(kind, g.x, g.z, Some(start), me, cfg.seed, ghost_rot.0, &q_buildings, &mut input);
             }
         }
         return;
@@ -459,6 +470,19 @@ fn command_move(selection: &Selection, me: u64, gx: f32, gz: f32, input: &mut Lo
     }
 }
 
+/// R rotates the placement ghost a quarter turn (build mode, non-wall).
+pub fn rotate_ghost(
+    keys: Res<ButtonInput<KeyCode>>,
+    mode: Res<InputMode>,
+    mut rot: ResMut<GhostRot>,
+) {
+    if matches!(*mode, InputMode::Build(k) if k != BuildingKind::Wall)
+        && keys.just_pressed(KeyCode::KeyR)
+    {
+        rot.0 = (rot.0 + 1) % 4;
+    }
+}
+
 fn commit_build(
     kind: BuildingKind,
     hx: f32,
@@ -466,6 +490,7 @@ fn commit_build(
     wall_start: Option<(i32, i32)>,
     me: u64,
     seed: u32,
+    facing: u8,
     q_buildings: &Query<(&GameId, &Owner, &Pos, &Building)>,
     input: &mut LocalInput,
 ) {
@@ -489,6 +514,7 @@ fn commit_build(
                 player_id: me,
                 kind,
                 pos: V2::new(Fx::from_num(cx), Fx::from_num(cy)),
+                facing,
             });
         }
     }
@@ -563,4 +589,29 @@ pub fn spawn_drag_box(mut commands: Commands) {
         ZIndex(5),
         Pickable::IGNORE,
     ));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::line_tiles;
+
+    #[test]
+    fn wall_lines_go_any_direction_and_stay_connected() {
+        for end in [(10, 4), (4, 10), (-6, 3), (7, -7), (-5, -9), (0, 8), (9, 0)] {
+            let tiles = line_tiles((0, 0), end);
+            assert_eq!(*tiles.first().unwrap(), (0, 0));
+            assert_eq!(*tiles.last().unwrap(), end, "line reaches {end:?}");
+            for w in tiles.windows(2) {
+                let (a, b) = (w[0], w[1]);
+                let d = (a.0 - b.0).abs() + (a.1 - b.1).abs();
+                assert_eq!(d, 1, "orthogonally connected (seals): {a:?} -> {b:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn wall_line_is_capped() {
+        let tiles = line_tiles((0, 0), (500, 500));
+        assert!(tiles.len() <= super::MAX_WALL_LEN as usize + 1);
+    }
 }

@@ -330,6 +330,13 @@ pub fn sync_render(
                     let yaw = wall_angle_at(&occ.0, x, z);
                     lerp.yaw = yaw;
                     tf.rotation = Quat::from_rotation_y(yaw);
+                } else {
+                    // player-chosen quarter-turn facing (rides the Build command)
+                    let yaw = pos.facing.to_num::<f32>();
+                    if yaw != 0.0 {
+                        lerp.yaw = yaw;
+                        tf.rotation = Quat::from_rotation_y(yaw);
+                    }
                 }
             }
         } else if let Some(n) = node {

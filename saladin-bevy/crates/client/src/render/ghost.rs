@@ -3,7 +3,7 @@
 //! red by validity, following the cursor; wall drags show the whole line.
 
 use crate::camera::{GameCamera, pick_ground};
-use crate::input::{InputMode, WallDrag, build_cells, place_valid};
+use crate::input::{GhostRot, InputMode, WallDrag, build_cells, place_valid};
 use crate::render::sync::{RenderAssets, RenderMaterials, wall_angle_at};
 use crate::terrain::{HeightField, height_at};
 use crate::LocalPlayer;
@@ -36,6 +36,7 @@ pub fn update_ghost(
     q_nodes: Query<&Pos, With<ResourceNode>>,
     local: Res<LocalPlayer>,
     q_cells: Query<Entity, With<GhostCell>>,
+    ghost_rot: Res<GhostRot>,
 ) {
     for e in &q_cells {
         commands.entity(e).despawn();
@@ -61,7 +62,11 @@ pub fn update_ghost(
     let occ_render: HashSet<i32> = occ.iter().copied().collect();
 
     let is_wall = kind == BuildingKind::Wall;
-    let yaw = if is_wall { ghost_wall_angle(&occ_render, wall_drag.0, g.x, g.z) } else { 0.0 };
+    let yaw = if is_wall {
+        ghost_wall_angle(&occ_render, wall_drag.0, g.x, g.z)
+    } else {
+        ghost_rot.0 as f32 * std::f32::consts::FRAC_PI_2
+    };
     for (cx, cy) in build_cells(kind, g.x, g.z, wall_drag.0) {
         let valid = place_valid(kind, cx, cy, cfg.seed, &occ, &own);
         let y = field_ref.map(|f| height_at(f, cx, cy)).unwrap_or(0.0);

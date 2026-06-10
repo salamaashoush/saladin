@@ -555,6 +555,58 @@ fn group(
         });
 }
 
+/// Build/demolish mode hint chip (top-center): rotation + cancel shortcuts.
+#[derive(Component)]
+pub struct ModeHint;
+
+pub fn build_mode_hint(
+    mut commands: Commands,
+    font: Res<UiFont>,
+    assets: Res<UiAssets>,
+    mode: Res<InputMode>,
+    q: Query<Entity, With<ModeHint>>,
+    mut shown: Local<String>,
+) {
+    let text = match *mode {
+        InputMode::Build(k) if k == saladin_sim::BuildingKind::Wall => {
+            "Drag to draw a wall (any direction)  -  Esc cancels"
+        }
+        InputMode::Build(_) => "R rotates the building  -  Esc cancels",
+        InputMode::Demolish => "Click your buildings to demolish  -  Esc cancels",
+        InputMode::Normal => "",
+    };
+    if *shown == text {
+        return;
+    }
+    *shown = text.to_string();
+    for e in &q {
+        commands.entity(e).despawn();
+    }
+    if text.is_empty() {
+        return;
+    }
+    commands
+        .spawn((
+            ModeHint,
+            HudRoot,
+            Node {
+                position_type: PositionType::Absolute,
+                top: Val::Px(34.0),
+                width: Val::Percent(100.0),
+                justify_content: JustifyContent::Center,
+                ..default()
+            },
+            GlobalZIndex(30),
+        ))
+        .with_children(|p| {
+            p.spawn((
+                Node { padding: UiRect::axes(Val::Px(14.0), Val::Px(6.0)), ..default() },
+                panel_bg_dark(&assets),
+            ))
+            .with_children(|p| label(p, &font, text, FONT_SM, GOLD));
+        });
+}
+
 /// Starvation toast trigger: food low while owning soldiers.
 #[derive(Resource, Default)]
 pub struct Toasts(pub Vec<(String, f32)>);

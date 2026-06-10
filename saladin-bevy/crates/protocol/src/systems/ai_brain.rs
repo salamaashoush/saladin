@@ -479,13 +479,13 @@ pub fn ai_brain(world: &mut World) {
 
 /// Try to place `kind` on a clear spot spiralling out from the keep.
 fn place_near(world: &mut World, owner: u64, kind: BuildingKind, keep: V2) {
-    if build(world, owner, kind, keep) {
+    if build(world, owner, kind, keep, 0) {
         return;
     }
     for r in 3..26 {
         for (dx, dy) in [(1, 0), (1, 1), (0, 1), (-1, 1), (-1, 0), (-1, -1), (0, -1), (1, -1)] {
             let pos = V2::new(keep.x + Fx::from_num(dx * r), keep.y + Fx::from_num(dy * r));
-            if build(world, owner, kind, pos) {
+            if build(world, owner, kind, pos, 0) {
                 return;
             }
         }

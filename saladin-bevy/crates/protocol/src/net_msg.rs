@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 
 /// Bumped on every wire-incompatible change. The relay rejects mismatches with
 /// `Reject(VersionMismatch)` instead of letting bincode garbage-decode.
-pub const PROTOCOL_VERSION: u32 = 2;
+pub const PROTOCOL_VERSION: u32 = 3;
 
 /// Room codes: 6 chars from an unambiguous alphabet (no 0/O, 1/I/L).
 pub const ROOM_CODE_LEN: usize = 6;

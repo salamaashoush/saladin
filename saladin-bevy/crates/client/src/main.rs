@@ -195,6 +195,7 @@ fn main() {
     .init_resource::<input::WallDrag>()
     .init_resource::<input::DemolishDrag>()
     .init_resource::<input::LastClick>()
+    .init_resource::<input::GhostRot>()
     .init_resource::<render::sync::RenderMap>()
     .init_resource::<render::sync::OccupiedTiles>()
     .init_resource::<ui::actions::BuildTab>()
@@ -272,6 +273,7 @@ fn main() {
             minimap::update_minimap_viewport,
             minimap::minimap_click,
             input::pointer_input,
+            input::rotate_ghost,
             input::keyboard_input.run_if(not(ui::text_input::any_input_focused)),
             input::update_drag_box,
             selection::publish_selection,
@@ -301,6 +303,7 @@ fn main() {
             ui::hud::update_resource_bar,
             ui::hud::update_bottom_bar,
             ui::hud::watch_toasts,
+            ui::hud::build_mode_hint,
             ui::hud::tick_toasts,
             ui::hud::render_toasts,
             ui::actions::handle_actions,
@@ -383,6 +386,13 @@ fn main() {
         && let Ok(tab) = s.parse::<usize>()
     {
         app.world_mut().resource_mut::<ui::actions::BuildTab>().0 = tab;
+    }
+    // SALADIN_BUILD=<building kind u8> enters build mode (hint-chip screenshots)
+    if let Ok(s) = std::env::var("SALADIN_BUILD")
+        && let Ok(k) = s.parse::<u8>()
+        && let Some(kind) = saladin_sim::BuildingKind::from_u8(k)
+    {
+        *app.world_mut().resource_mut::<input::InputMode>() = input::InputMode::Build(kind);
     }
     // SALADIN_SEED / SALADIN_PRESET override the menu defaults (screenshot runs)
     if let Ok(s) = std::env::var("SALADIN_SEED")

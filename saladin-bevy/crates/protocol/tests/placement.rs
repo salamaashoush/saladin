@@ -112,14 +112,14 @@ fn fishing_hut_needs_real_water_not_just_land() {
     spawn_building(&mut app, 10, 1, BuildingKind::Keep, center(cx + 1, cy + 1));
 
     // inland: rejected even though the ground is perfectly buildable
-    cmd(&mut app, PlayerCommand::Build { player_id: 1, kind: BuildingKind::FishingHut, pos: center(cx + 4, cy + 4) });
+    cmd(&mut app, PlayerCommand::Build { player_id: 1, kind: BuildingKind::FishingHut, pos: center(cx + 4, cy + 4), facing: 0 });
     step(app.world_mut());
     assert_eq!(building_count(&mut app, BuildingKind::FishingHut), 0, "no fishing hut on dry land");
 
     // shoreline: accepted (anchor keep placed beside it for the town radius)
     let (sx, sy) = shore_tile(seed);
     spawn_building(&mut app, 11, 1, BuildingKind::Keep, center(sx - 2, sy - 2));
-    cmd(&mut app, PlayerCommand::Build { player_id: 1, kind: BuildingKind::FishingHut, pos: center(sx, sy) });
+    cmd(&mut app, PlayerCommand::Build { player_id: 1, kind: BuildingKind::FishingHut, pos: center(sx, sy), facing: 0 });
     step(app.world_mut());
     assert_eq!(building_count(&mut app, BuildingKind::FishingHut), 1, "fishing hut builds on the shore");
 }
@@ -162,7 +162,7 @@ fn no_building_on_fords() {
     }
     assert!(anchored, "keep anchored near the ford");
 
-    cmd(&mut app, PlayerCommand::Build { player_id: 1, kind: BuildingKind::Tower, pos: center(fx_, fy) });
+    cmd(&mut app, PlayerCommand::Build { player_id: 1, kind: BuildingKind::Tower, pos: center(fx_, fy), facing: 0 });
     step(app.world_mut());
     assert_eq!(building_count(&mut app, BuildingKind::Tower), 0, "fords stay open chokepoints");
 }
@@ -176,7 +176,7 @@ fn buildings_must_rise_within_the_town_radius() {
     spawn_building(&mut app, 10, 1, BuildingKind::Keep, center(cx + 1, cy + 1));
 
     // adjacent to town: fine
-    cmd(&mut app, PlayerCommand::Build { player_id: 1, kind: BuildingKind::House, pos: center(cx + 5, cy + 1) });
+    cmd(&mut app, PlayerCommand::Build { player_id: 1, kind: BuildingKind::House, pos: center(cx + 5, cy + 1), facing: 0 });
     step(app.world_mut());
     assert_eq!(building_count(&mut app, BuildingKind::House), 1);
 
@@ -193,7 +193,7 @@ fn buildings_must_rise_within_the_town_radius() {
         }
         found.expect("distant buildable spot")
     };
-    cmd(&mut app, PlayerCommand::Build { player_id: 1, kind: BuildingKind::House, pos: center(fx2 + 1, fy2 + 1) });
+    cmd(&mut app, PlayerCommand::Build { player_id: 1, kind: BuildingKind::House, pos: center(fx2 + 1, fy2 + 1), facing: 0 });
     step(app.world_mut());
     assert_eq!(building_count(&mut app, BuildingKind::House), 1, "no teleport-building across the map");
 }
@@ -212,7 +212,7 @@ fn no_building_on_resource_nodes() {
         ResourceNode { res_type: ResourceType::Wood, remaining: 100 },
     ));
 
-    cmd(&mut app, PlayerCommand::Build { player_id: 1, kind: BuildingKind::Tower, pos: center(cx + 5, cy + 5) });
+    cmd(&mut app, PlayerCommand::Build { player_id: 1, kind: BuildingKind::Tower, pos: center(cx + 5, cy + 5), facing: 0 });
     step(app.world_mut());
     assert_eq!(building_count(&mut app, BuildingKind::Tower), 0, "the tree blocks the tile");
 }
@@ -291,4 +291,24 @@ fn building_roles_are_coherent() {
     for &k in saladin_sim::BuildingKind::ALL {
         assert_eq!(building_def(k).passable, k == Gatehouse, "{k:?} passability");
     }
+}
+
+#[test]
+fn build_facing_rides_the_command() {
+    let seed = 1;
+    let mut app = build_app(seed);
+    spawn_player(&mut app, 1);
+    let (cx, cy) = inland_block(seed);
+    spawn_building(&mut app, 10, 1, BuildingKind::Keep, center(cx + 1, cy + 1));
+
+    cmd(&mut app, PlayerCommand::Build { player_id: 1, kind: BuildingKind::House, pos: center(cx + 5, cy + 1), facing: 3 });
+    step(app.world_mut());
+    let world = app.world_mut();
+    let mut q = world.query::<(&Pos, &Building)>();
+    let p = q
+        .iter(world)
+        .find(|(_, b)| b.kind == BuildingKind::House)
+        .map(|(p, _)| p.facing)
+        .expect("house built");
+    assert_eq!(p, fx!("1.5707963") * Fx::from_num(3), "quarter turns applied deterministically");
 }
