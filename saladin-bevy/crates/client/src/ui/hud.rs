@@ -7,6 +7,7 @@
 //! rebuild when their state digest changes (selection, stock, tab, mode...).
 
 use super::actions::{BuildTab, MARKET_LOT, UiAction};
+use super::assets::UiAssets;
 use super::theme::*;
 use super::widgets::*;
 use crate::input::InputMode;
@@ -36,7 +37,7 @@ pub struct BottomCenter; // build bar container
 #[derive(Resource, Default, PartialEq, Clone)]
 pub struct HudDigest(String);
 
-pub fn setup_hud(mut commands: Commands, font: Res<UiFont>) {
+pub fn setup_hud(mut commands: Commands, font: Res<UiFont>, assets: Res<UiAssets>) {
     // top resource bar
     commands
         .spawn((
@@ -46,16 +47,23 @@ pub fn setup_hud(mut commands: Commands, font: Res<UiFont>) {
                 top: Val::Px(0.0),
                 left: Val::Px(0.0),
                 right: Val::Px(0.0),
-                height: Val::Px(20.0),
+                height: Val::Px(26.0),
                 align_items: AlignItems::Center,
                 column_gap: Val::Px(9.0),
                 padding: UiRect::horizontal(Val::Px(8.0)),
                 ..default()
             },
-            BackgroundColor(PANEL_BG),
+            panel_bg_dark(&assets),
         ))
         .with_children(|p| {
+            let icon_keys = [None, Some("res:wood"), Some("res:stone"), Some("res:food"), Some("res:gold"), None, None, None];
             for i in 0..8 {
+                if let Some(h) = icon_keys[i].and_then(|k| assets.icon(k)) {
+                    p.spawn((
+                        Node { width: Val::Px(16.0), height: Val::Px(16.0), margin: UiRect::right(Val::Px(-5.0)), ..default() },
+                        ImageNode::new(h),
+                    ));
+                }
                 p.spawn((
                     ResourceText(i),
                     Text::new(""),
@@ -80,16 +88,17 @@ pub fn setup_hud(mut commands: Commands, font: Res<UiFont>) {
             },
         ))
         .with_children(|p| {
-            tool_button(p, &font, UiAction::AddAi, "Add AI", None, BtnStyle::default());
-            tool_button(p, &font, UiAction::PauseToggle, "Pause", None, BtnStyle::default());
-            tool_button(p, &font, UiAction::SaveQuit, "Save+Quit", None, BtnStyle::default());
+            tool_button(p, &font, &assets, UiAction::AddAi, "Add AI", None, BtnStyle::chip());
+            tool_button(p, &font, &assets, UiAction::PauseToggle, "Pause", None, BtnStyle::chip());
+            tool_button(p, &font, &assets, UiAction::SaveQuit, "Save+Quit", None, BtnStyle::chip());
             tool_button(
                 p,
                 &font,
+                &assets,
                 UiAction::LeaveMatch,
                 "Leave",
                 None,
-                BtnStyle { bg: BTN_RED, ..default() },
+                BtnStyle { tint: TINT_RED, ..BtnStyle::chip() },
             );
         });
 
@@ -101,14 +110,15 @@ pub fn setup_hud(mut commands: Commands, font: Res<UiFont>) {
             position_type: PositionType::Absolute,
             bottom: Val::Px(5.0),
             left: Val::Px(5.0),
-            width: Val::Px(128.0),
+            width: Val::Px(210.0),
+            min_height: Val::Px(150.0),
             flex_direction: FlexDirection::Column,
-            padding: UiRect::all(Val::Px(5.0)),
-            border: UiRect::all(Val::Px(1.0)),
+            justify_content: JustifyContent::Center,
+            padding: UiRect::axes(Val::Px(26.0), Val::Px(24.0)),
+            row_gap: Val::Px(4.0),
             ..default()
         },
-        BackgroundColor(PANEL_BG),
-        BorderColor::all(PANEL_BORDER),
+        panel_bg(&assets),
     ));
     commands.spawn((
         HudRoot,
@@ -116,17 +126,32 @@ pub fn setup_hud(mut commands: Commands, font: Res<UiFont>) {
         Node {
             position_type: PositionType::Absolute,
             bottom: Val::Px(5.0),
-            left: Val::Px(138.0),
-            right: Val::Px(118.0),
-            min_height: Val::Px(50.0),
+            left: Val::Px(220.0),
+            right: Val::Px(172.0),
+            min_height: Val::Px(178.0),
             flex_direction: FlexDirection::Row,
-            column_gap: Val::Px(6.0),
-            padding: UiRect::all(Val::Px(5.0)),
-            border: UiRect::all(Val::Px(1.0)),
+            justify_content: JustifyContent::FlexStart,
+            align_items: AlignItems::FlexStart,
+            column_gap: Val::Px(16.0),
+            overflow: Overflow::clip(),
+            padding: UiRect::axes(Val::Px(26.0), Val::Px(24.0)),
             ..default()
         },
-        BackgroundColor(PANEL_BG),
-        BorderColor::all(PANEL_BORDER),
+        panel_bg(&assets),
+    ));
+
+    // minimap frame (the minimap itself is a camera viewport bottom-right)
+    commands.spawn((
+        HudRoot,
+        super::assets::MinimapFrame,
+        Node {
+            position_type: PositionType::Absolute,
+            width: Val::Px(0.0),
+            height: Val::Px(0.0),
+            ..default()
+        },
+        ImageNode::new(assets.bar_frame.clone())
+            .with_mode(bevy::ui::widget::NodeImageMode::Sliced(UiAssets::bar_slicer())),
     ));
 }
 
@@ -168,13 +193,13 @@ pub fn update_resource_bar(
     for (slot, mut text, mut color) in &mut q_text {
         let (s, c) = match slot.0 {
             0 => (format!("{}  ({:?})", p.name, p.faction), ACCENT),
-            1 => (format!("Wood {}", p.stock.wood), TEXT),
-            2 => (format!("Stone {}", p.stock.stone), TEXT),
+            1 => (format!("{}", p.stock.wood), TEXT),
+            2 => (format!("{}", p.stock.stone), TEXT),
             3 => (
-                format!("Food {}{}", p.stock.food, if starving { "  STARVING" } else { "" }),
+                format!("{}{}", p.stock.food, if starving { "  STARVING" } else { "" }),
                 if starving { WARN } else { TEXT },
             ),
-            4 => (format!("Gold {}", p.stock.gold), GOLD),
+            4 => (format!("{}", p.stock.gold), GOLD),
             5 => (format!("Peasants {peasants}"), TEXT),
             6 => (format!("Army {soldiers}"), TEXT),
             _ => (format!("Pop {pop}/{cap}"), if pop >= cap { WARN } else { TEXT }),
@@ -191,6 +216,7 @@ pub fn update_resource_bar(
 pub fn update_bottom_bar(
     mut commands: Commands,
     font: Res<UiFont>,
+    assets: Res<UiAssets>,
     local: Res<LocalPlayer>,
     info: Res<SelectionInfo>,
     sel_building: Res<SelectedBuilding>,
@@ -237,11 +263,12 @@ pub fn update_bottom_bar(
     commands.entity(left).despawn_related::<Children>();
     commands.entity(center).despawn_related::<Children>();
 
-    build_command_card(&mut commands, left, &font, &info, &sel_building, p);
+    build_command_card(&mut commands, left, &font, &assets, &info, &sel_building, p);
     build_build_bar(
         &mut commands,
         center,
         &font,
+        &assets,
         p,
         &owned,
         &rows,
@@ -255,6 +282,7 @@ fn build_command_card(
     commands: &mut Commands,
     left: Entity,
     font: &UiFont,
+    assets: &UiAssets,
     info: &SelectionInfo,
     sel_building: &SelectedBuilding,
     p: &Player,
@@ -284,20 +312,21 @@ fn build_command_card(
                             tool_button(
                                 c,
                                 font,
+                                assets,
                                 UiAction::Stance(stance),
                                 name,
                                 None,
-                                BtnStyle { min_width: 60.0, ..default() },
+                                BtnStyle { min_width: 40.0, icon: assets.stance_icon(stance), ..default() },
                             );
                         }
                     });
             }
             label(c, font, "Health", 12.0, TEXT_DIM);
-            ratio_bar(c, 108.0, info.avg_hp, hp_color(info.avg_hp));
+            ratio_bar(c, assets, 126.0, info.avg_hp, hp_color(info.avg_hp));
             if info.has_combat {
                 let routing = if info.routing > 0 { format!("Morale   {} routing!", info.routing) } else { "Morale".into() };
                 label(c, font, &routing, 12.0, if info.routing > 0 { WARN } else { TEXT_DIM });
-                ratio_bar(c, 108.0, info.avg_morale, morale_color(info.avg_morale));
+                ratio_bar(c, assets, 126.0, info.avg_morale, morale_color(info.avg_morale));
             }
         } else if let Some(_id) = sel_building.id {
             let def = building_def(sel_building.kind);
@@ -324,6 +353,7 @@ fn build_build_bar(
     commands: &mut Commands,
     center: Entity,
     font: &UiFont,
+    assets: &UiAssets,
     p: &Player,
     owned: &HashSet<BuildingKind>,
     rows: &[ResearchProgressRow],
@@ -337,9 +367,6 @@ fn build_build_bar(
             // production group for the selected building
             let bdef = building_def(sel_building.kind);
             group(c, font, bdef.label, |c, font| {
-                if bdef.trains.is_empty() {
-                    label(c, font, "No production", FONT_SM, TEXT_DIM);
-                }
                 for &kind in bdef.trains {
                     let u = unit_def(kind);
                     let locked = !has_prereq(owned, u.requires);
@@ -351,23 +378,49 @@ fn build_build_bar(
                     tool_button(
                         c,
                         font,
+                        assets,
                         UiAction::Train(kind),
                         u.label,
                         sub,
-                        BtnStyle { disabled: locked || !stock.can_afford(&u.cost), ..default() },
+                        BtnStyle {
+                            disabled: locked || !stock.can_afford(&u.cost),
+                            icon: assets.unit_icon(kind),
+                            ..default()
+                        },
                     );
                 }
                 if bdef.buildable {
                     tool_button(
                         c,
                         font,
+                        assets,
                         UiAction::DemolishSelected,
                         "Demolish",
                         None,
-                        BtnStyle { bg: BTN_RED, ..default() },
+                        BtnStyle { tint: TINT_RED, icon: assets.icon("act:demolish"), ..default() },
                     );
                 }
             });
+            // trade group on the market (sell-only: MARKET_RATE goods -> 1 gold)
+            if sel_building.kind == BuildingKind::Market {
+                group(c, font, "Trade", |c, font| {
+                    for (res, key, name) in [
+                        (ResourceType::Wood, "res:wood", "Sell Wood"),
+                        (ResourceType::Stone, "res:stone", "Sell Stone"),
+                    ] {
+                        let have = stock.get(res);
+                        tool_button(
+                            c,
+                            font,
+                            assets,
+                            UiAction::Sell(res),
+                            name,
+                            Some(format!("{MARKET_LOT} for {} Gold", MARKET_LOT / saladin_sim::MARKET_RATE)),
+                            BtnStyle { disabled: have < MARKET_LOT, icon: assets.icon(key), ..default() },
+                        );
+                    }
+                });
+            }
             // research panel on the blacksmith
             if sel_building.kind == BuildingKind::Blacksmith {
                 let states = research_panel_state(p.tech_mask, rows, &stock, owned);
@@ -385,10 +438,11 @@ fn build_build_bar(
                         tool_button(
                             c,
                             font,
+                            assets,
                             UiAction::Research(r.tech as u8),
                             r.label,
                             sub,
-                            BtnStyle { disabled, ..default() },
+                            BtnStyle { disabled, icon: assets.icon("tech:scroll"), ..default() },
                         );
                     }
                 });
@@ -398,6 +452,7 @@ fn build_build_bar(
                     tool_button(
                         c,
                         font,
+                        assets,
                         UiAction::Ungarrison,
                         "Ungarrison",
                         Some(format!("{}/{}", sel_building.occupants, sel_building.garrison_cap)),
@@ -406,77 +461,89 @@ fn build_build_bar(
                 });
             }
         } else {
-            // build tabs + tools
-            group(c, font, "Build", |c, font| {
-                c.spawn((Node { flex_direction: FlexDirection::Row, column_gap: Val::Px(2.0), ..default() },))
-                    .with_children(|c| {
-                        for (i, cat) in BUILD_CATEGORIES.iter().enumerate() {
-                            tool_button(
-                                c,
-                                font,
-                                UiAction::Tab(i),
-                                cat.label,
-                                None,
-                                BtnStyle { active: i == tab, min_width: 56.0, ..default() },
-                            );
-                        }
-                    });
-                c.spawn((Node { flex_direction: FlexDirection::Row, flex_wrap: FlexWrap::Wrap, ..default() },))
-                    .with_children(|c| {
-                        for &kind in BUILD_CATEGORIES[tab.min(BUILD_CATEGORIES.len() - 1)].kinds {
-                            let d = building_def(kind);
-                            let locked = !has_prereq(owned, d.requires);
-                            let sub = if locked {
-                                Some(format!("needs {}", building_def(d.requires.unwrap()).label))
-                            } else {
-                                Some(cost_line(&d.cost))
-                            };
-                            let active = mode == InputMode::Build(kind);
-                            tool_button(
-                                c,
-                                font,
-                                UiAction::Build(kind),
-                                d.label,
-                                sub,
-                                BtnStyle {
-                                    active,
-                                    disabled: !active && (locked || !stock.can_afford(&d.cost)),
-                                    ..default()
-                                },
-                            );
-                        }
-                    });
-            });
+            // build menu: category tabs ABOVE the building cards (AoE-style)
+            c.spawn((Node {
+                flex_direction: FlexDirection::Column,
+                row_gap: Val::Px(5.0),
+                flex_grow: 0.0,
+                flex_shrink: 0.0,
+                ..default()
+            },))
+                .with_children(|c| {
+                    label(c, font, "BUILD", 11.0, GOLD);
+                    c.spawn((Node { flex_direction: FlexDirection::Row, column_gap: Val::Px(2.0), ..default() },))
+                        .with_children(|c| {
+                            for (i, cat) in BUILD_CATEGORIES.iter().enumerate() {
+                                tool_button(
+                                    c,
+                                    font,
+                                    assets,
+                                    UiAction::Tab(i),
+                                    cat.label,
+                                    None,
+                                    BtnStyle { active: i == tab, ..BtnStyle::chip() },
+                                );
+                            }
+                        });
+                    c.spawn((Node { flex_direction: FlexDirection::Row, column_gap: Val::Px(2.0), ..default() },))
+                        .with_children(|c| {
+                            for &kind in BUILD_CATEGORIES[tab.min(BUILD_CATEGORIES.len() - 1)].kinds {
+                                let d = building_def(kind);
+                                let locked = !has_prereq(owned, d.requires);
+                                let sub = if locked {
+                                    Some(format!("needs {}", building_def(d.requires.unwrap()).label))
+                                } else {
+                                    Some(cost_line(&d.cost))
+                                };
+                                let active = mode == InputMode::Build(kind);
+                                tool_button(
+                                    c,
+                                    font,
+                                    assets,
+                                    UiAction::Build(kind),
+                                    d.label,
+                                    sub,
+                                    BtnStyle {
+                                        active,
+                                        disabled: !active && (locked || !stock.can_afford(&d.cost)),
+                                        icon: assets.building_icon(kind),
+                                        ..default()
+                                    },
+                                );
+                            }
+                        });
+                });
         }
 
-        // orders group — always available
+        // orders group — general commands, only on the no-selection view (a
+        // selected building shows just its own commands)
+        if sel_building.id.is_none() {
         group(c, font, "Orders", |c, font| {
-            tool_button(c, font, UiAction::GatherAll, "Gather", None, BtnStyle { bg: BTN_GREEN, ..default() });
             tool_button(
                 c,
                 font,
-                UiAction::Sell(ResourceType::Wood),
-                "Sell Wood",
-                Some(format!("{MARKET_LOT} for gold")),
-                BtnStyle { disabled: stock.wood < MARKET_LOT || !owned.contains(&BuildingKind::Market), ..default() },
+                assets,
+                UiAction::GatherAll,
+                "Gather",
+                Some("idle peasants".into()),
+                BtnStyle { tint: TINT_GREEN, icon: assets.icon("res:food"), ..default() },
             );
             tool_button(
                 c,
                 font,
-                UiAction::Sell(ResourceType::Stone),
-                "Sell Stone",
-                Some(format!("{MARKET_LOT} for gold")),
-                BtnStyle { disabled: stock.stone < MARKET_LOT || !owned.contains(&BuildingKind::Market), ..default() },
-            );
-            tool_button(
-                c,
-                font,
+                assets,
                 UiAction::ToggleDemolish,
                 "Demolish",
-                None,
-                BtnStyle { bg: BTN_RED, active: mode == InputMode::Demolish, ..default() },
+                Some("click buildings".into()),
+                BtnStyle {
+                    tint: TINT_RED,
+                    active: mode == InputMode::Demolish,
+                    icon: assets.icon("act:demolish"),
+                    ..default()
+                },
             );
         });
+        }
 
         // completed techs badge row
         let done: Vec<_> = techs_in_mask(p.tech_mask);
@@ -498,13 +565,19 @@ fn group(
 ) {
     c.spawn((Node {
         flex_direction: FlexDirection::Column,
-        row_gap: Val::Px(2.0),
-        padding: UiRect::horizontal(Val::Px(6.0)),
+        row_gap: Val::Px(6.0),
+        flex_grow: 0.0,
+        flex_shrink: 0.0,
         ..default()
     },))
         .with_children(|c| {
-            label(c, font, title, 12.0, TEXT_DIM);
-            c.spawn((Node { flex_direction: FlexDirection::Row, flex_wrap: FlexWrap::Wrap, ..default() },))
+            label(c, font, &title.to_uppercase(), 11.0, GOLD);
+            c.spawn((Node {
+                flex_direction: FlexDirection::Row,
+                align_items: AlignItems::Stretch,
+                column_gap: Val::Px(4.0),
+                ..default()
+            },))
                 .with_children(|c| body(c, font));
         });
 }
@@ -526,6 +599,7 @@ pub struct ToastUi;
 pub fn render_toasts(
     mut commands: Commands,
     font: Res<UiFont>,
+    assets: Res<UiAssets>,
     toasts: Res<Toasts>,
     q: Query<Entity, With<ToastUi>>,
 ) {
@@ -554,8 +628,8 @@ pub fn render_toasts(
         .with_children(|p| {
             for (text, _) in &toasts.0 {
                 p.spawn((
-                    Node { padding: UiRect::axes(Val::Px(7.0), Val::Px(3.0)), ..default() },
-                    BackgroundColor(PANEL_BG),
+                    Node { padding: UiRect::axes(Val::Px(10.0), Val::Px(5.0)), ..default() },
+                    panel_bg_dark(&assets),
                 ))
                 .with_children(|p| label(p, &font, text, FONT_SM, TEXT));
             }

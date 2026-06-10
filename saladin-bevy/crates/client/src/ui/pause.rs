@@ -3,8 +3,9 @@
 //! with the main menu), the loading screen between menu and match, and the
 //! multiplayer disconnect banner.
 
+use super::assets::UiAssets;
 use super::theme::*;
-use super::widgets::{Disabled, label};
+use super::widgets::{Disabled, label, panel_bg, panel_bg_dark, screen_button, wide_button};
 use crate::{GameState, Multiplayer, PendingSave, UiFont, config};
 use bevy::prelude::*;
 
@@ -68,6 +69,7 @@ pub fn pause_hotkey(
 pub fn update_pause_overlay(
     mut commands: Commands,
     font: Res<UiFont>,
+    assets: Res<UiAssets>,
     screen: Res<PauseScreen>,
     user: Res<config::UserConfig>,
     multiplayer: Res<Multiplayer>,
@@ -108,13 +110,11 @@ pub fn update_pause_overlay(
                     flex_direction: FlexDirection::Column,
                     align_items: AlignItems::Center,
                     row_gap: Val::Px(8.0),
-                    padding: UiRect::all(Val::Px(18.0)),
-                    border: UiRect::all(Val::Px(1.0)),
-                    min_width: Val::Px(280.0),
+                    padding: UiRect::all(Val::Px(22.0)),
+                    min_width: Val::Px(300.0),
                     ..default()
                 },
-                BackgroundColor(PANEL_BG),
-                BorderColor::all(PANEL_BORDER),
+                panel_bg(&assets),
             ))
             .with_children(|p| match *screen {
                 PauseScreen::Menu => {
@@ -122,15 +122,15 @@ pub fn update_pause_overlay(
                     if multiplayer.0 {
                         label(p, &font, "(the battle rages on - lockstep never sleeps)", FONT_SM, TEXT_DIM);
                     }
-                    pause_button(p, &font, PauseAction::Resume, "Resume", false);
-                    pause_button(p, &font, PauseAction::SaveQuit, "Save & Quit", multiplayer.0);
-                    pause_button(p, &font, PauseAction::OpenSettings, "Settings", false);
-                    pause_button(p, &font, PauseAction::QuitToMenu, "Quit to Menu", false);
+                    wide_button(p, &font, &assets, PauseAction::Resume, "Resume", false, false);
+                    wide_button(p, &font, &assets, PauseAction::SaveQuit, "Save & Quit", false, multiplayer.0);
+                    wide_button(p, &font, &assets, PauseAction::OpenSettings, "Settings", false, false);
+                    wide_button(p, &font, &assets, PauseAction::QuitToMenu, "Quit to Menu", false, false);
                 }
                 PauseScreen::Settings => {
                     label(p, &font, "SETTINGS", FONT_LG, GOLD);
-                    settings_controls(p, &font, &user);
-                    pause_button(p, &font, PauseAction::BackToPause, "Back", false);
+                    settings_controls(p, &font, &assets, &user);
+                    pause_button(p, &font, &assets, PauseAction::BackToPause, "Back", false);
                 }
                 PauseScreen::None => {}
             });
@@ -139,18 +139,24 @@ pub fn update_pause_overlay(
 
 /// The settings rows (volume / edge scroll / UI scale) — also embedded in the
 /// main menu's settings screen, dispatching the same `PauseAction`s.
-pub fn settings_controls(p: &mut ChildSpawnerCommands, font: &UiFont, user: &config::UserConfig) {
+pub fn settings_controls(
+    p: &mut ChildSpawnerCommands,
+    font: &UiFont,
+    assets: &UiAssets,
+    user: &config::UserConfig,
+) {
     label(p, font, &format!("Master volume: {:.0}%", user.master_volume * 100.0), FONT_SM, TEXT_DIM);
     p.spawn((Node { flex_direction: FlexDirection::Row, column_gap: Val::Px(4.0), ..default() },))
         .with_children(|p| {
-            pause_button(p, font, PauseAction::Volume(-1), "-", user.master_volume <= 0.0);
-            pause_button(p, font, PauseAction::Volume(1), "+", user.master_volume >= 1.0);
+            pause_button(p, font, assets, PauseAction::Volume(-1), "-", user.master_volume <= 0.0);
+            pause_button(p, font, assets, PauseAction::Volume(1), "+", user.master_volume >= 1.0);
         });
     label(p, font, "(audio arrives with a later patch)", 10.0, TEXT_DIM);
 
     pause_button(
         p,
         font,
+        assets,
         PauseAction::ToggleEdgeScroll,
         if user.edge_scroll { "Edge scroll: ON" } else { "Edge scroll: OFF" },
         false,
@@ -159,32 +165,20 @@ pub fn settings_controls(p: &mut ChildSpawnerCommands, font: &UiFont, user: &con
     label(p, font, &format!("UI scale: {:.2}", user.ui_scale), FONT_SM, TEXT_DIM);
     p.spawn((Node { flex_direction: FlexDirection::Row, column_gap: Val::Px(4.0), ..default() },))
         .with_children(|p| {
-            pause_button(p, font, PauseAction::UiScale(-1), "-", user.ui_scale <= 0.74);
-            pause_button(p, font, PauseAction::UiScale(1), "+", user.ui_scale >= 1.51);
+            pause_button(p, font, assets, PauseAction::UiScale(-1), "-", user.ui_scale <= 0.74);
+            pause_button(p, font, assets, PauseAction::UiScale(1), "+", user.ui_scale >= 1.51);
         });
 }
 
 fn pause_button(
     p: &mut ChildSpawnerCommands,
     font: &UiFont,
+    assets: &UiAssets,
     action: PauseAction,
     title: &str,
     disabled: bool,
 ) {
-    p.spawn((
-        Button,
-        action,
-        Disabled(disabled),
-        Node {
-            padding: UiRect::axes(Val::Px(10.0), Val::Px(5.0)),
-            border: UiRect::all(Val::Px(1.0)),
-            justify_content: JustifyContent::Center,
-            ..default()
-        },
-        BackgroundColor(if disabled { BTN_BG_DISABLED } else { BTN_BG }),
-        BorderColor::all(PANEL_BORDER),
-    ))
-    .with_children(|p| label(p, font, title, FONT_MD, if disabled { TEXT_DIM } else { TEXT }));
+    screen_button(p, font, assets, action, title, false, disabled);
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -258,7 +252,12 @@ pub struct LoadingRoot;
 #[derive(Resource, Default)]
 pub struct LoadingFrames(pub u32);
 
-pub fn setup_loading(mut commands: Commands, font: Res<UiFont>, cfg: Res<crate::MenuConfig>) {
+pub fn setup_loading(
+    mut commands: Commands,
+    font: Res<UiFont>,
+    assets: Res<UiAssets>,
+    cfg: Res<crate::MenuConfig>,
+) {
     commands.insert_resource(LoadingFrames(0));
     commands
         .spawn((
@@ -273,9 +272,13 @@ pub fn setup_loading(mut commands: Commands, font: Res<UiFont>, cfg: Res<crate::
                 row_gap: Val::Px(8.0),
                 ..default()
             },
-            BackgroundColor(Color::srgb(0.05, 0.05, 0.08)),
+            ImageNode::new(assets.backdrop.clone()),
         ))
         .with_children(|p| {
+            p.spawn((
+                Node { width: Val::Px(56.0), height: Val::Px(56.0), ..default() },
+                ImageNode::new(assets.emblem.clone()),
+            ));
             label(p, &font, "FORGING THE HOLY LAND", FONT_LG, GOLD);
             label(p, &font, &format!("seed {}", cfg.seed), FONT_SM, TEXT_DIM);
             label(p, &font, "carving terrain, scattering groves, raising keeps...", FONT_SM, TEXT_DIM);
@@ -308,6 +311,7 @@ pub struct DisconnectBanner;
 pub fn render_disconnect_banner(
     mut commands: Commands,
     font: Res<UiFont>,
+    assets: Res<UiAssets>,
     list: Res<Disconnects>,
     q_banner: Query<Entity, With<DisconnectBanner>>,
     mut shown: Local<usize>,
@@ -338,12 +342,14 @@ pub fn render_disconnect_banner(
         .with_children(|p| {
             p.spawn((
                 Node {
-                    padding: UiRect::axes(Val::Px(12.0), Val::Px(5.0)),
-                    border: UiRect::all(Val::Px(1.0)),
+                    padding: UiRect::axes(Val::Px(14.0), Val::Px(7.0)),
                     ..default()
                 },
-                BackgroundColor(Color::srgba(0.35, 0.08, 0.05, 0.92)),
-                BorderColor::all(WARN),
+                {
+                    let mut img = panel_bg_dark(&assets);
+                    img.color = Color::srgb(1.6, 0.6, 0.5); // blood-tinted parchment
+                    img
+                },
             ))
             .with_children(|p| label(p, &font, &text, FONT_MD, TEXT));
         });

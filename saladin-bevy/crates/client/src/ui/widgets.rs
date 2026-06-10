@@ -1,11 +1,15 @@
-//! Reusable HUD widget builders: panels, labels, action buttons with cost
-//! lines, progress bars. Every interactive node carries a `UiAction` the
-//! central interaction system dispatches on.
+//! Reusable HUD widget builders on top of the baked UI art (`assets.rs`):
+//! parchment panels, bronze image-buttons with optional pixel-art icons and
+//! cost lines, framed ratio bars. Every interactive node carries a `UiAction`
+//! (or screen-local action component) the central interaction systems
+//! dispatch on; button states are ImageNode tints.
 
 use super::actions::UiAction;
+use super::assets::UiAssets;
 use super::theme::*;
 use crate::UiFont;
 use bevy::prelude::*;
+use bevy::ui::widget::NodeImageMode;
 use saladin_sim::ResourceCost;
 
 /// Every font size the HUD/menus use — the atlas pre-warm rasterizes the whole
@@ -57,54 +61,122 @@ pub fn cost_line(cost: &ResourceCost) -> String {
     parts.join(" ")
 }
 
+// ── parchment panels ─────────────────────────────────────────────────────────
+
+/// Sliced parchment background for a panel container.
+pub fn panel_bg(assets: &UiAssets) -> ImageNode {
+    ImageNode::new(assets.panel.clone()).with_mode(NodeImageMode::Sliced(UiAssets::panel_slicer()))
+}
+
+/// Darker variant (HUD bottom bars, toasts).
+pub fn panel_bg_dark(assets: &UiAssets) -> ImageNode {
+    ImageNode::new(assets.panel_dark.clone())
+        .with_mode(NodeImageMode::Sliced(UiAssets::panel_slicer()))
+}
+
+// ── bronze buttons ───────────────────────────────────────────────────────────
+
+/// Per-state ImageNode tints (the bronze plate texture is shared).
+pub const TINT_NORMAL: Color = Color::srgb(0.88, 0.88, 0.88);
+pub const TINT_HOVER: Color = Color::WHITE;
+pub const TINT_PRESSED: Color = Color::srgb(0.62, 0.62, 0.62);
+pub const TINT_DISABLED: Color = Color::srgba(0.42, 0.42, 0.46, 0.85);
+pub const TINT_ACTIVE: Color = Color::srgb(1.0, 0.92, 0.55);
+pub const TINT_RED: Color = Color::srgb(1.0, 0.55, 0.45);
+pub const TINT_GREEN: Color = Color::srgb(0.65, 1.0, 0.6);
+
+/// Hover/press feedback restores to this when the cursor leaves.
+#[derive(Component, Clone, Copy)]
+pub struct BtnTint(pub Color);
+
+/// Marker so the interaction system skips disabled buttons (visual dimming is
+/// baked at build time).
+#[derive(Component, Clone, Copy)]
+pub struct Disabled(pub bool);
+
 pub struct BtnStyle {
-    pub bg: Color,
+    pub tint: Color,
     pub disabled: bool,
     pub active: bool,
     pub min_width: f32,
+    /// Uniform card height keeps icon and text-only buttons aligned in a row.
+    pub min_height: f32,
+    pub icon: Option<Handle<Image>>,
 }
 
 impl Default for BtnStyle {
     fn default() -> Self {
-        BtnStyle { bg: BTN_BG, disabled: false, active: false, min_width: 46.0 }
+        BtnStyle {
+            tint: TINT_NORMAL,
+            disabled: false,
+            active: false,
+            min_width: 86.0,
+            min_height: 66.0,
+            icon: None,
+        }
     }
 }
 
-/// A tool button: label on top, optional cost/sub line under it.
+impl BtnStyle {
+    /// Compact text chip (tab rows, inline toggles).
+    pub fn chip() -> Self {
+        BtnStyle { min_width: 64.0, min_height: 30.0, ..default() }
+    }
+}
+
+fn resolved_tint(style: &BtnStyle) -> Color {
+    if style.disabled {
+        TINT_DISABLED
+    } else if style.active {
+        TINT_ACTIVE
+    } else {
+        style.tint
+    }
+}
+
+fn button_image(assets: &UiAssets, tint: Color) -> ImageNode {
+    ImageNode::new(assets.button.clone())
+        .with_mode(NodeImageMode::Sliced(UiAssets::button_slicer()))
+        .with_color(tint)
+}
+
+/// A tool button: optional icon, label, optional cost/sub line.
 pub fn tool_button(
     p: &mut ChildSpawnerCommands,
     font: &UiFont,
+    assets: &UiAssets,
     action: UiAction,
     title: &str,
     sub: Option<String>,
     style: BtnStyle,
 ) {
-    let bg = if style.disabled {
-        BTN_BG_DISABLED
-    } else if style.active {
-        BTN_BG_ACTIVE
-    } else {
-        style.bg
-    };
+    let tint = resolved_tint(&style);
     let text_color = if style.disabled { TEXT_DIM } else { TEXT };
     let mut e = p.spawn((
         Button,
         action,
+        button_image(assets, tint),
+        BtnTint(tint),
         Node {
             flex_direction: FlexDirection::Column,
             align_items: AlignItems::Center,
             justify_content: JustifyContent::Center,
             min_width: Val::Px(style.min_width),
-            padding: UiRect::axes(Val::Px(4.0), Val::Px(2.0)),
-            margin: UiRect::all(Val::Px(1.0)),
-            border: UiRect::all(Val::Px(1.0)),
+            min_height: Val::Px(style.min_height),
+            padding: UiRect::axes(Val::Px(10.0), Val::Px(6.0)),
+            margin: UiRect::all(Val::Px(2.0)),
+            row_gap: Val::Px(2.0),
             ..default()
         },
-        BackgroundColor(bg),
-        BorderColor::all(if style.active { ACCENT } else { PANEL_BORDER }),
         Disabled(style.disabled),
     ));
     e.with_children(|p| {
+        if let Some(icon) = &style.icon {
+            p.spawn((
+                Node { width: Val::Px(28.0), height: Val::Px(28.0), ..default() },
+                icon_image(icon.clone(), style.disabled),
+            ));
+        }
         label(p, font, title, FONT_SM, text_color);
         if let Some(sub) = sub {
             label(p, font, &sub, 10.0, if style.disabled { TEXT_DIM } else { GOLD });
@@ -112,21 +184,112 @@ pub fn tool_button(
     });
 }
 
-/// Marker so the interaction system skips disabled buttons (visual dimming is
-/// baked at build time).
-#[derive(Component, Clone, Copy)]
-pub struct Disabled(pub bool);
+fn icon_image(handle: Handle<Image>, disabled: bool) -> ImageNode {
+    let mut img = ImageNode::new(handle);
+    // nearest-neighbour look comes from the texture itself; dim when disabled
+    if disabled {
+        img = img.with_color(Color::srgba(0.6, 0.6, 0.6, 0.7));
+    }
+    img
+}
 
-/// A horizontal ratio bar (HP / morale / research progress).
-pub fn ratio_bar(p: &mut ChildSpawnerCommands, width: f32, ratio: f32, color: Color) {
+/// A generic bronze button for menu/lobby/pause screens — same look as
+/// `tool_button` but carries the screen's own action component.
+pub fn screen_button<C: Component>(
+    p: &mut ChildSpawnerCommands,
+    font: &UiFont,
+    assets: &UiAssets,
+    action: C,
+    title: &str,
+    active: bool,
+    disabled: bool,
+) {
+    screen_button_sized(p, font, assets, action, title, active, disabled, None);
+}
+
+/// Fixed-width variant: stacked menu lists read better when every button is
+/// the same width.
+pub fn wide_button<C: Component>(
+    p: &mut ChildSpawnerCommands,
+    font: &UiFont,
+    assets: &UiAssets,
+    action: C,
+    title: &str,
+    active: bool,
+    disabled: bool,
+) {
+    screen_button_sized(p, font, assets, action, title, active, disabled, Some(230.0));
+}
+
+#[allow(clippy::too_many_arguments)]
+fn screen_button_sized<C: Component>(
+    p: &mut ChildSpawnerCommands,
+    font: &UiFont,
+    assets: &UiAssets,
+    action: C,
+    title: &str,
+    active: bool,
+    disabled: bool,
+    width: Option<f32>,
+) {
+    let style = BtnStyle { active, disabled, ..default() };
+    let tint = resolved_tint(&style);
+    p.spawn((
+        Button,
+        action,
+        button_image(assets, tint),
+        BtnTint(tint),
+        Disabled(disabled),
+        Node {
+            padding: UiRect::axes(Val::Px(20.0), Val::Px(10.0)),
+            margin: UiRect::all(Val::Px(3.0)),
+            min_width: Val::Px(72.0),
+            min_height: Val::Px(38.0),
+            width: width.map(Val::Px).unwrap_or(Val::Auto),
+            justify_content: JustifyContent::Center,
+            align_items: AlignItems::Center,
+            ..default()
+        },
+    ))
+    .with_children(|p| label(p, font, title, FONT_MD, if disabled { TEXT_DIM } else { TEXT }));
+}
+
+/// Hover/press tinting for ALL image buttons (HUD + menus).
+pub fn button_feedback(
+    mut q: Query<(&Interaction, &Disabled, &BtnTint, &mut ImageNode), Changed<Interaction>>,
+) {
+    for (i, disabled, base, mut img) in &mut q {
+        if disabled.0 {
+            continue;
+        }
+        img.color = match i {
+            Interaction::Hovered => TINT_HOVER,
+            Interaction::Pressed => TINT_PRESSED,
+            Interaction::None => base.0,
+        };
+    }
+}
+
+// ── bars ─────────────────────────────────────────────────────────────────────
+
+/// A horizontal ratio bar (HP / morale / research progress) in a bronze frame.
+pub fn ratio_bar(
+    p: &mut ChildSpawnerCommands,
+    assets: &UiAssets,
+    width: f32,
+    ratio: f32,
+    color: Color,
+) {
     p.spawn((
         Node {
             width: Val::Px(width),
-            height: Val::Px(5.0),
+            height: Val::Px(9.0),
             margin: UiRect::vertical(Val::Px(2.0)),
+            padding: UiRect::all(Val::Px(2.0)),
             ..default()
         },
-        BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.6)),
+        ImageNode::new(assets.bar_frame.clone())
+            .with_mode(NodeImageMode::Sliced(UiAssets::bar_slicer())),
     ))
     .with_children(|p| {
         p.spawn((

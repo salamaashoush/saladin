@@ -2,6 +2,7 @@
 //! and the per-screen modules.
 
 pub mod actions;
+pub mod assets;
 pub mod hud;
 pub mod menu;
 pub mod pause;

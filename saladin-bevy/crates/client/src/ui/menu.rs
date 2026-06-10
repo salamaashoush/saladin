@@ -4,9 +4,10 @@
 //! overlay. Screens rebuild via the digest pattern; text-input values live in
 //! `MpForm` so rebuilds never eat typed text.
 
+use super::assets::UiAssets;
 use super::text_input::{TextInput, text_input};
 use super::theme::*;
-use super::widgets::{Disabled, label};
+use super::widgets::{Disabled, label, panel_bg, screen_button, wide_button};
 use crate::{GameState, MenuConfig, UiFont, config};
 use bevy::prelude::*;
 use saladin_protocol::JoinIntent;
@@ -78,7 +79,7 @@ pub struct RoomInput;
 #[derive(Resource, Default, PartialEq)]
 pub struct MenuDigest(String);
 
-pub fn setup_menu(mut commands: Commands) {
+pub fn setup_menu(mut commands: Commands, assets: Res<UiAssets>) {
     commands.spawn((
         MenuRoot,
         Node {
@@ -89,7 +90,7 @@ pub fn setup_menu(mut commands: Commands) {
             justify_content: JustifyContent::Center,
             ..default()
         },
-        BackgroundColor(Color::srgb(0.05, 0.05, 0.08)),
+        ImageNode::new(assets.backdrop.clone()),
     ));
 }
 
@@ -143,6 +144,7 @@ pub fn update_menu(
     q_root: Query<Entity, With<MenuRoot>>,
     mut images: ResMut<Assets<Image>>,
     mut previews: ResMut<super::preview::PreviewCache>,
+    assets: Res<UiAssets>,
 ) {
     let key = format!(
         "{:?}|{:?}|{:?}|{}|{}|{}|{:?}|{}|{:.2}|{:.2}",
@@ -169,57 +171,65 @@ pub fn update_menu(
                 flex_direction: FlexDirection::Column,
                 align_items: AlignItems::Center,
                 row_gap: Val::Px(7.0),
-                padding: UiRect::all(Val::Px(16.0)),
-                border: UiRect::all(Val::Px(1.0)),
-                min_width: Val::Px(340.0),
+                padding: UiRect::all(Val::Px(22.0)),
+                min_width: Val::Px(360.0),
                 ..default()
             },
-            BackgroundColor(PANEL_BG),
-            BorderColor::all(PANEL_BORDER),
+            panel_bg(&assets),
         ))
         .with_children(|p| match *screen {
-            MenuScreen::Main => main_screen(p, &font),
+            MenuScreen::Main => main_screen(p, &font, &assets),
             MenuScreen::Singleplayer => {
                 let seed = saladin_sim::compose_seed(cfg.seed.max(1), cfg.preset);
                 let preview = super::preview::preview_handle(&mut previews, &mut images, seed);
-                sp_screen(p, &font, &cfg, preview);
+                sp_screen(p, &font, &assets, &cfg, preview);
             }
-            MenuScreen::Multiplayer => mp_screen(p, &font, &form, &err),
+            MenuScreen::Multiplayer => mp_screen(p, &font, &assets, &form, &err),
             MenuScreen::Settings => {
                 label(p, &font, "SETTINGS", FONT_LG, GOLD);
-                super::pause::settings_controls(p, &font, &user);
-                menu_button(p, &font, MenuAction::Goto(MenuScreen::Main), "Back", false, false);
+                super::pause::settings_controls(p, &font, &assets, &user);
+                menu_button(p, &font, &assets, MenuAction::Goto(MenuScreen::Main), "Back", false, false);
             }
         });
     });
 }
 
-fn main_screen(p: &mut ChildSpawnerCommands, font: &UiFont) {
+fn main_screen(p: &mut ChildSpawnerCommands, font: &UiFont, assets: &UiAssets) {
+    p.spawn((
+        Node {
+            width: Val::Px(72.0),
+            height: Val::Px(72.0),
+            margin: UiRect::top(Val::Px(12.0)).with_bottom(Val::Px(12.0)),
+            ..default()
+        },
+        ImageNode::new(assets.emblem.clone()),
+    ));
     label(p, font, "SALADIN", 30.0, GOLD);
     label(p, font, "A real-time strategy of the Crusades", FONT_SM, TEXT_DIM);
-    menu_button(p, font, MenuAction::Goto(MenuScreen::Singleplayer), "Singleplayer", false, false);
-    menu_button(p, font, MenuAction::Goto(MenuScreen::Multiplayer), "Multiplayer", false, false);
-    menu_button(p, font, MenuAction::LoadGame, "Load Game", false, !crate::save_exists());
-    menu_button(p, font, MenuAction::Goto(MenuScreen::Settings), "Settings", false, false);
-    menu_button(p, font, MenuAction::Quit, "Quit", false, false);
+    p.spawn(Node { height: Val::Px(10.0), ..default() });
+    wide_button(p, font, assets, MenuAction::Goto(MenuScreen::Singleplayer), "Singleplayer", false, false);
+    wide_button(p, font, assets, MenuAction::Goto(MenuScreen::Multiplayer), "Multiplayer", false, false);
+    wide_button(p, font, assets, MenuAction::LoadGame, "Load Game", false, !crate::save_exists());
+    wide_button(p, font, assets, MenuAction::Goto(MenuScreen::Settings), "Settings", false, false);
+    wide_button(p, font, assets, MenuAction::Quit, "Quit", false, false);
 }
 
-fn sp_screen(p: &mut ChildSpawnerCommands, font: &UiFont, cfg: &MenuConfig, preview: Handle<Image>) {
+fn sp_screen(p: &mut ChildSpawnerCommands, font: &UiFont, assets: &UiAssets, cfg: &MenuConfig, preview: Handle<Image>) {
     label(p, font, "SKIRMISH", FONT_LG, GOLD);
 
     label(p, font, "Faction", FONT_SM, TEXT_DIM);
     p.spawn((Node { flex_direction: FlexDirection::Row, column_gap: Val::Px(4.0), ..default() },))
         .with_children(|p| {
             for (f, name) in [(Faction::Ayyubid, "Ayyubids"), (Faction::Crusader, "Crusaders")] {
-                menu_button(p, font, MenuAction::Faction(f), name, cfg.faction == f, false);
+                menu_button(p, font, assets, MenuAction::Faction(f), name, cfg.faction == f, false);
             }
         });
 
     label(p, font, &format!("Opponents: {}", cfg.opponents), FONT_SM, TEXT_DIM);
     p.spawn((Node { flex_direction: FlexDirection::Row, column_gap: Val::Px(4.0), ..default() },))
         .with_children(|p| {
-            menu_button(p, font, MenuAction::RemoveOpponent, "-", false, cfg.opponents <= 1);
-            menu_button(p, font, MenuAction::AddOpponent, "+", false, cfg.opponents >= 7);
+            menu_button(p, font, assets, MenuAction::RemoveOpponent, "-", false, cfg.opponents <= 1);
+            menu_button(p, font, assets, MenuAction::AddOpponent, "+", false, cfg.opponents >= 7);
         });
 
     label(p, font, "Difficulty", FONT_SM, TEXT_DIM);
@@ -230,7 +240,7 @@ fn sp_screen(p: &mut ChildSpawnerCommands, font: &UiFont, cfg: &MenuConfig, prev
                 (AiDifficulty::Normal, "Normal"),
                 (AiDifficulty::Hard, "Hard"),
             ] {
-                menu_button(p, font, MenuAction::Difficulty(d), name, cfg.difficulty == d, false);
+                menu_button(p, font, assets, MenuAction::Difficulty(d), name, cfg.difficulty == d, false);
             }
         });
 
@@ -238,7 +248,7 @@ fn sp_screen(p: &mut ChildSpawnerCommands, font: &UiFont, cfg: &MenuConfig, prev
     p.spawn((Node { flex_direction: FlexDirection::Row, column_gap: Val::Px(4.0), ..default() },))
         .with_children(|p| {
             for (i, preset) in saladin_sim::MAP_PRESETS.iter().enumerate() {
-                menu_button(p, font, MenuAction::Preset(i as u8), preset.label, cfg.preset == i as u8, false);
+                menu_button(p, font, assets, MenuAction::Preset(i as u8), preset.label, cfg.preset == i as u8, false);
             }
         });
     label(
@@ -249,12 +259,12 @@ fn sp_screen(p: &mut ChildSpawnerCommands, font: &UiFont, cfg: &MenuConfig, prev
         TEXT_DIM,
     );
     super::preview::preview_node(p, preview);
-    menu_button(p, font, MenuAction::CycleSeed, &format!("New seed (now: {})", cfg.seed), false, false);
-    menu_button(p, font, MenuAction::Start, "Begin the Campaign", false, false);
-    menu_button(p, font, MenuAction::Goto(MenuScreen::Main), "Back", false, false);
+    menu_button(p, font, assets, MenuAction::CycleSeed, &format!("New seed (now: {})", cfg.seed), false, false);
+    menu_button(p, font, assets, MenuAction::Start, "Begin the Campaign", false, false);
+    menu_button(p, font, assets, MenuAction::Goto(MenuScreen::Main), "Back", false, false);
 }
 
-fn mp_screen(p: &mut ChildSpawnerCommands, font: &UiFont, form: &MpForm, err: &MpError) {
+fn mp_screen(p: &mut ChildSpawnerCommands, font: &UiFont, assets: &UiAssets, form: &MpForm, err: &MpError) {
     label(p, font, "MULTIPLAYER", FONT_LG, GOLD);
     if let Some(e) = &err.0 {
         label(p, font, e, FONT_SM, WARN);
@@ -265,7 +275,7 @@ fn mp_screen(p: &mut ChildSpawnerCommands, font: &UiFont, form: &MpForm, err: &M
     p.commands_mut().entity(name).insert(NameInput);
 
     label(p, font, "Local network", FONT_SM, TEXT_DIM);
-    menu_button(p, font, MenuAction::HostLan, "Host LAN Game", false, false);
+    menu_button(p, font, assets, MenuAction::HostLan, "Host LAN Game", false, false);
     let ip = text_input(
         p,
         font,
@@ -274,10 +284,10 @@ fn mp_screen(p: &mut ChildSpawnerCommands, font: &UiFont, form: &MpForm, err: &M
         220.0,
     );
     p.commands_mut().entity(ip).insert(IpInput);
-    menu_button(p, font, MenuAction::JoinIp, "Join by IP", false, form.ip.is_empty());
+    menu_button(p, font, assets, MenuAction::JoinIp, "Join by IP", false, form.ip.is_empty());
 
     label(p, font, "Internet (via relay)", FONT_SM, TEXT_DIM);
-    menu_button(p, font, MenuAction::HostInternet, "Host Internet Game", false, false);
+    menu_button(p, font, assets, MenuAction::HostInternet, "Host Internet Game", false, false);
     let room = text_input(
         p,
         font,
@@ -285,40 +295,21 @@ fn mp_screen(p: &mut ChildSpawnerCommands, font: &UiFont, form: &MpForm, err: &M
         220.0,
     );
     p.commands_mut().entity(room).insert(RoomInput);
-    menu_button(p, font, MenuAction::JoinRoom, "Join Room", false, form.room.is_empty());
+    menu_button(p, font, assets, MenuAction::JoinRoom, "Join Room", false, form.room.is_empty());
 
-    menu_button(p, font, MenuAction::Goto(MenuScreen::Main), "Back", false, false);
+    menu_button(p, font, assets, MenuAction::Goto(MenuScreen::Main), "Back", false, false);
 }
 
 fn menu_button(
     p: &mut ChildSpawnerCommands,
     font: &UiFont,
+    assets: &UiAssets,
     action: MenuAction,
     title: &str,
     active: bool,
     disabled: bool,
 ) {
-    let bg = if disabled {
-        BTN_BG_DISABLED
-    } else if active {
-        BTN_BG_ACTIVE
-    } else {
-        BTN_BG
-    };
-    p.spawn((
-        Button,
-        action,
-        Disabled(disabled),
-        Node {
-            padding: UiRect::axes(Val::Px(10.0), Val::Px(5.0)),
-            border: UiRect::all(Val::Px(1.0)),
-            justify_content: JustifyContent::Center,
-            ..default()
-        },
-        BackgroundColor(bg),
-        BorderColor::all(if active { ACCENT } else { PANEL_BORDER }),
-    ))
-    .with_children(|p| label(p, font, title, FONT_MD, if disabled { TEXT_DIM } else { TEXT }));
+    screen_button(p, font, assets, action, title, active, disabled);
 }
 
 /// The disabled-state of Join buttons depends on live typed text, which the
@@ -450,6 +441,7 @@ pub struct GameOverAction;
 pub fn setup_gameover(
     mut commands: Commands,
     font: Res<UiFont>,
+    assets: Res<UiAssets>,
     local: Res<crate::LocalPlayer>,
     q_players: Query<&saladin_protocol::Player>,
     stats: Res<saladin_protocol::MatchStats>,
@@ -482,12 +474,10 @@ pub fn setup_gameover(
                     flex_direction: FlexDirection::Column,
                     align_items: AlignItems::Center,
                     row_gap: Val::Px(4.0),
-                    padding: UiRect::all(Val::Px(14.0)),
-                    border: UiRect::all(Val::Px(1.0)),
+                    padding: UiRect::all(Val::Px(18.0)),
                     ..default()
                 },
-                BackgroundColor(PANEL_BG),
-                BorderColor::all(PANEL_BORDER),
+                panel_bg(&assets),
             ))
             .with_children(|p| {
                 label(p, &font, &format!("Match duration   {duration}"), FONT_MD, TEXT);
@@ -495,18 +485,7 @@ pub fn setup_gameover(
                 label(p, &font, &format!("Units lost       {}", s.lost), FONT_MD, TEXT);
                 label(p, &font, &format!("Resources banked {}", s.gathered), FONT_MD, TEXT);
             });
-            p.spawn((
-                Button,
-                GameOverAction,
-                Node {
-                    padding: UiRect::axes(Val::Px(12.0), Val::Px(6.0)),
-                    border: UiRect::all(Val::Px(1.0)),
-                    ..default()
-                },
-                BackgroundColor(BTN_BG),
-                BorderColor::all(PANEL_BORDER),
-            ))
-            .with_children(|p| label(p, &font, "Back to Menu", FONT_LG, TEXT));
+            screen_button(p, &font, &assets, GameOverAction, "Back to Menu", false, false);
         });
 }
 
@@ -547,7 +526,7 @@ pub enum LobbyAction {
 #[derive(Resource, Default)]
 pub struct LobbyDigest(String);
 
-pub fn setup_lobby(mut commands: Commands) {
+pub fn setup_lobby(mut commands: Commands, assets: Res<UiAssets>) {
     commands.init_resource::<LobbyDigest>();
     commands.spawn((
         LobbyRoot,
@@ -559,7 +538,7 @@ pub fn setup_lobby(mut commands: Commands) {
             justify_content: JustifyContent::Center,
             ..default()
         },
-        BackgroundColor(Color::srgb(0.05, 0.05, 0.08)),
+        ImageNode::new(assets.backdrop.clone()),
     ));
 }
 
@@ -578,6 +557,7 @@ pub fn update_lobby(
     q_root: Query<Entity, With<LobbyRoot>>,
     mut images: ResMut<Assets<Image>>,
     mut previews: ResMut<super::preview::PreviewCache>,
+    assets: Res<UiAssets>,
 ) {
     let guard = conn.0.lock().unwrap();
     let Some(t) = guard.as_ref() else { return };
@@ -602,13 +582,11 @@ pub fn update_lobby(
                 flex_direction: FlexDirection::Column,
                 align_items: AlignItems::Center,
                 row_gap: Val::Px(7.0),
-                padding: UiRect::all(Val::Px(16.0)),
-                border: UiRect::all(Val::Px(1.0)),
-                min_width: Val::Px(380.0),
+                padding: UiRect::all(Val::Px(22.0)),
+                min_width: Val::Px(400.0),
                 ..default()
             },
-            BackgroundColor(PANEL_BG),
-            BorderColor::all(PANEL_BORDER),
+            panel_bg(&assets),
         ))
         .with_children(|p| {
             label(p, &font, "MULTIPLAYER LOBBY", FONT_LG, GOLD);
@@ -645,8 +623,8 @@ pub fn update_lobby(
                 if is_host {
                     p.spawn((Node { flex_direction: FlexDirection::Row, column_gap: Val::Px(4.0), ..default() },))
                         .with_children(|p| {
-                            lobby_button(p, &font, LobbyAction::CycleSeed, "New seed", false);
-                            lobby_button(p, &font, LobbyAction::CyclePreset, "Next map type", false);
+                            lobby_button(p, &font, &assets, LobbyAction::CycleSeed, "New seed", false);
+                            lobby_button(p, &font, &assets, LobbyAction::CyclePreset, "Next map type", false);
                         });
                 }
 
@@ -673,7 +651,7 @@ pub fn update_lobby(
                         .with_children(|p| {
                             label(p, &font, &row, FONT_SM, color);
                             if is_host && pl.is_ai {
-                                lobby_button(p, &font, LobbyAction::RemoveAi(pl.id), "x", false);
+                                lobby_button(p, &font, &assets, LobbyAction::RemoveAi(pl.id), "x", false);
                             }
                         });
                 }
@@ -683,14 +661,14 @@ pub fn update_lobby(
                 p.spawn((Node { flex_direction: FlexDirection::Row, column_gap: Val::Px(4.0), ..default() },))
                     .with_children(|p| {
                         for (f, name) in [(Faction::Ayyubid, "Ayyubids"), (Faction::Crusader, "Crusaders")] {
-                            lobby_faction_button(p, &font, f, name, my_faction == Some(f));
+                            lobby_faction_button(p, &font, &assets, f, name, my_faction == Some(f));
                         }
                     });
 
                 if is_host {
-                    lobby_button(p, &font, LobbyAction::AddAi, "Add AI opponent", l.players.len() >= 8);
+                    lobby_button(p, &font, &assets, LobbyAction::AddAi, "Add AI opponent", l.players.len() >= 8);
                     let can_start = l.players.len() >= 2 && l.all_ready();
-                    lobby_button(p, &font, LobbyAction::Start, "Start Match", !can_start);
+                    lobby_button(p, &font, &assets, LobbyAction::Start, "Start Match", !can_start);
                     if !l.all_ready() {
                         label(p, &font, "Waiting for everyone to ready up...", FONT_SM, TEXT_DIM);
                     }
@@ -698,6 +676,7 @@ pub fn update_lobby(
                     lobby_button(
                         p,
                         &font,
+                        &assets,
                         LobbyAction::ToggleReady,
                         if me_ready { "Ready! (click to unready)" } else { "Ready up" },
                         false,
@@ -705,7 +684,7 @@ pub fn update_lobby(
                     label(p, &font, "Waiting for the host to start...", FONT_SM, TEXT_DIM);
                 }
             }
-            lobby_button(p, &font, LobbyAction::Cancel, "Leave Lobby", false);
+            lobby_button(p, &font, &assets, LobbyAction::Cancel, "Leave Lobby", false);
         });
     });
 }
@@ -713,47 +692,23 @@ pub fn update_lobby(
 fn lobby_faction_button(
     p: &mut ChildSpawnerCommands,
     font: &UiFont,
+    assets: &UiAssets,
     f: Faction,
     name: &str,
     active: bool,
 ) {
-    p.spawn((
-        Button,
-        LobbyAction::Faction(f),
-        Disabled(false),
-        Node {
-            padding: UiRect::axes(Val::Px(10.0), Val::Px(5.0)),
-            border: UiRect::all(Val::Px(1.0)),
-            justify_content: JustifyContent::Center,
-            ..default()
-        },
-        BackgroundColor(if active { BTN_BG_ACTIVE } else { BTN_BG }),
-        BorderColor::all(if active { ACCENT } else { PANEL_BORDER }),
-    ))
-    .with_children(|p| label(p, font, name, FONT_MD, TEXT));
+    screen_button(p, font, assets, LobbyAction::Faction(f), name, active, false);
 }
 
 fn lobby_button(
     p: &mut ChildSpawnerCommands,
     font: &UiFont,
+    assets: &UiAssets,
     action: LobbyAction,
     title: &str,
     disabled: bool,
 ) {
-    p.spawn((
-        Button,
-        action,
-        Disabled(disabled),
-        Node {
-            padding: UiRect::axes(Val::Px(10.0), Val::Px(5.0)),
-            border: UiRect::all(Val::Px(1.0)),
-            justify_content: JustifyContent::Center,
-            ..default()
-        },
-        BackgroundColor(if disabled { BTN_BG_DISABLED } else { BTN_BG }),
-        BorderColor::all(PANEL_BORDER),
-    ))
-    .with_children(|p| label(p, font, title, FONT_MD, if disabled { TEXT_DIM } else { TEXT }));
+    screen_button(p, font, assets, action, title, false, disabled);
 }
 
 pub fn lobby_actions(

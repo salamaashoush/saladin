@@ -215,6 +215,7 @@ fn main() {
             ui::text_input::focus_text_inputs,
             ui::text_input::type_into_inputs,
             ui::text_input::render_text_inputs,
+            ui::widgets::button_feedback,
         )
             .chain(),
     )
@@ -303,7 +304,6 @@ fn main() {
             ui::hud::tick_toasts,
             ui::hud::render_toasts,
             ui::actions::handle_actions,
-            ui::actions::button_hover,
             perf::update_perf,
             check_gameover,
         )
@@ -343,6 +343,14 @@ fn main() {
             app.world_mut().resource_mut::<Assets<Font>>().add(Font::from_bytes(data, "ui"));
         app.insert_resource(UiFont(handle));
     }
+    // Same timing constraint for the procedurally baked UI art.
+    {
+        let assets = {
+            let mut images = app.world_mut().resource_mut::<Assets<Image>>();
+            ui::assets::build(&mut images)
+        };
+        app.insert_resource(assets);
+    }
 
     // The camera must exist before the initial OnEnter(Menu) lays out UI.
     camera::spawn_camera(app.world_mut());
@@ -370,6 +378,12 @@ fn main() {
     //   menu  shoot the main menu
     //   mp    shoot the multiplayer screen
     //   lobby host a LAN lobby and shoot it
+    // SALADIN_TAB preselects a build-bar tab (screenshot verification of tabs)
+    if let Ok(s) = std::env::var("SALADIN_TAB")
+        && let Ok(tab) = s.parse::<usize>()
+    {
+        app.world_mut().resource_mut::<ui::actions::BuildTab>().0 = tab;
+    }
     // SALADIN_SEED / SALADIN_PRESET override the menu defaults (screenshot runs)
     if let Ok(s) = std::env::var("SALADIN_SEED")
         && let Ok(seed) = s.parse::<u32>()
@@ -406,6 +420,17 @@ fn main() {
             app.insert_resource(ui::pause::PauseScreen::Menu);
             app.add_systems(Update, auto_screenshot);
         }
+        Ok("research") | Ok("market") => {
+            // conjure + select a building so the screenshot shows its panel
+            // (research on the blacksmith / trade on the market)
+            app.insert_state(GameState::Playing);
+            app.add_systems(Update, (auto_screenshot, auto_select_building));
+        }
+        Ok("layout") => {
+            // in-game + computed-rect dump for HUD layout debugging
+            app.insert_state(GameState::Playing);
+            app.add_systems(Update, (auto_screenshot, debug_layout));
+        }
         Ok("lobby") => {
             let bind = format!("0.0.0.0:{HOST_PORT}");
             if saladin_protocol::spawn_host_relay(&bind).is_ok()
@@ -424,6 +449,77 @@ fn main() {
         _ => {}
     }
     app.run();
+}
+
+/// Screenshot harness only: conjure a building row beside the keep (the way
+/// tests spawn rows) and select it, so SALADIN_AUTO=research/market captures
+/// that building's panel without playing 10 minutes of economy.
+fn auto_select_building(world: &mut World) {
+    use saladin_protocol::{Building, MatchId, NextEntityId, Owner, Pos};
+    use saladin_sim::{BuildingKind, building_def};
+    let kind = if std::env::var("SALADIN_AUTO").as_deref() == Ok("market") {
+        BuildingKind::Market
+    } else {
+        BuildingKind::Blacksmith
+    };
+    let t = world.resource::<Time>().elapsed_secs();
+    if t < 3.0 {
+        return;
+    }
+    let existing = {
+        let mut q = world.query::<(&GameId, &Building)>();
+        q.iter(world).find(|(_, b)| b.kind == kind).map(|(g, _)| g.0)
+    };
+    let id = match existing {
+        Some(id) => id,
+        None => {
+            let keep = {
+                let mut q = world.query::<(&Pos, &Building)>();
+                q.iter(world).find(|(_, b)| b.kind == BuildingKind::Keep).map(|(p, _)| p.pos)
+            };
+            let Some(kp) = keep else { return };
+            let pos = saladin_sim::V2::new(kp.x + saladin_sim::fx!("4"), kp.y + saladin_sim::fx!("2"));
+            let id = world.resource_mut::<NextEntityId>().alloc();
+            world.spawn((
+                GameId(id),
+                Owner(1),
+                MatchId(1),
+                Pos { pos, facing: saladin_sim::Fx::ZERO },
+                Building {
+                    kind,
+                    hp: building_def(kind).max_hp,
+                    cooldown: saladin_sim::Fx::ZERO,
+                    rally: pos,
+                },
+            ));
+            id
+        }
+    };
+    // select via the same source of truth the click path uses
+    let mut sel = world.resource_mut::<selection::Selection>();
+    if sel.building.is_none() {
+        sel.building = Some(id);
+    }
+}
+
+fn debug_layout(
+    time: Res<Time>,
+    mut done: Local<bool>,
+    q_bar: Query<(&bevy::ui::ComputedNode, &bevy::ui::UiGlobalTransform), With<ui::hud::BottomCenter>>,
+    q_text: Query<(&bevy::ui::ComputedNode, &bevy::ui::UiGlobalTransform, &Text)>,
+) {
+    if *done || time.elapsed_secs() < 5.0 {
+        return;
+    }
+    *done = true;
+    for (n, t) in &q_bar {
+        eprintln!("BAR size={:?} pos={:?} inv_scale={}", n.size(), t.translation, n.inverse_scale_factor());
+    }
+    for (n, t, txt) in &q_text {
+        if txt.0.contains("RESEARCH") || txt.0.contains("BLACKSMITH") || txt.0 == "Demolish" || txt.0 == "Mail Armor" {
+            eprintln!("TEXT '{}' size={:?} pos={:?}", txt.0, n.size(), t.translation);
+        }
+    }
 }
 
 fn auto_screenshot(time: Res<Time>, mut done: Local<bool>, mut commands: Commands) {
@@ -565,6 +661,7 @@ fn setup_visuals(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     cfg: Res<WorldConfig>,
+    ui_assets: Res<ui::assets::UiAssets>,
 ) {
     // low-poly terrain from the same worldgen the sim uses
     let terrain_mesh = meshes.add(terrain::build_terrain_mesh(cfg.seed));
@@ -600,7 +697,11 @@ fn setup_visuals(
 
     commands.insert_resource(field);
     commands.insert_resource(render::sync::build_assets(&mut meshes));
-    commands.insert_resource(render::sync::build_materials(&mut materials));
+    commands.insert_resource(render::sync::build_materials(
+        &mut materials,
+        ui_assets.ring.clone(),
+        ui_assets.flag.clone(),
+    ));
     commands.insert_resource(fx::build_arrow_assets(&mut meshes));
 }
 

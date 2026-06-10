@@ -69,7 +69,30 @@ fn overlay(mats: &mut Assets<StandardMaterial>, color: Color, alpha: f32) -> Han
     })
 }
 
-pub fn build_materials(mats: &mut Assets<StandardMaterial>) -> RenderMaterials {
+/// Unlit alpha-blended quad material carrying a baked UI texture (selection
+/// ring dashes, rally cloth).
+fn textured_overlay(
+    mats: &mut Assets<StandardMaterial>,
+    tex: Handle<Image>,
+    tint: Color,
+) -> Handle<StandardMaterial> {
+    mats.add(StandardMaterial {
+        base_color: tint,
+        base_color_texture: Some(tex),
+        unlit: true,
+        alpha_mode: AlphaMode::Blend,
+        cull_mode: None,
+        double_sided: true,
+        depth_bias: 4.0,
+        ..default()
+    })
+}
+
+pub fn build_materials(
+    mats: &mut Assets<StandardMaterial>,
+    ring_tex: Handle<Image>,
+    flag_tex: Handle<Image>,
+) -> RenderMaterials {
     let mut node = HashMap::new();
     for r in [ResourceType::Wood, ResourceType::Stone, ResourceType::Food, ResourceType::Gold] {
         node.insert(
@@ -81,15 +104,23 @@ pub fn build_materials(mats: &mut Assets<StandardMaterial>) -> RenderMaterials {
         team_unit: HashMap::new(),
         team_tint: HashMap::new(),
         node,
-        ring: overlay(mats, Color::srgb_u8(0xff, 0xec, 0x80), 0.9),
-        ring_building: overlay(mats, Color::srgb_u8(0x9b, 0xf0, 0x6b), 0.9),
+        ring: textured_overlay(mats, ring_tex.clone(), Color::WHITE),
+        ring_building: textured_overlay(mats, ring_tex, Color::srgb(0.65, 1.0, 0.55)),
         bar_bg: overlay(mats, Color::srgb_u8(0x14, 0x14, 0x14), 1.0),
         bar_green: overlay(mats, Color::srgb_u8(0x33, 0xdd, 0x44), 1.0),
         bar_yellow: overlay(mats, Color::srgb_u8(0xdd, 0xcc, 0x33), 1.0),
         bar_red: overlay(mats, Color::srgb_u8(0xdd, 0x33, 0x33), 1.0),
         rout: overlay(mats, Color::srgb_u8(0xff, 0x55, 0x33), 1.0),
         flag_pole: overlay(mats, Color::srgb_u8(0x3a, 0x2a, 0x18), 1.0),
-        flag_cloth: overlay(mats, Color::srgb_u8(0x9b, 0xf0, 0x6b), 1.0),
+        flag_cloth: mats.add(StandardMaterial {
+            base_color: Color::WHITE,
+            base_color_texture: Some(flag_tex),
+            unlit: true,
+            cull_mode: None,
+            double_sided: true,
+            depth_bias: 4.0,
+            ..default()
+        }),
         ghost_ok: overlay(mats, Color::srgb_u8(0x44, 0xee, 0x55), 0.5),
         ghost_bad: overlay(mats, Color::srgb_u8(0xee, 0x44, 0x33), 0.5),
         demolish: overlay(mats, Color::srgb_u8(0xff, 0x40, 0x30), 0.4),
@@ -616,7 +647,8 @@ pub fn build_assets(meshes: &mut Assets<Mesh>) -> RenderAssets {
             .map(|k| meshes.add(crate::render::models::building_mesh(*k)))
             .collect(),
         nodes,
-        ring: meshes.add(Mesh::from(Annulus::new(0.42, 0.5))),
+        // flat ground quad; the dashed-ring texture does the shaping
+        ring: meshes.add(Plane3d::default().mesh().size(1.0, 1.0).build()),
         bar_quad: meshes.add(Mesh::from(Rectangle::new(BAR_W, BAR_H))),
         rout_quad: meshes.add(Mesh::from(Rectangle::new(0.34, 0.34))),
         flag_pole: meshes.add(Mesh::from(Cylinder::new(0.04, 1.0))),

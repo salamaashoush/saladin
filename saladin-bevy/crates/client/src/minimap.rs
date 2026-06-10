@@ -54,6 +54,7 @@ pub fn despawn_minimap(mut commands: Commands, q: Query<Entity, With<MinimapCam>
 pub fn update_minimap_viewport(
     windows: Query<&Window>,
     mut q: Query<&mut Camera, With<MinimapCam>>,
+    mut q_frame: Query<&mut Node, With<crate::ui::assets::MinimapFrame>>,
 ) {
     let Ok(window) = windows.single() else { return };
     let Ok(mut cam) = q.single_mut() else { return };
@@ -62,6 +63,17 @@ pub fn update_minimap_viewport(
     if let Some(vp) = cam.viewport.as_mut() {
         vp.physical_position =
             UVec2::new(w.saturating_sub(SIZE + MARGIN), h.saturating_sub(SIZE + MARGIN));
+    }
+    // bronze frame hugging the viewport (UI works in logical px)
+    if let Ok(mut node) = q_frame.single_mut() {
+        let s = window.scale_factor();
+        let size = SIZE as f32 / s;
+        let margin = MARGIN as f32 / s;
+        node.position_type = PositionType::Absolute;
+        node.right = Val::Px(margin - 2.0);
+        node.bottom = Val::Px(margin - 2.0);
+        node.width = Val::Px(size + 4.0);
+        node.height = Val::Px(size + 4.0);
     }
 }
 

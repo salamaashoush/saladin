@@ -114,22 +114,3 @@ pub fn handle_actions(
     }
 }
 
-/// Hover feedback on enabled buttons.
-pub fn button_hover(
-    mut q: Query<
-        (&Interaction, &Disabled, &mut BackgroundColor),
-        (Changed<Interaction>, With<UiAction>),
-    >,
-) {
-    use super::theme::{BTN_BG, BTN_BG_HOVER};
-    for (i, disabled, mut bg) in &mut q {
-        if disabled.0 {
-            continue;
-        }
-        match i {
-            Interaction::Hovered => bg.0 = BTN_BG_HOVER,
-            Interaction::None => bg.0 = BTN_BG,
-            Interaction::Pressed => {}
-        }
-    }
-}
