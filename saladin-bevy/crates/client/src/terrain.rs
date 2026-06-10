@@ -76,26 +76,20 @@ fn smooth01(t: f32) -> f32 {
 /// Continuous water shading by DEPTH below the waterline — one gradient from
 /// a bright shoreline sliver through shallow turquoise into deep sea, instead
 /// of the old hard Shallow/Deep biome swap that drew a sharp two-tone edge.
-fn water_color(biome: Biome, h_norm: f32, sea: f32) -> [f32; 3] {
-    let depth = (sea - h_norm).max(0.0);
-    let shore = hex_linear(0x8fd0de);
-    let shallow = hex_linear(0x3a86a8);
-    let deep = hex_linear(0x1f5673);
-    let base = if biome == Biome::River { hex_linear(0x3e8fb5) } else { shallow };
-    let mut c = lerp3(shore, base, smooth01(depth / 0.02));
-    // rivers stay readable as rivers: they only darken partway
-    let deep_max = if biome == Biome::River { 0.45 } else { 1.0 };
-    c = lerp3(c, deep, smooth01((depth - 0.025) / 0.12) * deep_max);
-    c
+/// Water shading by DISTANCE TO LAND, not seabed depth — the seabed height
+/// noise made depth-tinting blotch pale patches mid-ocean. A narrow bright
+/// band hugs every coastline; the open sea is one even blue.
+fn water_color(biome: Biome, shore_dist: f32) -> [f32; 3] {
+    let shore = hex_linear(0x7cc3d6);
+    let sea_blue = hex_linear(0x3a86a8);
+    let base = if biome == Biome::River { hex_linear(0x4a96b8) } else { sea_blue };
+    lerp3(shore, base, smooth01(shore_dist / 2.5))
 }
 
 /// Biome base blended toward its shade by elevation, plus snow-cap whitening
 /// and a foam strip on the first sliver of beach above the waterline.
 /// `h_norm` is the raw 0..1 field height; `rel_y` the unscaled render height.
 fn biome_color(biome: Biome, h_norm: f32, rel_y: f32, sea: f32) -> [f32; 3] {
-    if matches!(biome, Biome::DeepWater | Biome::ShallowWater | Biome::River) {
-        return water_color(biome, h_norm, sea);
-    }
     let def = biome_def(biome);
     let mut c = lerp3(hex_linear(def.color), hex_linear(def.shade), rel_y * 0.045);
     if biome == Biome::Snow {
@@ -110,6 +104,41 @@ fn biome_color(biome: Biome, h_norm: f32, rel_y: f32, sea: f32) -> [f32; 3] {
     c
 }
 
+/// Tile distance to the nearest passable land, multi-source BFS over the
+/// whole grid (water tiles only; land = 0). Render-side, computed per mesh
+/// build — cheap (one pass over the map).
+fn land_distance_grid(seed: u32) -> Vec<f32> {
+    use std::collections::VecDeque;
+    let n = WORLD_SIZE;
+    let pass = saladin_sim::passable_grid(seed);
+    let mut dist = vec![f32::MAX; (n * n) as usize];
+    let mut q = VecDeque::new();
+    for ty in 0..n {
+        for tx in 0..n {
+            let i = (ty * n + tx) as usize;
+            if pass[i] {
+                dist[i] = 0.0;
+                q.push_back((tx, ty));
+            }
+        }
+    }
+    while let Some((tx, ty)) = q.pop_front() {
+        let d = dist[(ty * n + tx) as usize];
+        for (dx, dy) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
+            let (nx, ny) = (tx + dx, ty + dy);
+            if nx < 0 || ny < 0 || nx >= n || ny >= n {
+                continue;
+            }
+            let i = (ny * n + nx) as usize;
+            if dist[i] > d + 1.0 {
+                dist[i] = d + 1.0;
+                q.push_back((nx, ny));
+            }
+        }
+    }
+    dist
+}
+
 /// Continuous vertex-colored terrain heightmap: one shared vertex per tile corner
 /// (so there are NO gaps between height steps), colored by biome. Built once from
 /// the seed — the same worldgen the sim uses for passability/resources.
@@ -121,6 +150,7 @@ pub fn build_terrain_mesh(seed: u32) -> Mesh {
     let sun = SUN.normalize();
 
     let sea = SEA_LEVEL + seed_bias(seed).sea_shift.to_num::<f32>();
+    let shore_dist = land_distance_grid(seed);
     for vy in 0..=n {
         for vx in 0..=n {
             let s = sample_terrain(seed, Fx::from_num(vx), Fx::from_num(vy));
@@ -128,7 +158,14 @@ pub fn build_terrain_mesh(seed: u32) -> Mesh {
                 render_height(s.height, biome_height_emphasis(s.biome), seed_bias(seed).elev_gain).to_num::<f32>();
             positions.push([vx as f32, h_raw * TERRAIN_SCALE, vy as f32]);
 
-            let c = biome_color(s.biome, s.height.to_num::<f32>(), h_raw, sea);
+            let water = matches!(s.biome, Biome::DeepWater | Biome::ShallowWater | Biome::River);
+            let c = if water {
+                let gx = vx.clamp(0, n - 1);
+                let gy = vy.clamp(0, n - 1);
+                water_color(s.biome, shore_dist[(gy * n + gx) as usize])
+            } else {
+                biome_color(s.biome, s.height.to_num::<f32>(), h_raw, sea)
+            };
 
             // Directional slope tint: finite-difference normal from neighbour
             // render heights — sun-facing slopes lighten, far sides darken.
@@ -137,8 +174,10 @@ pub fn build_terrain_mesh(seed: u32) -> Mesh {
             let lit = Vec3::new(h_raw - hx, 1.0, h_raw - hz).normalize().dot(sun);
             let shade_mul = 0.86 + lit.clamp(-1.0, 1.0) * 0.16;
 
-            // Deterministic per-vertex dither so flat facets get a touch of grain.
-            let dither = (hash2(vx, vy, seed ^ 0x5eed).to_num::<f32>() - 0.5) * 0.05;
+            // Deterministic per-vertex dither so flat facets get a touch of
+            // grain; water gets more — wave glints keep the open sea alive.
+            let grain_amp = if water { 0.07 } else { 0.05 };
+            let dither = (hash2(vx, vy, seed ^ 0x5eed).to_num::<f32>() - 0.5) * grain_amp;
 
             let m = (shade_mul + dither).max(0.55);
             colors.push([c[0] * m, c[1] * m, c[2] * m, 1.0]);
