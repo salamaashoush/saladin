@@ -38,14 +38,19 @@ pub const GOLD_NODES: i32 = 160;
 pub const GOLD_YIELD: i32 = 140;
 pub const FOOD_NODES: i32 = 360;
 pub const FOOD_YIELD: i32 = 160;
+/// Fish replenished per economy tick on every water food node inside a
+/// fishing hut's reach — huts sustain their fishery; unmanaged waters fish out.
+pub const FISH_REGEN_PER_TICK: i32 = 2;
 
 // Food economy: every owned unit eats FOOD_PER_UNIT per economy tick; an empty
 // stockpile bleeds STARVE_DPS hp/sec.
 pub const FOOD_PER_UNIT: i32 = 1;
 pub const STARVE_DPS: Fx = crate::fx!("4");
 
-// Market: sell MARKET_RATE units of a good for one gold.
+// Market: sell MARKET_RATE units of a good for one gold; buying costs
+// MARKET_BUY_RATE gold per unit — the spread is the merchant's cut.
 pub const MARKET_RATE: i32 = 2;
+pub const MARKET_BUY_RATE: i32 = 2;
 
 pub const START_PEASANTS: i32 = 5;
 pub const START_WOOD: i32 = 60;

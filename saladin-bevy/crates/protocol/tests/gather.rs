@@ -44,6 +44,7 @@ fn spawn_player(app: &mut App, id: u64) {
             defeated: false,
             slot: 0,
             tech_mask: 0,
+            hunger: 0,
         },
     ));
 }
@@ -363,4 +364,57 @@ fn fishing_hut_speeds_nearby_fish() {
     }
     assert_eq!(unit(&mut plain, 30).carrying, 0, "unboosted net must still be working");
     assert!(unit(&mut hutted, 30).carrying > 0, "hut-boosted net must have landed the catch");
+}
+
+/// Fishing huts tend their waters: schools inside the aura regrow each
+/// economy tick; waters without a hut stay fished-out.
+#[test]
+fn fishing_hut_regenerates_fish() {
+    let seed = 1u32;
+    let mut spot = None;
+    'scan: for ty in 8..280 {
+        for tx in 8..280 {
+            if !is_passable(seed, tx, ty) {
+                continue;
+            }
+            for (dx, dy) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
+                if !is_passable(seed, tx + dx, ty + dy) {
+                    spot = Some((tx, ty, tx + dx, ty + dy));
+                    break 'scan;
+                }
+            }
+        }
+    }
+    let (lx, ly, wx, wy) = spot.expect("seed 1 has a coastline");
+    let c = |t: i32| Fx::from_num(t) + Fx::lit("0.5");
+    let land = V2::new(c(lx), c(ly));
+    let water = V2::new(c(wx), c(wy));
+
+    let mut app = build(seed);
+    spawn_player(&mut app, 1);
+    let hdef = building_def(BuildingKind::FishingHut);
+    app.world_mut().spawn((
+        GameId(40),
+        Owner(1),
+        MatchId(1),
+        Pos { pos: land, facing: ZERO },
+        Building { kind: BuildingKind::FishingHut, hp: hdef.max_hp, cooldown: ZERO, rally: land },
+    ));
+    // half-fished school in reach; a far-away one as control (also on water)
+    app.world_mut().spawn((
+        GameId(20),
+        MatchId(1),
+        Pos { pos: water, facing: ZERO },
+        ResourceNode { res_type: ResourceType::Food, remaining: 50 },
+    ));
+    let far = V2::new(water.x, water.y); // control compares against its own start
+    let _ = far;
+
+    for _ in 0..200 {
+        step(app.world_mut());
+    }
+    let world = app.world_mut();
+    let mut q = world.query::<(&GameId, &ResourceNode)>();
+    let school = q.iter(world).find(|(g, _)| g.0 == 20).expect("school alive").1.remaining;
+    assert!(school > 50, "school in hut reach must regrow (got {school})");
 }

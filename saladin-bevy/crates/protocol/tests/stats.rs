@@ -52,6 +52,7 @@ fn spawn_player(app: &mut App, id: u64) {
             defeated: false,
             slot: id as u8,
             tech_mask: 0,
+            hunger: 0,
         },
     ));
 }

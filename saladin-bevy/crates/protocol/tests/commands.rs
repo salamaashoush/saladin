@@ -48,6 +48,7 @@ fn spawn_player(app: &mut App, id: u64, stock: Stockpile) {
             defeated: false,
             slot: id as u8,
             tech_mask: 0,
+            hunger: 0,
         },
     ));
 }
@@ -432,4 +433,33 @@ fn garrisoned_archers_let_walls_fire() {
     }
     let hp = unit_by_id(&mut app, 30).hp;
     assert!(hp < unit_def(UnitKind::Peasant).max_hp, "manned gatehouse fires, peasant hp {hp}");
+}
+
+#[test]
+fn market_buys_food_with_gold_at_a_spread() {
+    let mut app = build();
+    let (cx, cy) = find_land_block(1);
+    let f = |n: i32| Fx::from_num(n) + Fx::lit("0.5");
+    spawn_player(&mut app, 1, Stockpile { wood: 0, stone: 0, food: 0, gold: 100 });
+    spawn_building(&mut app, 10, 1, BuildingKind::Market, V2::new(f(cx + 1), f(cy + 1)));
+
+    cmd(&mut app, PlayerCommand::MarketBuy { player_id: 1, res: ResourceType::Food, amount: 20 });
+    step(app.world_mut());
+    let s = player_stock(&mut app, 1);
+    assert_eq!(s.food, 20, "bought the full lot, got {s:?}");
+    assert_eq!(s.gold, 100 - 20 * saladin_sim::MARKET_BUY_RATE, "paid the spread, got {s:?}");
+    // round trip is lossy by design: sell it straight back
+    cmd(&mut app, PlayerCommand::MarketTrade { player_id: 1, res: ResourceType::Food, amount: 20 });
+    step(app.world_mut());
+    let s2 = player_stock(&mut app, 1);
+    assert!(s2.gold < 100, "the merchant's cut makes buy/sell loops a loss, got {s2:?}");
+}
+
+#[test]
+fn market_buy_requires_market_and_gold() {
+    let mut app = build();
+    spawn_player(&mut app, 1, Stockpile { wood: 0, stone: 0, food: 0, gold: 100 });
+    cmd(&mut app, PlayerCommand::MarketBuy { player_id: 1, res: ResourceType::Food, amount: 20 });
+    step(app.world_mut());
+    assert_eq!(player_stock(&mut app, 1).food, 0, "no market, no purchase");
 }

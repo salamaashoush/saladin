@@ -161,6 +161,7 @@ pub(crate) fn found_player(world: &mut World, player_id: u64, name: &str, factio
             defeated: false,
             slot: slot as u8,
             tech_mask: 0,
+            hunger: 0,
         },
     ));
 

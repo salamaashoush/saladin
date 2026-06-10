@@ -18,6 +18,7 @@ pub enum UiAction {
     ToggleDemolish,
     GatherAll,
     Sell(ResourceType),
+    Buy(ResourceType),
     Train(UnitKind),
     Research(u8),
     Ungarrison,
@@ -55,6 +56,9 @@ pub fn handle_actions(
             UiAction::GatherAll => input.0.push(PlayerCommand::AutoGather { player_id: me }),
             UiAction::Sell(res) => {
                 input.0.push(PlayerCommand::MarketTrade { player_id: me, res, amount: MARKET_LOT })
+            }
+            UiAction::Buy(res) => {
+                input.0.push(PlayerCommand::MarketBuy { player_id: me, res, amount: MARKET_LOT })
             }
             UiAction::Train(kind) => input.0.push(PlayerCommand::Train { player_id: me, kind }),
             UiAction::Research(tech) => {

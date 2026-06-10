@@ -4,11 +4,10 @@ use crate::NextEntityId;
 use bevy_ecs::prelude::*;
 use saladin_sim::*;
 
-/// Sell wood or stone for gold at the market rate. Mirrors `marketTrade`:
-/// requires an owned Market, only raw resources trade, the sale rounds down to
-/// whole lots so a coin is never minted for free.
+/// Sell wood, stone or food for gold at the market rate. Requires an owned
+/// Market; the sale rounds down to whole lots so a coin is never minted free.
 pub(crate) fn market_trade(world: &mut World, owner: u64, res: ResourceType, amount: i32) {
-    if !matches!(res, ResourceType::Wood | ResourceType::Stone) {
+    if res == ResourceType::Gold {
         return;
     }
     if !owned_building_kinds(world, owner).contains(&BuildingKind::Market) {
@@ -22,6 +21,25 @@ pub(crate) fn market_trade(world: &mut World, owner: u64, res: ResourceType, amo
     }
     p.stock.add(res, -sale.spent);
     p.stock.gold += sale.gold;
+}
+
+/// Buy wood, stone or food with gold at the (worse) buy rate — the reverse
+/// leg of the market, for rescuing a starving army or a stalled build.
+pub(crate) fn market_buy_cmd(world: &mut World, owner: u64, res: ResourceType, amount: i32) {
+    if res == ResourceType::Gold {
+        return;
+    }
+    if !owned_building_kinds(world, owner).contains(&BuildingKind::Market) {
+        return;
+    }
+    let mut q = world.query::<&mut Player>();
+    let Some(mut p) = q.iter_mut(world).find(|p| p.player_id == owner) else { return };
+    let buy = market_buy(p.stock.gold, amount);
+    if !buy.ok {
+        return;
+    }
+    p.stock.gold -= buy.gold_spent;
+    p.stock.add(res, buy.gained);
 }
 
 /// Begin researching a Blacksmith tech for `owner`. Mirrors `startResearchFor`:

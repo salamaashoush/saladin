@@ -64,7 +64,7 @@ pub use combat::{Attacker, CombatAct, DEFENSIVE_LEASH, acquire_target, combat_ac
 pub use constants::*;
 pub use economy::{
     FOOD_RESERVE_PER_POP, GATHER_PRIORITY, ResourceCost, Stockpile, TradeResult, UpkeepResult,
-    apply_upkeep, apply_upkeep_default, balanced_gather_types, food_low, market_sale,
+    apply_upkeep, apply_upkeep_default, balanced_gather_types, food_low, market_buy, market_sale,
 };
 pub use elevation::{ELEV_BONUS_MAX, ELEV_BONUS_SPAN, elevation, elevation_at, elevation_range_bonus};
 pub use enums::*;

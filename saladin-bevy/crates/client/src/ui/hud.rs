@@ -374,12 +374,14 @@ fn build_build_bar(
                     );
                 }
             });
-            // trade group on the market (sell-only: MARKET_RATE goods -> 1 gold)
+            // trade group on the market: sell goods for gold, buy them back
+            // at the merchant's spread
             if sel_building.kind == BuildingKind::Market {
-                group(c, font, "Trade", |c, font| {
+                group(c, font, "Sell", |c, font| {
                     for (res, key, name) in [
                         (ResourceType::Wood, "res:wood", "Sell Wood"),
                         (ResourceType::Stone, "res:stone", "Sell Stone"),
+                        (ResourceType::Food, "res:food", "Sell Food"),
                     ] {
                         let have = stock.get(res);
                         tool_button(
@@ -390,6 +392,24 @@ fn build_build_bar(
                             name,
                             Some(format!("{MARKET_LOT} for {} Gold", MARKET_LOT / saladin_sim::MARKET_RATE)),
                             BtnStyle { disabled: have < MARKET_LOT, icon: assets.icon(key), ..default() },
+                        );
+                    }
+                });
+                group(c, font, "Buy", |c, font| {
+                    for (res, key, name) in [
+                        (ResourceType::Wood, "res:wood", "Buy Wood"),
+                        (ResourceType::Stone, "res:stone", "Buy Stone"),
+                        (ResourceType::Food, "res:food", "Buy Food"),
+                    ] {
+                        let cost = MARKET_LOT * saladin_sim::MARKET_BUY_RATE;
+                        tool_button(
+                            c,
+                            font,
+                            assets,
+                            UiAction::Buy(res),
+                            name,
+                            Some(format!("{MARKET_LOT} for {cost} Gold")),
+                            BtnStyle { disabled: stock.gold < cost, icon: assets.icon(key), ..default() },
                         );
                     }
                 });

@@ -80,6 +80,9 @@ pub struct Player {
     pub defeated: bool,
     pub slot: u8,
     pub tech_mask: u64,
+    /// Consecutive starving economy ticks — drives the grace/ramp escalation.
+    #[serde(default)]
+    pub hunger: i32,
 }
 
 /// AI driver state attached to a bot player entity.

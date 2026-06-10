@@ -36,6 +36,7 @@ pub enum PlayerCommand {
     Demolish { player_id: u64, building: u64 },
     PlaceWall { player_id: u64, tiles: Vec<(i32, i32)> },
     MarketTrade { player_id: u64, res: ResourceType, amount: i32 },
+    MarketBuy { player_id: u64, res: ResourceType, amount: i32 },
     StartResearch { player_id: u64, building: u64, tech: u8 },
     AutoGather { player_id: u64 },
     Pause { player_id: u64 },
@@ -93,6 +94,9 @@ pub fn apply_commands(world: &mut World) {
             }
             PlayerCommand::MarketTrade { player_id, res, amount } => {
                 economy_cmds::market_trade(world, player_id, res, amount)
+            }
+            PlayerCommand::MarketBuy { player_id, res, amount } => {
+                economy_cmds::market_buy_cmd(world, player_id, res, amount)
             }
             PlayerCommand::StartResearch { player_id, building, tech } => {
                 economy_cmds::start_research_at(world, player_id, building, tech);
