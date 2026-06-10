@@ -1,6 +1,7 @@
 use crate::buildings_defs::building_def;
 use crate::combat::{Attacker, effective_damage};
-use crate::enums::{BuildingKind, UnitKind};
+use crate::constants::{MARKET_BUY_RATE, MARKET_RATE};
+use crate::enums::{BuildingKind, ResourceType, UnitKind};
 use crate::math::{Fx, V2};
 use crate::units::unit_def;
 use serde::{Deserialize, Serialize};
@@ -50,6 +51,11 @@ pub struct PlannerState {
     pub enemy: Census,
     pub enemy_has_walls: bool,
     pub threat_near_home: i32,
+    /// Open water within building reach of the keep — enables a Fishing Hut.
+    pub shore_near: bool,
+    /// Standing enemy defensive structures (towers/watchtowers) — weigh into
+    /// the assault go/no-go alongside their field army.
+    pub enemy_towers: i32,
 }
 
 /// Tuning the planner reads — decision QUALITY + cadence, never a handicap.
@@ -69,6 +75,20 @@ pub struct PlannerTuning {
     pub defend_threat: i32,
     pub food_floor: i32,
     pub reserve_peasants: i32,
+    /// Grow the army goal to enemy strength + this margin (0 = static target).
+    pub army_match_margin: i32,
+    /// Ceiling on the grown army goal.
+    pub army_cap: i32,
+    /// Ceiling on the grown peasant goal.
+    pub peasant_cap: i32,
+    /// How many of the top counter kinds the army mixes (1 = monoculture).
+    pub mix_size: i32,
+    pub wants_market: bool,
+    pub wants_fishing: bool,
+    /// Below this gold, sell a glut resource at the market for a war chest.
+    pub gold_floor: i32,
+    /// Wood/stone above this is a glut the market may sell down.
+    pub sell_threshold: i32,
 }
 
 /// Food crisis: the larder is at/under the floor while an army eats from it.
@@ -148,40 +168,187 @@ pub fn counter_composition(
     wants_siege: bool,
     enemy_has_walls: bool,
 ) -> UnitKind {
-    let trainable: Vec<UnitKind> = FIELD_UNITS.iter().copied().filter(|k| can_train(*k, owned)).collect();
-    if trainable.is_empty() {
-        return UnitKind::Spearman;
-    }
+    next_army_kind(enemy, &[0; 10], owned, wants_siege, enemy_has_walls, 1, i32::MAX)
+}
+
+/// Non-siege trainable counters ranked by score, best first. Ties break toward
+/// FIELD_UNITS order (stable sort over a tech-ordered scan), so deterministic.
+pub fn ranked_counters(enemy: &Census, owned: &HashSet<BuildingKind>) -> Vec<(UnitKind, Fx)> {
+    let mut v: Vec<(UnitKind, Fx)> = FIELD_UNITS
+        .iter()
+        .copied()
+        .filter(|k| can_train(*k, owned) && !unit_def(*k).prefers_buildings)
+        .map(|k| (k, counter_score(k, enemy)))
+        .collect();
+    v.sort_by(|a, b| b.1.cmp(&a.1));
+    v
+}
+
+/// The next unit to train: a score-weighted MIX of the top `mix_size` counters,
+/// picking whichever the current army is furthest below its target share of.
+/// Kinds whose gold cost exceeds `gold` are skipped when an affordable
+/// candidate exists — a bot with no gold engine must never deadlock its
+/// training on a cavalry pick it can't pay for.
+pub fn next_army_kind(
+    enemy: &Census,
+    own: &Census,
+    owned: &HashSet<BuildingKind>,
+    wants_siege: bool,
+    enemy_has_walls: bool,
+    mix_size: i32,
+    gold: i32,
+) -> UnitKind {
     if enemy_has_walls && wants_siege {
-        if trainable.contains(&UnitKind::Mangonel) {
+        if can_train(UnitKind::Mangonel, owned) && unit_def(UnitKind::Mangonel).cost.gold <= gold {
             return UnitKind::Mangonel;
         }
-        if trainable.contains(&UnitKind::Ram) {
+        if can_train(UnitKind::Ram, owned) {
             return UnitKind::Ram;
         }
     }
-    if census_total(enemy) == 0 {
-        if trainable.contains(&UnitKind::Spearman) {
-            return UnitKind::Spearman;
-        }
-        if trainable.contains(&UnitKind::Archer) {
-            return UnitKind::Archer;
-        }
-        return trainable[0];
+    let ranked = ranked_counters(enemy, owned);
+    if ranked.is_empty() {
+        return UnitKind::Spearman;
     }
-    let mut best = trainable[0];
-    let mut best_score = Fx::MIN;
-    for k in trainable {
-        if unit_def(k).prefers_buildings {
+    if census_total(enemy) == 0 {
+        // nothing to counter yet: cheap line infantry
+        for k in [UnitKind::Spearman, UnitKind::Archer] {
+            if ranked.iter().any(|(r, _)| *r == k) {
+                return k;
+            }
+        }
+        return ranked[0].0;
+    }
+    let mix: Vec<(UnitKind, Fx)> = ranked
+        .iter()
+        .copied()
+        .take(mix_size.max(1) as usize)
+        .filter(|(_, s)| *s > Fx::ZERO)
+        .collect();
+    let mix = if mix.is_empty() { vec![ranked[0]] } else { mix };
+    let affordable_exists = mix.iter().any(|(k, _)| unit_def(*k).cost.gold <= gold);
+    let score_total: Fx = mix.iter().map(|(_, s)| *s).sum();
+    let own_total: i32 = mix.iter().map(|(k, _)| own[*k as usize].max(0)).sum();
+    // largest deficit: target share (score/total) minus current share
+    let mut best = mix[0].0;
+    let mut best_deficit = Fx::MIN;
+    for (k, s) in &mix {
+        if affordable_exists && unit_def(*k).cost.gold > gold {
             continue;
         }
-        let s = counter_score(k, enemy);
-        if s > best_score {
-            best_score = s;
-            best = k;
+        let target_share = if score_total > Fx::ZERO { *s / score_total } else { Fx::ZERO };
+        let current_share = if own_total > 0 {
+            Fx::from_num(own[*k as usize].max(0)) / Fx::from_num(own_total)
+        } else {
+            Fx::ZERO
+        };
+        let deficit = target_share - current_share;
+        if deficit > best_deficit {
+            best_deficit = deficit;
+            best = *k;
         }
     }
     best
+}
+
+/// Army goal grown to answer the enemy's actual strength, within the cap.
+pub fn dynamic_army_target(s: &PlannerState, tune: &PlannerTuning) -> i32 {
+    if tune.army_match_margin <= 0 {
+        return tune.army_target;
+    }
+    let matched = census_total(&s.enemy) + tune.army_match_margin;
+    tune.army_target.max(matched).min(tune.army_cap.max(tune.army_target))
+}
+
+/// Economy goal scales with military ambition: half the extra mouths over the
+/// base army target become extra gatherers, within the cap.
+pub fn dynamic_peasant_target(s: &PlannerState, tune: &PlannerTuning) -> i32 {
+    let extra = (dynamic_army_target(s, tune) - tune.army_target).max(0);
+    (tune.peasant_target + extra / 2).min(tune.peasant_cap.max(tune.peasant_target))
+}
+
+/// One market order: sell a glut or buy a shortage. `buy` spends gold.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TradeDecision {
+    pub res: ResourceType,
+    pub amount: i32,
+    pub buy: bool,
+}
+
+/// The single best market move this window, if any. Famine rescue first (gold
+/// into food), then war-chest building (deepest glut into gold) — the only
+/// gold engine a bot without mines has, and cavalry/siege/tech all cost gold.
+pub fn next_trade(s: &PlannerState, tune: &PlannerTuning) -> Option<TradeDecision> {
+    if !s.owned.contains(&BuildingKind::Market) {
+        return None;
+    }
+    if food_crisis(s, tune) && s.gold >= MARKET_BUY_RATE {
+        let want = (s.upkeep * tune.food_floor_mult).max(20);
+        let amount = want.min(s.gold / MARKET_BUY_RATE);
+        return Some(TradeDecision { res: ResourceType::Food, amount, buy: true });
+    }
+    if s.gold >= tune.gold_floor {
+        return None;
+    }
+    let (res, bal) = if s.wood >= s.stone {
+        (ResourceType::Wood, s.wood)
+    } else {
+        (ResourceType::Stone, s.stone)
+    };
+    let spare = bal - tune.sell_threshold;
+    if spare >= MARKET_RATE {
+        return Some(TradeDecision { res, amount: spare.min(60), buy: false });
+    }
+    // a deep food pile beyond any famine cushion is tradeable too
+    let cushion = tune.food_floor * 8 + s.upkeep * tune.food_floor_mult * 4;
+    let fspare = s.food - cushion;
+    if fspare >= MARKET_RATE * 10 {
+        return Some(TradeDecision { res: ResourceType::Food, amount: fspare.min(40), buy: false });
+    }
+    None
+}
+
+/// Power a defensive tower adds to the defender side of the assault gate.
+pub const TOWER_POWER: Fx = crate::fx!("12");
+
+/// HP-weighted counter-DPS of `mine` against `vs` — the strength estimate both
+/// sides of the assault go/no-go use. Durable units count for more than glass.
+pub fn army_power(mine: &Census, vs: &Census) -> Fx {
+    let mut total = Fx::ZERO;
+    for k in UnitKind::ALL {
+        let n = mine[*k as usize];
+        if n <= 0 {
+            continue;
+        }
+        let dps = counter_score(*k, vs);
+        if dps <= Fx::ZERO {
+            continue;
+        }
+        let durability = Fx::from_num(unit_def(*k).max_hp + 100) / Fx::from_num(200);
+        total += dps * durability * Fx::from_num(n);
+    }
+    total
+}
+
+/// Launch only with a real strength edge: my power must beat the defender's
+/// field army + static defenses by `margin_pct` percent. Negative margin
+/// disables the gate (Easy attacks on muster, as before).
+pub fn should_assault(mine: &Census, enemy: &Census, enemy_towers: i32, margin_pct: i32) -> bool {
+    if margin_pct < 0 {
+        return true;
+    }
+    let my = army_power(mine, enemy);
+    let their = army_power(enemy, mine) + Fx::from_num(enemy_towers) * TOWER_POWER;
+    if their <= Fx::ZERO {
+        return true;
+    }
+    my * Fx::from_num(100) >= their * Fx::from_num(100 + margin_pct)
+}
+
+/// A wave that has bled below `retreat_pct` percent of its launch strength
+/// breaks off instead of feeding the rest in. Zero disables.
+pub fn should_retreat(launched: i32, alive: i32, retreat_pct: i32) -> bool {
+    retreat_pct > 0 && launched > 0 && alive * 100 < launched * retreat_pct
 }
 
 /// Transition phase from live state. Threat always wins.
@@ -247,23 +414,40 @@ pub fn next_build(s: &PlannerState, tune: &PlannerTuning) -> Option<BuildDecisio
     let has = |k: BuildingKind| s.owned.contains(&k);
     let pop_headroom = s.cap - s.pop;
     let pop_full = pop_headroom <= 0;
+    let peasant_goal = dynamic_peasant_target(s, tune);
+    let army_goal = dynamic_army_target(s, tune);
+    let pick_army = || {
+        let kind = next_army_kind(
+            &s.enemy,
+            &s.army_composition,
+            &s.owned,
+            tune.wants_siege,
+            s.enemy_has_walls,
+            tune.mix_size,
+            s.gold,
+        );
+        train(kind, trainer_for(kind))
+    };
 
-    // 0) Food crisis: stop adding eaters, grow gatherers.
+    // 0) Food crisis: stop adding eaters, grow the food economy.
     if food_crisis(s, tune) {
-        if s.peasants < tune.peasant_target + tune.reserve_peasants && !pop_full {
+        if s.peasants < peasant_goal + tune.reserve_peasants && !pop_full {
             return Some(train(UnitKind::Peasant, BuildingKind::Keep));
         }
         if pop_full {
             return Some(house());
         }
+        if tune.wants_fishing && s.shore_near && !has(BuildingKind::FishingHut) {
+            return Some(build(BuildingKind::FishingHut));
+        }
         if has(BuildingKind::Keep) && !has(BuildingKind::Granary) {
             return Some(build(BuildingKind::Granary));
         }
-        return None;
+        return None; // next_trade may still buy food with gold
     }
 
-    // 1) Economy: peasants to target.
-    if s.peasants < tune.peasant_target && !pop_full {
+    // 1) Economy: peasants to the (growing) target.
+    if s.peasants < peasant_goal && !pop_full {
         return Some(train(UnitKind::Peasant, BuildingKind::Keep));
     }
 
@@ -281,8 +465,20 @@ pub fn next_build(s: &PlannerState, tune: &PlannerTuning) -> Option<BuildDecisio
     let tech_complete = (!tune.wants_cavalry || has(BuildingKind::Stable))
         && (!tune.wants_siege || (has(BuildingKind::Blacksmith) && has(BuildingKind::SiegeWorkshop)));
     if !tech_complete && s.soldiers < tune.core_army && !pop_full {
-        let kind = counter_composition(&s.enemy, &s.owned, tune.wants_siege, s.enemy_has_walls);
-        return Some(train(kind, trainer_for(kind)));
+        return Some(pick_army());
+    }
+
+    // 3b) Economy infrastructure: the Market is the gold engine (cavalry,
+    // siege and tech all cost gold), a Granary shortens food hauls, and a
+    // shoreline Fishing Hut makes food self-sustaining.
+    if tune.wants_market && !has(BuildingKind::Market) {
+        return Some(build(BuildingKind::Market));
+    }
+    if tune.wants_fishing && s.shore_near && !has(BuildingKind::FishingHut) {
+        return Some(build(BuildingKind::FishingHut));
+    }
+    if !has(BuildingKind::Granary) && s.peasants >= 6 {
+        return Some(build(BuildingKind::Granary));
     }
 
     if tune.wants_cavalry && !has(BuildingKind::Stable) {
@@ -295,9 +491,14 @@ pub fn next_build(s: &PlannerState, tune: &PlannerTuning) -> Option<BuildDecisio
         return Some(build(BuildingKind::SiegeWorkshop));
     }
 
-    // 4) Defense towers under threat.
-    if s.threat_near_home >= tune.defend_threat && towers_below_cap(s, tune) {
-        return Some(build(BuildingKind::Tower));
+    // 4) Defense under threat: towers to cap, then upgrade to a Watchtower.
+    if s.threat_near_home >= tune.defend_threat {
+        if towers_below_cap(s, tune) {
+            return Some(build(BuildingKind::Tower));
+        }
+        if has(BuildingKind::Tower) && !has(BuildingKind::Watchtower) {
+            return Some(build(BuildingKind::Watchtower));
+        }
     }
 
     if pop_full {
@@ -328,10 +529,9 @@ pub fn next_build(s: &PlannerState, tune: &PlannerTuning) -> Option<BuildDecisio
         return Some(train(siege, BuildingKind::SiegeWorkshop));
     }
 
-    // 7) Army toward target.
-    if s.soldiers < tune.army_target {
-        let kind = counter_composition(&s.enemy, &s.owned, tune.wants_siege, s.enemy_has_walls);
-        return Some(train(kind, trainer_for(kind)));
+    // 7) Army toward the (enemy-tracking) target.
+    if s.soldiers < army_goal {
+        return Some(pick_army());
     }
 
     // 8) Top up towers with spare wood.
@@ -436,6 +636,11 @@ pub struct TacticalTuning {
     pub scouts: bool,
     pub defend_react_delay: Fx,
     pub raid_react_delay: Fx,
+    /// Required % power edge before a mustered wave launches (-1 = no gate).
+    pub advantage_margin_pct: i32,
+    /// Recall the wave when survivors drop below this % of launch strength
+    /// (0 = fight to the death).
+    pub retreat_pct: i32,
 }
 
 pub fn should_recall(th: &ThreatState, tune: &TacticalTuning) -> bool {
@@ -472,6 +677,56 @@ mod tests {
         s
     }
 
+    fn state(owned: HashSet<BuildingKind>) -> PlannerState {
+        PlannerState {
+            peasants: 10,
+            pop: 10,
+            cap: 20,
+            food: 100,
+            wood: 100,
+            stone: 100,
+            gold: 100,
+            upkeep: 0,
+            soldiers: 0,
+            army_composition: [0; 10],
+            sieges: 0,
+            towers: 0,
+            owned,
+            enemy: [0; 10],
+            enemy_has_walls: false,
+            threat_near_home: 0,
+            shore_near: false,
+            enemy_towers: 0,
+        }
+    }
+
+    fn tuning() -> PlannerTuning {
+        PlannerTuning {
+            peasant_target: 7,
+            army_target: 6,
+            core_army: 4,
+            pop_buffer: 2,
+            food_floor_mult: 6,
+            wood_buffer: 30,
+            max_towers: 1,
+            wants_cavalry: false,
+            wants_siege: false,
+            siege_target: 0,
+            imam_target: 0,
+            defend_threat: 4,
+            food_floor: 12,
+            reserve_peasants: 2,
+            army_match_margin: 0,
+            army_cap: 6,
+            peasant_cap: 7,
+            mix_size: 1,
+            wants_market: false,
+            wants_fishing: false,
+            gold_floor: 0,
+            sell_threshold: i32::MAX,
+        }
+    }
+
     #[test]
     fn counters_archers_with_cavalry_when_available() {
         let mut owned = barracks_only();
@@ -495,83 +750,143 @@ mod tests {
 
     #[test]
     fn opening_builds_peasants() {
-        let s = PlannerState {
-            peasants: 1,
-            pop: 1,
-            cap: 10,
-            food: 100,
-            wood: 100,
-            stone: 50,
-            gold: 0,
-            upkeep: 0,
-            soldiers: 0,
-            army_composition: [0; 10],
-            sieges: 0,
-            towers: 0,
-            owned: barracks_only(),
-            enemy: [0; 10],
-            enemy_has_walls: false,
-            threat_near_home: 0,
-        };
-        let tune = PlannerTuning {
-            peasant_target: 7,
-            army_target: 6,
-            core_army: 4,
-            pop_buffer: 2,
-            food_floor_mult: 6,
-            wood_buffer: 30,
-            max_towers: 1,
-            wants_cavalry: false,
-            wants_siege: false,
-            siege_target: 0,
-            imam_target: 0,
-            defend_threat: 4,
-            food_floor: 12,
-            reserve_peasants: 2,
-        };
-        let d = next_build(&s, &tune).unwrap();
+        let mut s = state(barracks_only());
+        s.peasants = 1;
+        s.pop = 1;
+        s.cap = 10;
+        s.gold = 0;
+        let d = next_build(&s, &tuning()).unwrap();
         assert!(d.is_unit && d.kind == UnitKind::Peasant as u8);
     }
 
     #[test]
     fn threat_forces_defend_phase() {
-        let mut s = PlannerState {
-            peasants: 10,
-            pop: 10,
-            cap: 20,
-            food: 100,
-            wood: 100,
-            stone: 100,
-            gold: 100,
-            upkeep: 5,
-            soldiers: 10,
-            army_composition: [0; 10],
-            sieges: 0,
-            towers: 0,
-            owned: barracks_only(),
-            enemy: [0; 10],
-            enemy_has_walls: false,
-            threat_near_home: 9,
-        };
-        let tune = PlannerTuning {
-            peasant_target: 7,
-            army_target: 6,
-            core_army: 4,
-            pop_buffer: 2,
-            food_floor_mult: 6,
-            wood_buffer: 30,
-            max_towers: 3,
-            wants_cavalry: false,
-            wants_siege: false,
-            siege_target: 0,
-            imam_target: 0,
-            defend_threat: 3,
-            food_floor: 12,
-            reserve_peasants: 2,
-        };
+        let mut s = state(barracks_only());
+        s.upkeep = 5;
+        s.soldiers = 10;
+        s.threat_near_home = 9;
+        let mut tune = tuning();
+        tune.max_towers = 3;
+        tune.defend_threat = 3;
         assert_eq!(next_phase(&s, &tune), AiPhase::Defend);
         s.threat_near_home = 0;
         assert_ne!(next_phase(&s, &tune), AiPhase::Defend);
+    }
+
+    #[test]
+    fn mix_spreads_across_top_counters() {
+        let mut owned = barracks_only();
+        owned.insert(BuildingKind::Stable);
+        let mut enemy: Census = [0; 10];
+        enemy[UnitKind::Spearman as usize] = 6;
+        enemy[UnitKind::Archer as usize] = 6;
+        // train up an army one pick at a time; with mix_size 3 the result must
+        // not be a monoculture
+        let mut own: Census = [0; 10];
+        for _ in 0..12 {
+            let k = next_army_kind(&enemy, &own, &owned, false, false, 3, i32::MAX);
+            own[k as usize] += 1;
+        }
+        let kinds_used = own.iter().filter(|n| **n > 0).count();
+        assert!(kinds_used >= 2, "mix produced a monoculture: {own:?}");
+    }
+
+    #[test]
+    fn broke_bot_never_picks_a_gold_unit() {
+        let mut owned = barracks_only();
+        owned.insert(BuildingKind::Stable);
+        let mut enemy: Census = [0; 10];
+        enemy[UnitKind::Archer as usize] = 8;
+        for _ in 0..8 {
+            let k = next_army_kind(&enemy, &[0; 10], &owned, false, false, 3, 0);
+            assert_eq!(unit_def(k).cost.gold, 0, "picked unaffordable {k:?} with 0 gold");
+        }
+    }
+
+    #[test]
+    fn army_target_tracks_enemy_strength() {
+        let mut s = state(barracks_only());
+        let mut tune = tuning();
+        tune.army_match_margin = 3;
+        tune.army_cap = 20;
+        assert_eq!(dynamic_army_target(&s, &tune), 6); // empty enemy: base
+        s.enemy[UnitKind::Spearman as usize] = 10;
+        assert_eq!(dynamic_army_target(&s, &tune), 13); // 10 + 3
+        s.enemy[UnitKind::Archer as usize] = 30;
+        assert_eq!(dynamic_army_target(&s, &tune), 20); // capped
+        assert!(dynamic_peasant_target(&s, &tune) >= tune.peasant_target);
+    }
+
+    #[test]
+    fn trade_buys_food_in_famine_and_sells_glut_for_gold() {
+        let mut owned = barracks_only();
+        owned.insert(BuildingKind::Market);
+        let mut s = state(owned);
+        let mut tune = tuning();
+        tune.gold_floor = 80;
+        tune.sell_threshold = 150;
+
+        // famine + gold -> buy food
+        s.food = 5;
+        s.upkeep = 8;
+        s.gold = 50;
+        let t = next_trade(&s, &tune).unwrap();
+        assert!(t.buy && t.res == ResourceType::Food && t.amount > 0);
+
+        // gold-poor + wood glut -> sell wood
+        s.food = 500;
+        s.upkeep = 0;
+        s.gold = 10;
+        s.wood = 400;
+        s.stone = 60;
+        let t = next_trade(&s, &tune).unwrap();
+        assert!(!t.buy && t.res == ResourceType::Wood && t.amount > 0);
+
+        // flush -> no trade
+        s.gold = 200;
+        assert_eq!(next_trade(&s, &tune), None);
+
+        // no market -> no trade
+        s.gold = 10;
+        s.owned.remove(&BuildingKind::Market);
+        assert_eq!(next_trade(&s, &tune), None);
+    }
+
+    #[test]
+    fn assault_gate_demands_an_edge_and_retreat_triggers() {
+        let mut mine: Census = [0; 10];
+        let mut enemy: Census = [0; 10];
+        mine[UnitKind::Spearman as usize] = 4;
+        enemy[UnitKind::Spearman as usize] = 12;
+        assert!(!should_assault(&mine, &enemy, 0, 10), "4 v 12 must not launch");
+        mine[UnitKind::Spearman as usize] = 20;
+        assert!(should_assault(&mine, &enemy, 0, 10), "20 v 12 should launch");
+        // towers tip the balance back
+        assert!(!should_assault(&mine, &enemy, 8, 10), "8 towers should deter");
+        // negative margin = gate off (Easy)
+        mine[UnitKind::Spearman as usize] = 1;
+        assert!(should_assault(&mine, &enemy, 8, -1));
+
+        assert!(should_retreat(10, 3, 40)); // 30% alive < 40%
+        assert!(!should_retreat(10, 5, 40)); // 50% alive
+        assert!(!should_retreat(10, 1, 0)); // disabled
+    }
+
+    #[test]
+    fn planner_builds_market_then_fishing_hut() {
+        let mut s = state(barracks_only());
+        let mut tune = tuning();
+        tune.wants_market = true;
+        tune.wants_fishing = true;
+        s.shore_near = true;
+        let d = next_build(&s, &tune).unwrap();
+        assert!(!d.is_unit && d.kind == BuildingKind::Market as u8);
+        s.owned.insert(BuildingKind::Market);
+        let d = next_build(&s, &tune).unwrap();
+        assert!(!d.is_unit && d.kind == BuildingKind::FishingHut as u8);
+        s.owned.insert(BuildingKind::FishingHut);
+        let d = next_build(&s, &tune).unwrap();
+        assert!(!d.is_unit && d.kind == BuildingKind::Granary as u8);
     }
 
     #[test]
@@ -584,6 +899,8 @@ mod tests {
             scouts: true,
             defend_react_delay: crate::fx!("1"),
             raid_react_delay: crate::fx!("75"),
+            advantage_margin_pct: 10,
+            retreat_pct: 35,
         };
         let th = ThreatState { attackers: 6, field_army: 10, home_army: 1 };
         assert!(should_recall(&th, &tune));

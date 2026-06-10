@@ -100,6 +100,11 @@ pub(crate) fn own_building_positions(world: &mut World, owner: u64) -> Vec<V2> {
 /// node/building occupancy, waterside, town radius, approach) + prereq + cost.
 /// `facing` = quarter turns; square footprints make rotation purely visual,
 /// but it rides the command so every client renders the same yaw.
+///
+/// Defense composition: a gate or tower placed on the player's OWN wall tile
+/// absorbs that segment (full refund) instead of being refused — walls are a
+/// canvas the other defense pieces slot into. A gate dropped into a wall run
+/// also auto-orients its passage across the run.
 pub(crate) fn build(world: &mut World, owner: u64, kind: BuildingKind, pos: V2, facing: u8) -> bool {
     let def = building_def(kind);
     if !def.buildable {
@@ -112,6 +117,19 @@ pub(crate) fn build(world: &mut World, owner: u64, kind: BuildingKind, pos: V2, 
     let seed = world.resource::<WorldConfig>().seed;
     let mut occ = building_occupancy(world, true);
     occ.extend(node_occupancy(world));
+    // own wall segments are transparent to a composing piece
+    let own_walls: Vec<(u64, i32)> = if composes_with_walls(kind) {
+        let mut q = world.query::<(&GameId, &Pos, &Owner, &Building)>();
+        q.iter(world)
+            .filter(|(_, _, o, b)| o.0 == owner && b.kind == BuildingKind::Wall)
+            .map(|(g, p, _, _)| (g.0, tile_key(p.pos.x.to_num::<i32>(), p.pos.y.to_num::<i32>())))
+            .collect()
+    } else {
+        Vec::new()
+    };
+    for (_, k) in &own_walls {
+        occ.remove(k);
+    }
     let own = own_building_positions(world, owner);
     let occupied = |tx: i32, ty: i32| occ.contains(&tile_key(tx, ty));
     if check_place(seed, kind, pos.x, pos.y, occupied, &own).is_err() {
@@ -130,8 +148,43 @@ pub(crate) fn build(world: &mut World, owner: u64, kind: BuildingKind, pos: V2, 
     if !paid {
         return false;
     }
+
+    // absorb the overlapped segment: refund in full, pop any parapet garrison
+    let fp: Vec<i32> =
+        footprint_tiles(def.footprint, pos.x, pos.y).iter().map(|t| tile_key(t.tx, t.ty)).collect();
+    let mut absorbed_run = (false, false); // own wall continues along (x, z)
+    if !own_walls.is_empty() {
+        let (tx, ty) = (pos.x.floor().to_num::<i32>(), pos.y.floor().to_num::<i32>());
+        let wall_at = |dx: i32, dy: i32| own_walls.iter().any(|(_, k)| *k == tile_key(tx + dx, ty + dy));
+        absorbed_run = (wall_at(1, 0) || wall_at(-1, 0), wall_at(0, 1) || wall_at(0, -1));
+        let wall_cost = building_def(BuildingKind::Wall).cost;
+        let absorbed: Vec<u64> =
+            own_walls.iter().filter(|(_, k)| fp.contains(k)).map(|(id, _)| *id).collect();
+        for wid in absorbed {
+            super::garrison_cmds::eject_all(world, wid);
+            if let Some(e) = super::find_owned(world, owner, wid) {
+                world.despawn(e);
+            }
+            let mut q = world.query::<&mut Player>();
+            if let Some(mut p) = q.iter_mut(world).find(|p| p.player_id == owner) {
+                p.stock.refund(&wall_cost, Fx::ONE);
+            }
+        }
+    }
+
     let center = footprint_center(def.footprint, pos.x, pos.y);
     let id = spawn::spawn_building(world, owner, kind, center, match_id);
+    // a gate in a clear X- or Z-run turns its passage across the run; the
+    // player's chosen facing wins when the neighborhood is ambiguous
+    let facing = if kind == BuildingKind::Gatehouse {
+        match absorbed_run {
+            (true, false) => 0,
+            (false, true) => 1,
+            _ => facing,
+        }
+    } else {
+        facing
+    };
     if facing % 4 != 0 {
         let yaw = saladin_sim::fx!("1.5707963") * Fx::from_num(facing % 4);
         let mut q = world.query::<(&GameId, &mut Pos)>();

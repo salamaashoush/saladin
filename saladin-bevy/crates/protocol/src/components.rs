@@ -95,6 +95,13 @@ pub struct Bot {
     pub phase: AiPhase,
     pub scout_id: u64,
     pub threat_timer: Fx,
+    /// Soldier count when the last assault wave launched — the retreat baseline.
+    #[serde(default)]
+    pub wave_launched: i32,
+    /// Set when an affordable Fishing Hut found no legal shoreline tile, so the
+    /// planner stops asking for one instead of stalling its build ladder.
+    #[serde(default)]
+    pub fishing_blocked: bool,
 }
 
 /// One in-flight/completed research, attached to a player entity (one per tech).

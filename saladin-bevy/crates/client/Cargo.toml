@@ -15,7 +15,7 @@ saladin-sim.workspace = true
 # Full Bevy umbrella with render (mirrors bevy_game_template's feature set, minus
 # the audio crates we don't use yet). The protocol/sim crates depend on the same
 # 0.18 bevy_* subcrates, which cargo unifies with this umbrella.
-bevy = { version = "0.19.0-rc.2", features = ["x11", "wayland"] }
+bevy = { version = "0.19.0-rc.2", features = ["x11", "wayland", "wav"] }
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"
 

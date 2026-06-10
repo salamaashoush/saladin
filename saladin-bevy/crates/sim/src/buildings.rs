@@ -17,6 +17,14 @@ pub fn tile_key(tx: i32, ty: i32) -> i32 {
 
 const DIRS4: [(i32, i32); 4] = [(1, 0), (-1, 0), (0, 1), (0, -1)];
 
+/// Defense pieces that COMPOSE with a wall line: placing one on a tile your
+/// own Wall occupies absorbs the segment (full refund) instead of refusing
+/// with Occupied — gates and towers slot into the wall, AoE-style. All are
+/// 1x1, so a placement absorbs at most one segment.
+pub fn composes_with_walls(kind: BuildingKind) -> bool {
+    matches!(kind, BuildingKind::Gatehouse | BuildingKind::Tower | BuildingKind::Watchtower)
+}
+
 fn floor_i32(v: Fx) -> i32 {
     v.floor().to_num::<i32>()
 }

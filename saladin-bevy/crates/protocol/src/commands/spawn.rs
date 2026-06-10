@@ -120,6 +120,8 @@ pub(crate) fn spawn_ai(
             phase: AiPhase::Boot,
             scout_id: 0,
             threat_timer: Fx::ZERO,
+            wave_launched: 0,
+            fishing_blocked: false,
         });
     }
 }

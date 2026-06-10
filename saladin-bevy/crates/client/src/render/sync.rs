@@ -12,7 +12,7 @@ use std::collections::HashMap;
 use saladin_protocol::{Building, GameId, Owner, Player, Pos, ResourceNode, Unit, WorldConfig};
 use saladin_sim::{
     BuildingKind, PLAYER_COLORS, ResourceType, UnitKind, WORLD_SIZE, building_def,
-    footprint_tiles, unit_def,
+    footprint_tiles, tile_key, unit_def,
 };
 use std::collections::HashSet;
 
@@ -39,6 +39,8 @@ pub struct RenderAssets {
     pub team_rigs: HashMap<(usize, u32), Vec<RigHandle>>,
     pub team_impostors: HashMap<(usize, u32), Handle<Mesh>>,
     pub buildings: Vec<Handle<Mesh>>,
+    /// Half-tile wall run (+X), yawed per connected neighbor by `update_wall_arms`.
+    pub wall_arm: Handle<Mesh>,
     pub nodes: HashMap<ResourceType, Vec<Handle<Mesh>>>,
     pub fish_node: Handle<Mesh>,
     pub carry_sack: Handle<Mesh>,
@@ -303,22 +305,85 @@ pub struct RenderMap(pub HashMap<u64, Entity>);
 pub struct OccupiedTiles(pub HashSet<i32>);
 
 /// Wall run orientation: 8-way neighbour double-angle average (wallAngleAt).
-pub fn wall_angle_at(occ: &HashSet<i32>, x: f32, z: f32) -> f32 {
-    let tx = x.floor() as i32;
-    let ty = z.floor() as i32;
-    let mut ax = 0.0_f32;
-    let mut ay = 0.0_f32;
-    let mut n = 0;
-    for (dx, dy) in [(1, 0), (-1, 0), (0, 1), (0, -1), (1, 1), (1, -1), (-1, 1), (-1, -1)] {
-        if !occ.contains(&((ty + dy) * WORLD_SIZE + (tx + dx))) {
+/// Per-wall connectivity mask, bit per +X/-X/+Z/-Z neighbor; arms respawn when
+/// it changes (new segments, absorbed segments, razed neighbors).
+#[derive(Component)]
+pub struct WallArms(pub u8);
+
+#[derive(Component)]
+pub struct WallArm;
+
+const ARM_DIRS: [(i32, i32); 4] = [(1, 0), (-1, 0), (0, 1), (0, -1)];
+// yaw rotating the +X-authored arm toward each ARM_DIRS entry
+const ARM_YAWS: [f32; 4] =
+    [0.0, std::f32::consts::PI, -std::f32::consts::FRAC_PI_2, std::f32::consts::FRAC_PI_2];
+
+/// Hang a half-tile wall arm toward every adjacent fortification. Corners,
+/// T-junctions and crosses all emerge from the mask — no rotation guessing.
+pub fn update_wall_arms(
+    mut commands: Commands,
+    map: Res<RenderMap>,
+    assets: Res<RenderAssets>,
+    q_sim: Query<(&GameId, &Pos, &Building)>,
+    q_mat: Query<(Option<&WallArms>, &MeshMaterial3d<StandardMaterial>), With<RenderRoot>>,
+    q_arms: Query<(Entity, &ChildOf), With<WallArm>>,
+) {
+    // a wall connects to walls, gates, towers and the keep
+    let linkable: HashSet<i32> = q_sim
+        .iter()
+        .filter(|(_, _, b)| {
+            matches!(
+                b.kind,
+                BuildingKind::Wall
+                    | BuildingKind::Gatehouse
+                    | BuildingKind::Tower
+                    | BuildingKind::Watchtower
+                    | BuildingKind::Keep
+            )
+        })
+        .flat_map(|(_, p, b)| {
+            footprint_tiles(building_def(b.kind).footprint, p.pos.x, p.pos.y)
+                .into_iter()
+                .map(|t| tile_key(t.tx, t.ty))
+        })
+        .collect();
+
+    for (gid, pos, b) in &q_sim {
+        if b.kind != BuildingKind::Wall {
             continue;
         }
-        let ang = (dy as f32).atan2(dx as f32);
-        ax += (2.0 * ang).cos();
-        ay += (2.0 * ang).sin();
-        n += 1;
+        let Some(&root) = map.0.get(&gid.0) else { continue };
+        let tx = pos.pos.x.to_num::<f32>().floor() as i32;
+        let ty = pos.pos.y.to_num::<f32>().floor() as i32;
+        let mut mask = 0u8;
+        for (i, (dx, dy)) in ARM_DIRS.iter().enumerate() {
+            if linkable.contains(&tile_key(tx + dx, ty + dy)) {
+                mask |= 1 << i;
+            }
+        }
+        let Ok((arms, mat)) = q_mat.get(root) else { continue };
+        if arms.map(|a| a.0) == Some(mask) {
+            continue;
+        }
+        for (e, child_of) in &q_arms {
+            if child_of.parent() == root {
+                commands.entity(e).despawn();
+            }
+        }
+        let mat_handle = mat.0.clone();
+        commands.entity(root).insert(WallArms(mask)).with_children(|p| {
+            for i in 0..4 {
+                if mask & (1 << i) != 0 {
+                    p.spawn((
+                        WallArm,
+                        Mesh3d(assets.wall_arm.clone()),
+                        MeshMaterial3d(mat_handle.clone()),
+                        Transform::from_rotation(Quat::from_rotation_y(ARM_YAWS[i])),
+                    ));
+                }
+            }
+        });
     }
-    if n == 0 { 0.0 } else { -ay.atan2(ax) / 2.0 }
 }
 
 pub fn rebuild_occupancy(
@@ -417,7 +482,6 @@ pub fn sync_render(
     mut rmats: ResMut<RenderMaterials>,
     mut mats: ResMut<Assets<StandardMaterial>>,
     mut map: ResMut<RenderMap>,
-    occ: Res<OccupiedTiles>,
     field: Res<HeightField>,
     selection: Res<Selection>,
     cam_state: Res<CameraState>,
@@ -524,17 +588,12 @@ pub fn sync_render(
                     let max = building_def(b.kind).max_hp.max(1);
                     dmg.ratio = b.hp as f32 / max as f32;
                 }
-                if b.kind == BuildingKind::Wall {
-                    let yaw = wall_angle_at(&occ.0, x, z);
+                // player-chosen quarter-turn facing (rides the Build command);
+                // walls stay unrotated — connectivity arms carry direction
+                let yaw = pos.facing.to_num::<f32>();
+                if b.kind != BuildingKind::Wall && yaw != 0.0 {
                     lerp.yaw = yaw;
                     tf.rotation = Quat::from_rotation_y(yaw);
-                } else {
-                    // player-chosen quarter-turn facing (rides the Build command)
-                    let yaw = pos.facing.to_num::<f32>();
-                    if yaw != 0.0 {
-                        lerp.yaw = yaw;
-                        tf.rotation = Quat::from_rotation_y(yaw);
-                    }
                 }
             }
         } else if let Some(n) = node {
@@ -1349,6 +1408,7 @@ pub fn build_assets(meshes: &mut Assets<Mesh>) -> RenderAssets {
             .iter()
             .map(|k| meshes.add(crate::render::models::building_mesh(*k)))
             .collect(),
+        wall_arm: meshes.add(crate::render::models::buildings::build_wall_arm()),
         team_rigs: HashMap::new(),
         team_impostors: HashMap::new(),
         nodes,

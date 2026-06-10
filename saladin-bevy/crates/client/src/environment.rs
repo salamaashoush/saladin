@@ -23,6 +23,15 @@ pub struct OceanPlane;
 pub struct SunLight;
 
 const SKY_RADIUS: f32 = 1200.0;
+// The sun keeps a fixed bearing RELATIVE to the camera (classic RTS "over the
+// shoulder" key light): rotating with Q/E re-aims the sun too, so the player
+// never stares at the unlit side of every building. These reproduce the
+// original fixed sun at (40, 70, 20) when yaw == 0.
+const SUN_DIST: f32 = 83.0;
+const SUN_ELEV_COS: f32 = 0.5384; // 44.72 / |(40,70,20)|
+const SUN_ELEV_SIN: f32 = 0.8427; // 70 / |(40,70,20)|
+/// Sun bearing relative to the camera ring angle (radians, clockwise).
+const SUN_CAM_OFFSET: f32 = 0.3218;
 // The terrain's flat sea surface sits at -0.43*TERRAIN_SCALE; the backdrop
 // disc must stay strictly BELOW it everywhere inside the map, or it covers
 // the real water and paints a flat second blue with a hard mesh-intersection
@@ -231,9 +240,10 @@ pub fn follow_camera(
             },
             // HemisphereLight('#ffffff', '#6b5a3a', 0.9) approximated as a warm
             // per-camera ambient.
+            // bright enough that faces away from the sun shade, not blacken
             AmbientLight {
                 color: Color::srgb_u8(0xc9, 0xbe, 0xa4),
-                brightness: 300.0,
+                brightness: 480.0,
                 ..default()
             },
         ));
@@ -241,6 +251,31 @@ pub fn follow_camera(
     for mut t in &mut env {
         t.translation.x = cam.translation.x;
         t.translation.z = cam.translation.z;
+    }
+}
+
+/// Re-aim the sun as the camera yaws (Q/E) so its bearing relative to the view
+/// stays the one the scene was lit for — every angle reads like the classic
+/// iso shot instead of staring at unlit walls. The sky dome's baked glow
+/// turns with it so the bright patch stays over the sun.
+pub fn sun_follows_camera(
+    cam: Res<crate::camera::CameraState>,
+    mut sun: Query<&mut Transform, (With<SunLight>, Without<SkyDome>)>,
+    mut sky: Query<&mut Transform, (With<SkyDome>, Without<SunLight>)>,
+) {
+    let az = std::f32::consts::FRAC_PI_4 + cam.yaw - SUN_CAM_OFFSET;
+    let pos = Vec3::new(az.cos() * SUN_ELEV_COS, SUN_ELEV_SIN, az.sin() * SUN_ELEV_COS) * SUN_DIST;
+    let target = Transform::from_translation(pos).looking_at(Vec3::ZERO, Vec3::Y);
+    for mut t in &mut sun {
+        if t.rotation.angle_between(target.rotation) > 1e-4 {
+            *t = target;
+        }
+    }
+    let dome_rot = Quat::from_rotation_y(-cam.yaw);
+    for mut t in &mut sky {
+        if t.rotation.angle_between(dome_rot) > 1e-4 {
+            t.rotation = dome_rot;
+        }
     }
 }
 

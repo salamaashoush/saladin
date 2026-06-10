@@ -132,7 +132,7 @@ pub fn building_mesh(kind: BuildingKind) -> Mesh {
         BuildingKind::Barracks => build_barracks(),
         BuildingKind::Tower => tower_core(false),
         BuildingKind::Watchtower => tower_core(true),
-        BuildingKind::Wall => build_wall_slab(),
+        BuildingKind::Wall => build_wall_pillar(),
         BuildingKind::Gatehouse => build_gatehouse(),
         BuildingKind::House => build_house(),
         BuildingKind::Stable => build_stable(),
@@ -144,30 +144,44 @@ pub fn building_mesh(kind: BuildingKind) -> Mesh {
     }
 }
 
-// A straight crenellated wall slab along local X. The renderer yaws the mesh to
-// the run direction; the slab is long enough (1.5) to bridge orthogonal AND
-// diagonal neighbours, so a line reads as one continuous wall.
-fn build_wall_slab() -> Mesh {
+// Walls are CONNECTIVITY-BASED: every segment is a square pillar on its tile
+// center, and `update_wall_arms` hangs a half-tile arm toward each adjacent
+// own structure. Corners, T-junctions, crosses and end-caps all read correctly
+// without rotation guessing (the old averaged-angle slab left diagonal gaps at
+// every corner).
+fn build_wall_pillar() -> Mesh {
+    let stone = srgb(STONE);
+    let cap = srgb(0x847c71);
+    let s = 0.56;
+    let h = 0.74;
+    let parts = vec![
+        // battered foot for a heavier silhouette
+        part(cuboid(s + 0.14, 0.18, s + 0.14), srgb(STONE_DARK), xyz(0.0, 0.09, 0.0)),
+        part(cuboid(s, h, s), stone, xyz(0.0, h / 2.0, 0.0)),
+        part(cuboid(s + 0.1, 0.1, s + 0.1), cap, xyz(0.0, h + 0.05, 0.0)),
+        // single crowning merlon
+        part(cuboid(0.3, 0.26, 0.3), stone, xyz(0.0, h + 0.23, 0.0)),
+    ];
+    merge(parts)
+}
+
+/// Half-tile crenellated wall run from inside the pillar to the +X tile edge;
+/// the neighbour's mirrored arm meets it at the boundary.
+pub fn build_wall_arm() -> Mesh {
     let stone = srgb(STONE);
     let cap = srgb(0x847c71);
     let h = 0.62;
     let tk = 0.42;
-    let l = 1.5;
+    let l = 0.56;
+    let cx = 0.25;
     let mut parts = vec![
-        // Slightly battered base (wider at the foot) for a heavier silhouette.
-        part(cuboid(l, 0.18, tk + 0.1), srgb(STONE_DARK), xyz(0.0, 0.09, 0.0)),
-        part(cuboid(l, h, tk), stone, xyz(0.0, h / 2.0, 0.0)),
-        // Walkway cap with a slight overhang.
-        part(cuboid(l, 0.1, tk + 0.08), cap, xyz(0.0, h + 0.05, 0.0)),
+        part(cuboid(l, 0.18, tk + 0.1), srgb(STONE_DARK), xyz(cx, 0.09, 0.0)),
+        part(cuboid(l, h, tk), stone, xyz(cx, h / 2.0, 0.0)),
+        part(cuboid(l, 0.1, tk + 0.08), cap, xyz(cx, h + 0.05, 0.0)),
+        // one merlon on the outer half of the run
+        part(cuboid(0.2, 0.24, tk), stone, xyz(0.37, h + 0.22, 0.0)),
     ];
-    let top = h + 0.1 + 0.12;
-    for ox in [-0.52, -0.17, 0.18, 0.53] {
-        parts.push(part(cuboid(0.24, 0.26, tk), stone, xyz(ox, top, 0.0)));
-    }
-    // Arrow slits between merlons on the outward face.
-    for ox in [-0.35, 0.0, 0.35] {
-        arrow_slit(&mut parts, ox, h * 0.6, tk / 2.0 + 0.01, 0.0);
-    }
+    arrow_slit(&mut parts, 0.3, h * 0.6, tk / 2.0 + 0.01, 0.0);
     merge(parts)
 }
 

@@ -6,8 +6,10 @@
 use bevy::diagnostic::FrameTimeDiagnosticsPlugin;
 use bevy::prelude::*;
 
+mod audio;
 mod camera;
 mod config;
+mod dev;
 mod environment;
 mod fx;
 mod input;
@@ -184,6 +186,7 @@ fn main() {
     .insert_resource(Time::<Fixed>::from_hz(20.0))
     .insert_resource(ClearColor(Color::srgb(0.05, 0.06, 0.09)))
     .init_resource::<LocalInput>()
+    .init_resource::<minimap::BlipMap>()
     .init_resource::<MenuConfig>()
     .init_resource::<PendingSave>()
     .init_resource::<selection::Selection>()
@@ -210,7 +213,10 @@ fn main() {
     .init_resource::<ui::text_input::CursorBlink>()
     .init_resource::<ui::preview::PreviewCache>()
     .init_resource::<perf::PerfVisible>()
-    .add_systems(Startup, (perf::setup_perf, input::spawn_drag_box, ui::widgets::prewarm_font_atlas))
+    .add_systems(
+        Startup,
+        (perf::setup_perf, input::spawn_drag_box, ui::widgets::prewarm_font_atlas, minimap::init_blip_assets),
+    )
     .add_systems(
         Update,
         (
@@ -276,6 +282,8 @@ fn main() {
             camera::frame_keep,
             minimap::update_minimap_viewport,
             minimap::minimap_click,
+            minimap::sync_blips,
+            minimap::draw_view_rect,
             input::pointer_input,
             input::rotate_ghost,
             input::keyboard_input.run_if(not(ui::text_input::any_input_focused)),
@@ -289,6 +297,7 @@ fn main() {
         (
             render::sync::rebuild_occupancy,
             render::sync::sync_render,
+            render::sync::update_wall_arms,
             render::sync::interpolate,
             render::sync::animate_units,
             render::sync::animate_animals,
@@ -310,6 +319,7 @@ fn main() {
         Update,
         (
             environment::follow_camera,
+            environment::sun_follows_camera,
             environment::shimmer_ocean,
             environment::animate_sparkle,
             environment::animate_gulls,
@@ -389,364 +399,14 @@ fn main() {
         }
     }
     let _ = multiplayer;
-    // SALADIN_AUTO: headless render verification for CI / agent runs — save a
-    // framebuffer screenshot to /tmp/saladin_shot.png at ~6s. Values:
-    //   1     skip the menu, shoot in-game
-    //   menu  shoot the main menu
-    //   mp    shoot the multiplayer screen
-    //   lobby host a LAN lobby and shoot it
-    // SALADIN_TAB preselects a build-bar tab (screenshot verification of tabs)
-    if let Ok(s) = std::env::var("SALADIN_TAB")
-        && let Ok(tab) = s.parse::<usize>()
-    {
-        app.world_mut().resource_mut::<ui::actions::BuildTab>().0 = tab;
-    }
-    // SALADIN_BUILD=<building kind u8> enters build mode (hint-chip screenshots)
-    if let Ok(s) = std::env::var("SALADIN_BUILD")
-        && let Ok(k) = s.parse::<u8>()
-        && let Some(kind) = saladin_sim::BuildingKind::from_u8(k)
-    {
-        *app.world_mut().resource_mut::<input::InputMode>() = input::InputMode::Build(kind);
-    }
-    // SALADIN_ZOOM=<view_size> presets the camera zoom (edge-of-world shots)
-    if let Ok(s) = std::env::var("SALADIN_ZOOM")
-        && let Ok(v) = s.parse::<f32>()
-    {
-        let v = v.clamp(4.0, 85.0);
-        let world = app.world_mut();
-        {
-            let mut st = world.resource_mut::<camera::CameraState>();
-            st.view_size = v;
-            st.target_view = v;
-        }
-        let mut q = world.query_filtered::<&mut Projection, bevy::prelude::With<camera::GameCamera>>();
-        for mut proj in q.iter_mut(world) {
-            if let Projection::Orthographic(o) = &mut *proj {
-                o.scaling_mode = bevy::camera::ScalingMode::FixedVertical { viewport_height: v * 2.0 };
-            }
-        }
-    }
-    // SALADIN_YAW=<quarter turns> pre-rotates the camera (rotation screenshots)
-    if let Ok(s) = std::env::var("SALADIN_YAW")
-        && let Ok(q) = s.parse::<i32>()
-    {
-        let yaw = q as f32 * std::f32::consts::FRAC_PI_2;
-        let mut st = app.world_mut().resource_mut::<camera::CameraState>();
-        st.yaw = yaw;
-        st.target_yaw = yaw;
-    }
-    // SALADIN_SEED / SALADIN_PRESET override the menu defaults (screenshot runs)
-    if let Ok(s) = std::env::var("SALADIN_SEED")
-        && let Ok(seed) = s.parse::<u32>()
-    {
-        app.world_mut().resource_mut::<MenuConfig>().seed = seed;
-    }
-    if let Ok(s) = std::env::var("SALADIN_PRESET")
-        && let Ok(preset) = s.parse::<u8>()
-    {
-        app.world_mut().resource_mut::<MenuConfig>().preset = preset;
-    }
-    match std::env::var("SALADIN_AUTO").as_deref() {
-        Ok("1") => {
-            app.insert_state(GameState::Playing);
-            app.add_systems(Update, auto_screenshot);
-        }
-        Ok("sp") => {
-            app.insert_resource(ui::menu::MenuScreen::Singleplayer);
-            app.add_systems(Update, (auto_screenshot, debug_layout));
-        }
-        Ok("menu") => {
-            app.add_systems(Update, auto_screenshot);
-        }
-        Ok("mp") => {
-            app.insert_resource(ui::menu::MenuScreen::Multiplayer);
-            app.add_systems(Update, auto_screenshot);
-        }
-        Ok("settings") => {
-            app.insert_resource(ui::menu::MenuScreen::Settings);
-            app.add_systems(Update, auto_screenshot);
-        }
-        Ok("pause") => {
-            app.insert_state(GameState::Playing);
-            app.insert_resource(ui::pause::PauseScreen::Menu);
-            app.add_systems(Update, auto_screenshot);
-        }
-        Ok("research") | Ok("market") | Ok("keep") | Ok("hut") => {
-            // conjure + select a building so the screenshot shows its panel
-            // (research on the blacksmith / trade on the market)
-            app.insert_state(GameState::Playing);
-            app.add_systems(Update, (auto_screenshot, auto_select_building, debug_layout));
-        }
-        Ok("layout") => {
-            // in-game + computed-rect dump for HUD layout debugging
-            app.insert_state(GameState::Playing);
-            app.add_systems(Update, (auto_screenshot, debug_layout));
-        }
-        Ok("units") => {
-            // conjure one of every unit kind beside the keep (model verification)
-            app.insert_state(GameState::Playing);
-            app.add_systems(Update, (auto_screenshot, auto_spawn_units));
-        }
-        Ok("lobby") => {
-            let bind = format!("0.0.0.0:{HOST_PORT}");
-            if saladin_protocol::spawn_host_relay(&bind).is_ok()
-                && let Ok(t) = saladin_protocol::TcpTransport::connect(
-                    &format!("127.0.0.1:{HOST_PORT}"),
-                    "Saladin",
-                    saladin_protocol::JoinIntent::Direct,
-                )
-            {
-                app.insert_resource(LobbyConn(std::sync::Mutex::new(Some(t))));
-                app.insert_resource(ui::menu::LobbyMode::LanHost { ips: config::lan_ips() });
-                app.insert_state(GameState::Lobby);
-            }
-            app.add_systems(Update, auto_screenshot);
-        }
-        _ => {}
-    }
+    audio::register(&mut app);
+    dev::setup(&mut app);
     app.run();
 }
 
-/// Screenshot harness only: conjure one of every unit kind in a line beside
-/// the keep so SALADIN_AUTO=units captures all unit models in one shot.
-fn auto_spawn_units(world: &mut World, mut stage: Local<u8>) {
-    use saladin_protocol::{MatchId, NextEntityId, Owner, Pos, Unit};
-    use saladin_sim::{GatherState, Stance, UnitKind, unit_def};
-    let t = world.resource::<Time>().elapsed_secs();
-    // stage 2: at t=5 bite a chunk out of the conjured land food nodes (shows
-    // the carcass transition), load the peasants (shows the carry sack), and
-    // kill a few soldiers (shows the fall-and-sink death) for screenshots
-    if *stage == 1 {
-        if t >= 5.0 {
-            *stage = 2;
-            let mut q = world.query::<&mut saladin_protocol::ResourceNode>();
-            for mut n in q.iter_mut(world) {
-                if n.res_type == saladin_sim::ResourceType::Food && n.remaining == 200 {
-                    n.remaining = 150;
-                }
-            }
-            let mut q = world.query::<&mut Unit>();
-            for mut u in q.iter_mut(world) {
-                if u.kind == UnitKind::Peasant {
-                    u.carrying = 25;
-                }
-            }
-            // burn the keep so the staged damage smoke/fire shows
-            let mut q = world.query::<&mut saladin_protocol::Building>();
-            for mut b in q.iter_mut(world) {
-                if b.kind == saladin_sim::BuildingKind::Keep {
-                    b.hp = saladin_sim::building_def(b.kind).max_hp / 5;
-                }
-            }
-            let victims: Vec<Entity> = {
-                let mut q = world.query_filtered::<(Entity, &Unit), bevy::prelude::With<GameId>>();
-                q.iter(world)
-                    .filter(|(_, u)| u.kind != UnitKind::Peasant && !u.has_target)
-                    .map(|(e, _)| e)
-                    .take(3)
-                    .collect()
-            };
-            for e in victims {
-                world.despawn(e);
-            }
-        }
-        return;
-    }
-    if *stage != 0 {
-        return;
-    }
-    if t < 3.0 {
-        return;
-    }
-    let keep = {
-        let mut q = world.query::<(&Pos, &saladin_protocol::Building)>();
-        q.iter(world)
-            .find(|(_, b)| b.kind == saladin_sim::BuildingKind::Keep)
-            .map(|(p, _)| p.pos)
-    };
-    let Some(kp) = keep else { return };
-    *stage = 1;
-    // One node of each kind beside the lineup, plus a food node pushed onto
-    // the nearest water tile so the fish-school variant shows too.
-    {
-        use saladin_protocol::ResourceNode;
-        use saladin_sim::ResourceType;
-        let spawn_node = |world: &mut World, res, x: i32, z: i32| {
-            let id = world.resource_mut::<saladin_protocol::NextEntityId>().alloc();
-            let pos = saladin_sim::V2::new(
-                kp.x + saladin_sim::Fx::from_num(x),
-                kp.y + saladin_sim::Fx::from_num(z),
-            );
-            world.spawn((
-                GameId(id),
-                saladin_protocol::MatchId(1),
-                saladin_protocol::Pos { pos, facing: saladin_sim::Fx::ZERO },
-                ResourceNode { res_type: res, remaining: 200 },
-            ));
-        };
-        for (i, res) in
-            [ResourceType::Wood, ResourceType::Stone, ResourceType::Food, ResourceType::Gold]
-                .into_iter()
-                .enumerate()
-        {
-            spawn_node(world, res, -3, 2 + i as i32 * 2);
-        }
-        // hunt outward for a water tile (render height below sea)
-        let seed = world.resource::<saladin_protocol::WorldConfig>().seed;
-        'water: for ring in 2..60 {
-            for (dx, dz) in [(ring, 0), (-ring, 0), (0, ring), (0, -ring)] {
-                let x = kp.x + saladin_sim::Fx::from_num(dx);
-                let z = kp.y + saladin_sim::Fx::from_num(dz);
-                let s = saladin_sim::sample_terrain(seed, x, z);
-                if !saladin_sim::biome_def(s.biome).passable
-                    && matches!(
-                        s.biome,
-                        saladin_sim::Biome::ShallowWater | saladin_sim::Biome::DeepWater
-                    )
-                {
-                    spawn_node(world, ResourceType::Food, dx, dz);
-                    break 'water;
-                }
-            }
-        }
-    }
-    for (i, &kind) in UnitKind::ALL.iter().enumerate() {
-        let def = unit_def(kind);
-        let pos = saladin_sim::V2::new(
-            kp.x + saladin_sim::Fx::from_num(2 + (i as i32 % 5) * 2),
-            kp.y + saladin_sim::Fx::from_num(3 + (i as i32 / 5) * 3),
-        );
-        // odd kinds march back toward the keep — the straight-line harness
-        // walk has no pathfinding, and the keep's fair-start area is the only
-        // ground guaranteed to be land
-        let walking = i % 2 == 1;
-        let target = if walking { kp } else { pos };
-        let id = world.resource_mut::<NextEntityId>().alloc();
-        world.spawn((
-            GameId(id),
-            Owner(1),
-            MatchId(1),
-            Pos { pos, facing: saladin_sim::Fx::ZERO },
-            Unit {
-                kind,
-                target,
-                has_target: walking,
-                speed: def.speed,
-                gather_state: GatherState::Idle,
-                target_node: 0,
-                carrying: 0,
-                carry_type: saladin_sim::ResourceType::Wood,
-                harvest_timer: saladin_sim::Fx::ZERO,
-                hp: def.max_hp,
-                attack_target: 0,
-                attack_cooldown: saladin_sim::Fx::ZERO,
-                stance: Stance::Defensive,
-                morale: saladin_sim::MORALE_MAX,
-                routing: false,
-                home: pos,
-                garrisoned_in: 0,
-                path: vec![],
-                path_idx: 0,
-            },
-        ));
-    }
-}
 
-/// Screenshot harness only: conjure a building row beside the keep (the way
-/// tests spawn rows) and select it, so SALADIN_AUTO=research/market captures
-/// that building's panel without playing 10 minutes of economy.
-fn auto_select_building(world: &mut World) {
-    use saladin_protocol::{Building, MatchId, NextEntityId, Owner, Pos};
-    use saladin_sim::{BuildingKind, building_def};
-    let kind = match std::env::var("SALADIN_AUTO").as_deref() {
-        Ok("market") => BuildingKind::Market,
-        Ok("keep") => BuildingKind::Keep,
-        Ok("hut") => BuildingKind::FishingHut,
-        _ => BuildingKind::Blacksmith,
-    };
-    let t = world.resource::<Time>().elapsed_secs();
-    if t < 3.0 {
-        return;
-    }
-    let existing = {
-        let mut q = world.query::<(&GameId, &Building)>();
-        q.iter(world).find(|(_, b)| b.kind == kind).map(|(g, _)| g.0)
-    };
-    let id = match existing {
-        Some(id) => id,
-        None => {
-            let keep = {
-                let mut q = world.query::<(&Pos, &Building)>();
-                q.iter(world).find(|(_, b)| b.kind == BuildingKind::Keep).map(|(p, _)| p.pos)
-            };
-            if kind == BuildingKind::Keep {
-                // the founded keep already exists; selection block below finds it
-                return;
-            }
-            let Some(kp) = keep else { return };
-            let pos = saladin_sim::V2::new(kp.x + saladin_sim::fx!("4"), kp.y + saladin_sim::fx!("2"));
-            let id = world.resource_mut::<NextEntityId>().alloc();
-            world.spawn((
-                GameId(id),
-                Owner(1),
-                MatchId(1),
-                Pos { pos, facing: saladin_sim::Fx::ZERO },
-                Building {
-                    kind,
-                    hp: building_def(kind).max_hp,
-                    cooldown: saladin_sim::Fx::ZERO,
-                    rally: pos,
-                },
-            ));
-            id
-        }
-    };
-    // select via the same source of truth the click path uses
-    let mut sel = world.resource_mut::<selection::Selection>();
-    if sel.building.is_none() {
-        sel.building = Some(id);
-    }
-}
 
-fn debug_layout(
-    time: Res<Time>,
-    mut done: Local<bool>,
-    q_bar: Query<(&bevy::ui::ComputedNode, &bevy::ui::UiGlobalTransform), With<ui::hud::BottomCenter>>,
-    q_text: Query<(&bevy::ui::ComputedNode, &bevy::ui::UiGlobalTransform, &Text)>,
-    q_btn: Query<(&bevy::ui::ComputedNode, &bevy::ui::UiGlobalTransform, &Children), With<Button>>,
-    q_txt_of: Query<&Text>,
-) {
-    if *done || time.elapsed_secs() < 5.0 {
-        return;
-    }
-    *done = true;
-    for (n, t) in &q_bar {
-        eprintln!("BAR size={:?} pos={:?} inv_scale={}", n.size(), t.translation, n.inverse_scale_factor());
-    }
-    for (n, t, txt) in &q_text {
-        if txt.0.len() < 24 {
-            eprintln!("TEXT '{}' size={:?} pos={:?}", txt.0, n.size(), t.translation);
-        }
-    }
-    for (n, t, children) in &q_btn {
-        let label = children
-            .iter()
-            .find_map(|c| q_txt_of.get(c).ok())
-            .map(|t| t.0.clone())
-            .unwrap_or_default();
-        eprintln!("BTN '{}' size={:?} pos={:?}", label, n.size(), t.translation);
-    }
-}
 
-fn auto_screenshot(time: Res<Time>, mut done: Local<bool>, mut commands: Commands) {
-    use bevy::render::view::window::screenshot::{Screenshot, save_to_disk};
-    let at = std::env::var("SALADIN_SHOT_AT").ok().and_then(|s| s.parse().ok()).unwrap_or(6.0);
-    if *done || time.elapsed_secs() < at {
-        return;
-    }
-    *done = true;
-    commands.spawn(Screenshot::primary_window()).observe(save_to_disk("/tmp/saladin_shot.png"));
-}
 
 /// In the lobby: pump the socket; when the host starts the match, promote the
 /// connection into the lockstep transport and enter the game.

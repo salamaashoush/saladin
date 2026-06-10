@@ -232,6 +232,91 @@ fn place_wall_lays_a_line() {
 }
 
 #[test]
+fn gate_and_tower_compose_into_a_wall_line() {
+    let mut app = build();
+    let (cx, cy) = find_land_block(1);
+    spawn_player(&mut app, 1, rich());
+    let tiles: Vec<(i32, i32)> = (0..5).map(|i| (cx + i, cy)).collect();
+    cmd(&mut app, PlayerCommand::PlaceWall { player_id: 1, tiles });
+    step(app.world_mut());
+    let stone_after_walls = player_stock(&mut app, 1).stone;
+
+    // a gate dropped onto the middle segment absorbs it (full refund) and
+    // auto-orients to the X-run; a tower slots into another segment
+    let f = |n: i32| Fx::from_num(n) + Fx::lit("0.5");
+    cmd(
+        &mut app,
+        PlayerCommand::Build {
+            player_id: 1,
+            kind: BuildingKind::Gatehouse,
+            pos: V2::new(f(cx + 2), f(cy)),
+            facing: 1, // deliberately wrong; the wall run must win
+        },
+    );
+    cmd(
+        &mut app,
+        PlayerCommand::Build {
+            player_id: 1,
+            kind: BuildingKind::Tower,
+            pos: V2::new(f(cx + 4), f(cy)),
+            facing: 0,
+        },
+    );
+    step(app.world_mut());
+
+    let world = app.world_mut();
+    let mut bq = world.query::<(&Building, &Pos)>();
+    let walls = bq.iter(world).filter(|(b, _)| b.kind == BuildingKind::Wall).count();
+    assert_eq!(walls, 3, "two segments absorbed");
+    let gate_facing = bq
+        .iter(world)
+        .find(|(b, _)| b.kind == BuildingKind::Gatehouse)
+        .map(|(_, p)| p.facing)
+        .expect("gatehouse placed on the wall tile");
+    assert_eq!(gate_facing, ZERO, "gate aligned to the X-run, not the bogus facing");
+    assert_eq!(
+        bq.iter(world).filter(|(b, _)| b.kind == BuildingKind::Tower).count(),
+        1,
+        "tower slotted into the line"
+    );
+    let wall_cost = building_def(BuildingKind::Wall).cost;
+    let gate_cost = building_def(BuildingKind::Gatehouse).cost;
+    let tower_cost = building_def(BuildingKind::Tower).cost;
+    let s = player_stock(&mut app, 1);
+    assert_eq!(
+        s.stone,
+        stone_after_walls - gate_cost.stone - tower_cost.stone + 2 * wall_cost.stone,
+        "both absorbed segments refunded in full"
+    );
+}
+
+#[test]
+fn gate_does_not_compose_with_enemy_walls() {
+    let mut app = build();
+    let (cx, cy) = find_land_block(1);
+    let f = |n: i32| Fx::from_num(n) + Fx::lit("0.5");
+    spawn_player(&mut app, 1, rich());
+    spawn_player(&mut app, 2, rich());
+    spawn_building(&mut app, 10, 2, BuildingKind::Wall, V2::new(f(cx), f(cy)));
+
+    cmd(
+        &mut app,
+        PlayerCommand::Build {
+            player_id: 1,
+            kind: BuildingKind::Gatehouse,
+            pos: V2::new(f(cx), f(cy)),
+            facing: 0,
+        },
+    );
+    step(app.world_mut());
+
+    let world = app.world_mut();
+    let mut bq = world.query::<&Building>();
+    assert_eq!(bq.iter(world).filter(|b| b.kind == BuildingKind::Gatehouse).count(), 0);
+    assert_eq!(bq.iter(world).filter(|b| b.kind == BuildingKind::Wall).count(), 1);
+}
+
+#[test]
 fn research_completes_and_flips_tech_mask() {
     let mut app = build();
     let (cx, cy) = find_land_block(1);

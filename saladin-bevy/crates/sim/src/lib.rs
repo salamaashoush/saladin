@@ -29,9 +29,11 @@ pub mod units;
 
 pub use ai::{
     AiPhase, AssaultIntel, BuildDecision, Census, FIELD_UNITS, PlannerState, PlannerTuning,
-    SquadRole, TacticalTarget, TacticalTuning, ThreatState, counter_composition, counter_score,
-    count_own_kind, eats_food, food_crisis, mustered, next_build, next_phase, raid_quota,
-    recall_count, should_recall, squad_role, target_for_role,
+    SquadRole, TacticalTarget, TacticalTuning, ThreatState, TradeDecision, army_power,
+    counter_composition, counter_score, count_own_kind, dynamic_army_target,
+    dynamic_peasant_target, eats_food, food_crisis, mustered, next_army_kind, next_build,
+    next_phase, next_trade, raid_quota, ranked_counters, recall_count, should_assault,
+    should_recall, should_retreat, squad_role, target_for_role,
 };
 pub use content::{
     AiDifficulty, AiProfile, MATCH_PRESETS, MAX_AI_OPPONENTS, MatchPreset, PLAYER_COLORS,
@@ -56,8 +58,9 @@ pub use terrain::{
     seed_base, seed_bias, seed_preset, start_point,
 };
 pub use buildings::{
-    Occupant, PlaceError, Tile, can_place, check_place, find_buildable_near, footprint_center,
-    footprint_tiles, has_passable_approach, is_water_adjacent, occupancy_set, tile_key,
+    Occupant, PlaceError, Tile, can_place, check_place, composes_with_walls, find_buildable_near,
+    footprint_center, footprint_tiles, has_passable_approach, is_water_adjacent, occupancy_set,
+    tile_key,
 };
 pub use buildings_defs::{BUILD_CATEGORIES, BuildCategory, BuildingDef, building_def};
 pub use combat::{Attacker, CombatAct, DEFENSIVE_LEASH, acquire_target, combat_action, effective_damage};

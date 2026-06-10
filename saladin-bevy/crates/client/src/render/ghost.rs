@@ -4,13 +4,12 @@
 
 use crate::camera::{GameCamera, pick_ground};
 use crate::input::{GhostRot, InputMode, WallDrag, build_cells, place_valid};
-use crate::render::sync::{RenderAssets, RenderMaterials, wall_angle_at};
+use crate::render::sync::{RenderAssets, RenderMaterials};
 use crate::terrain::{HeightField, height_at};
 use crate::LocalPlayer;
 use bevy::prelude::*;
 use saladin_protocol::{Building, GameId, Owner, Pos, ResourceNode, WorldConfig};
 use saladin_sim::{BuildingKind, Occupant, building_def, occupancy_set};
-use std::collections::HashSet;
 
 /// One ghost cell (the root holds nothing; each cell is its own mesh entity).
 #[derive(Component)]
@@ -54,16 +53,24 @@ pub fn update_ghost(
     for p in &q_nodes {
         occ.insert(saladin_sim::tile_key(p.pos.x.to_num::<i32>(), p.pos.y.to_num::<i32>()));
     }
+    // own wall tiles are transparent to a composing gate/tower — the ghost
+    // previews exactly what the sim will accept (and absorb)
+    if saladin_sim::composes_with_walls(kind) {
+        for (p, b, o) in &q_buildings {
+            if o.0 == local.0 && b.kind == BuildingKind::Wall {
+                occ.remove(&saladin_sim::tile_key(p.pos.x.to_num::<i32>(), p.pos.y.to_num::<i32>()));
+            }
+        }
+    }
     let own: Vec<saladin_sim::V2> = q_buildings
         .iter()
         .filter(|(_, _, o)| o.0 == local.0)
         .map(|(p, _, _)| p.pos)
         .collect();
-    let occ_render: HashSet<i32> = occ.iter().copied().collect();
 
-    let is_wall = kind == BuildingKind::Wall;
-    let yaw = if is_wall {
-        ghost_wall_angle(&occ_render, wall_drag.0, g.x, g.z)
+    // wall pillars are rotationally symmetric; everything else uses R-rotation
+    let yaw = if kind == BuildingKind::Wall {
+        0.0
     } else {
         ghost_rot.0 as f32 * std::f32::consts::FRAC_PI_2
     };
@@ -77,19 +84,6 @@ pub fn update_ghost(
             Transform::from_xyz(cx, y, cy).with_rotation(Quat::from_rotation_y(yaw)),
         ));
     }
-}
-
-/// Wall ghost orientation: along the drag axis, or its connection angle.
-fn ghost_wall_angle(occ: &HashSet<i32>, drag: Option<(i32, i32)>, hx: f32, hz: f32) -> f32 {
-    if let Some((sx, sy)) = drag {
-        let dx = hx.floor() as i32 - sx;
-        let dy = hz.floor() as i32 - sy;
-        if dx == 0 && dy == 0 {
-            return wall_angle_at(occ, hx, hz);
-        }
-        return if dx.abs() >= dy.abs() { 0.0 } else { -std::f32::consts::FRAC_PI_2 };
-    }
-    wall_angle_at(occ, hx, hz)
 }
 
 /// Red translucent box over the own building under the cursor in demolish mode.

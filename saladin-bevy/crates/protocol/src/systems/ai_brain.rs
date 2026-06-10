@@ -1,4 +1,7 @@
-use crate::commands::{assign_idle_gatherers, build, path_to, start_research, train};
+use crate::commands::{
+    assign_idle_gatherers, build, garrison, market_buy_cmd, market_trade, path_to, start_research,
+    train, ungarrison,
+};
 use crate::components::*;
 use bevy_ecs::prelude::*;
 use bevy_platform::collections::HashMap;
@@ -8,6 +11,7 @@ use std::collections::HashSet as StdSet;
 const AI_BRAIN_DT: Fx = saladin_sim::AI_BRAIN_DT;
 const HOME_THREAT_RADIUS: Fx = saladin_sim::fx!("24"); // enemy combatants this close to home = a threat
 const HOME_RADIUS: Fx = saladin_sim::fx!("18"); // own combat units this close to a building count as "home"
+const SHORE_SCAN: i32 = 14; // tile radius around the keep that counts as "shore near"
 
 fn is_combat(kind: UnitKind) -> bool {
     unit_def(kind).attack > 0
@@ -27,6 +31,8 @@ struct BotSnap {
     faction: Faction,
     match_id: u64,
     defeated: bool,
+    wave_launched: i32,
+    fishing_blocked: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -40,7 +46,7 @@ struct USnap {
     match_id: u64,
     gather_state: GatherState,
     target_node: u64,
-    garrisoned: bool,
+    garrisoned_in: u64,
 }
 
 /// Strategic skirmish AI. Under lockstep every client runs this identically (the
@@ -65,6 +71,8 @@ pub fn ai_brain(world: &mut World) {
                 faction: p.faction,
                 match_id: m.0,
                 defeated: p.defeated,
+                wave_launched: b.wave_launched,
+                fishing_blocked: b.fishing_blocked,
             })
             .collect()
     };
@@ -89,7 +97,7 @@ pub fn ai_brain(world: &mut World) {
                 match_id: m.0,
                 gather_state: u.gather_state,
                 target_node: u.target_node,
-                garrisoned: u.garrisoned_in != 0,
+                garrisoned_in: u.garrisoned_in,
             })
             .collect()
     };
@@ -197,6 +205,32 @@ pub fn ai_brain(world: &mut World) {
             q.iter(world).find(|p| p.player_id == owner).map(|p| p.stock).unwrap_or_default()
         };
 
+        // standing enemy towers weigh into the assault go/no-go
+        let enemy_towers = buildings
+            .iter()
+            .filter(|(_, _, o, k, m)| {
+                *m == bot.match_id
+                    && faction_of.get(o).copied() == Some(saladin_sim::enemy_faction(bot.faction))
+                    && matches!(*k, BuildingKind::Tower | BuildingKind::Watchtower)
+            })
+            .count() as i32;
+
+        // open water within building reach of the keep enables a Fishing Hut
+        let shore_near = !bot.fishing_blocked && {
+            let seed = world.resource::<crate::WorldConfig>().seed;
+            let (kx, ky) = (keep_pos.x.to_num::<i32>(), keep_pos.y.to_num::<i32>());
+            let mut found = false;
+            'scan: for dy in -SHORE_SCAN..=SHORE_SCAN {
+                for dx in -SHORE_SCAN..=SHORE_SCAN {
+                    if is_water_tile(seed, kx + dx, ky + dy) {
+                        found = true;
+                        break 'scan;
+                    }
+                }
+            }
+            found
+        };
+
         let state = PlannerState {
             peasants,
             pop,
@@ -214,6 +248,8 @@ pub fn ai_brain(world: &mut World) {
             enemy,
             enemy_has_walls,
             threat_near_home: threat,
+            shore_near,
+            enemy_towers,
         };
 
         // ── economy: steer gatherers to what the bot is short of ──────────────
@@ -246,7 +282,7 @@ pub fn ai_brain(world: &mut World) {
                 if u.owner != owner
                     || u.kind != UnitKind::Peasant
                     || u.id == bot.scout_id
-                    || u.garrisoned
+                    || u.garrisoned_in != 0
                     || u.gather_state == GatherState::Idle
                     || u.gather_state == GatherState::ToStockpile
                 {
@@ -281,6 +317,7 @@ pub fn ai_brain(world: &mut World) {
 
         // ── phase + one macro decision per profile-paced window ───────────────
         let phase = next_phase(&state, &tune);
+        let mut fishing_blocked = bot.fishing_blocked;
         let mut decision_cd = bot.decision_cd - AI_BRAIN_DT;
         if decision_cd <= Fx::ZERO {
             decision_cd = prof.decision_interval;
@@ -295,8 +332,26 @@ pub fn ai_brain(world: &mut World) {
                     let reserve_ok = kind != BuildingKind::Tower
                         || stock.wood >= building_def(kind).cost.wood + tune.wood_buffer;
                     if reserve_ok {
-                        place_near(world, owner, kind, keep_pos);
+                        let placed = place_near(world, owner, kind, keep_pos);
+                        // an affordable hut with no legal shoreline tile would
+                        // stall the ladder forever — stop asking for one
+                        if !placed
+                            && kind == BuildingKind::FishingHut
+                            && stock.can_afford(&building_def(kind).cost)
+                        {
+                            fishing_blocked = true;
+                        }
                     }
+                }
+            }
+            // market: one order per window through the SAME validated command
+            // path a human uses — famine rescue (gold into food) or war-chest
+            // building (glut into gold; cavalry, siege and tech all cost gold).
+            if let Some(t) = next_trade(&state, &tune) {
+                if t.buy {
+                    market_buy_cmd(world, owner, t.res, t.amount);
+                } else {
+                    market_trade(world, owner, t.res, t.amount);
                 }
             }
             // research: start the highest-priority Blacksmith tech the bot can
@@ -330,7 +385,7 @@ pub fn ai_brain(world: &mut World) {
                 u.owner == owner
                     && (is_combat(u.kind) || u.kind == UnitKind::Imam)
                     && !u.routing
-                    && !u.garrisoned
+                    && u.garrisoned_in == 0
             })
             .map(|u| FieldUnit {
                 entity: u.entity,
@@ -350,7 +405,58 @@ pub fn ai_brain(world: &mut World) {
             field_army: field_count,
             home_army: army.len() as i32 - field_count,
         };
+        let defending = threat_timer >= tac.defend_react_delay && threat >= tac.defend_threat;
         let under_attack = threat_timer >= tac.defend_react_delay && should_recall(&th, &tac);
+
+        // ── garrison: while defending, shooters man the keep/towers (volleys
+        //    stack and the garrison survives the host); all-clear empties them.
+        let hosts: Vec<(u64, V2, i32)> = buildings
+            .iter()
+            .filter(|(_, _, o, k, m)| {
+                *o == owner && *m == bot.match_id && building_def(*k).garrison_cap > 0
+            })
+            .map(|(id, p, _, k, _)| (*id, *p, building_def(*k).garrison_cap))
+            .collect();
+        if defending {
+            let mut free: Vec<(u64, V2, i32)> = hosts
+                .iter()
+                .map(|(id, p, cap)| {
+                    let occ = units.iter().filter(|u| u.garrisoned_in == *id).count() as i32;
+                    (*id, *p, cap - occ)
+                })
+                .filter(|(_, _, f)| *f > 0)
+                .collect();
+            let mut shooters: Vec<(u64, V2)> = army
+                .iter()
+                .filter(|a| {
+                    a.at_home
+                        && can_garrison(unit_def(a.kind))
+                        && unit_def(a.kind).range >= saladin_sim::fx!("3")
+                })
+                .map(|a| (a.id, a.pos))
+                .collect();
+            shooters.sort_by_key(|(id, _)| *id);
+            for (uid, upos) in shooters {
+                let Some(h) =
+                    free.iter_mut().filter(|(_, _, f)| *f > 0).min_by_key(|(_, p, _)| dist2(upos, *p))
+                else {
+                    break;
+                };
+                let host_id = h.0;
+                h.2 -= 1;
+                garrison(world, owner, uid, host_id);
+            }
+        } else if threat == 0 {
+            let occupied: Vec<u64> = hosts
+                .iter()
+                .filter(|(id, _, _)| units.iter().any(|u| u.owner == owner && u.garrisoned_in == *id))
+                .map(|(id, _, _)| *id)
+                .collect();
+            for b in occupied {
+                ungarrison(world, owner, b);
+            }
+        }
+
         if under_attack {
             let n = recall_count(&th, &tac);
             let mut by_closest: Vec<&FieldUnit> = army.iter().filter(|a| !a.at_home).collect();
@@ -380,9 +486,17 @@ pub fn ai_brain(world: &mut World) {
         // leads onto fortifications, the main body besieges the keep, and the
         // fastest raider-class units peel off to harass the enemy economy.
         let mut wave_timer = bot.wave_timer - AI_BRAIN_DT;
+        let mut wave_launched = bot.wave_launched;
+        // Power gate: only commit a wave with a real strength edge over the
+        // defender's field army + towers. A double-muster overrides the gate
+        // so a turtling stalemate still breaks.
+        let overwhelming = soldiers >= prof.wave_size * 2;
+        let strong_enough =
+            overwhelming || should_assault(&army_comp, &enemy, enemy_towers, tac.advantage_margin_pct);
         let wants_assault = phase != AiPhase::Defend
             && !under_attack
             && mustered(soldiers, prof.wave_size)
+            && strong_enough
             && wave_timer <= Fx::ZERO;
         let mut launched = false;
         if wants_assault {
@@ -426,7 +540,35 @@ pub fn ai_brain(world: &mut World) {
                     }
                 }
                 wave_timer = prof.wave_interval;
+                wave_launched = soldiers;
                 launched = true;
+            }
+        }
+
+        // ── retreat: a wave bled below the threshold breaks off and regroups
+        //    at the keep instead of trickling into the meat grinder.
+        let field_units: Vec<(Entity, V2)> =
+            army.iter().filter(|a| !a.at_home).map(|a| (a.entity, a.pos)).collect();
+        if !launched && wave_launched > 0 {
+            if field_units.is_empty() {
+                wave_launched = 0; // wave resolved (won, died, or walked home)
+            } else if should_retreat(wave_launched, soldiers, tac.retreat_pct) {
+                for (e, pos) in field_units {
+                    let path = path_to(world, pos, keep_pos);
+                    if let Some(mut u) = world.get_mut::<Unit>(e) {
+                        u.attack_target = 0;
+                        u.stance = Stance::Defensive;
+                        u.home = keep_pos;
+                        if !path.is_empty() {
+                            u.target = path[0];
+                            u.path = path;
+                            u.path_idx = 0;
+                            u.has_target = true;
+                        }
+                    }
+                }
+                wave_launched = 0;
+                wave_timer = prof.wave_interval; // regroup before the next muster
             }
         }
 
@@ -446,7 +588,7 @@ pub fn ai_brain(world: &mut World) {
                 .map(|(_, p, _, _, _)| *p);
             let best = units
                 .iter()
-                .filter(|u| u.owner == owner && u.kind == UnitKind::Peasant && !u.garrisoned)
+                .filter(|u| u.owner == owner && u.kind == UnitKind::Peasant && u.garrisoned_in == 0)
                 .min_by_key(|u| u.id)
                 .map(|u| (u.entity, u.pos, u.id));
             if let (Some(tpos), Some((e, pos, id))) = (target, best) {
@@ -473,23 +615,53 @@ pub fn ai_brain(world: &mut World) {
             b.phase = phase;
             b.threat_timer = threat_timer;
             b.scout_id = scout_id;
+            b.wave_launched = wave_launched;
+            b.fishing_blocked = fishing_blocked;
         }
     }
 }
 
-/// Try to place `kind` on a clear spot spiralling out from the keep.
-fn place_near(world: &mut World, owner: u64, kind: BuildingKind, keep: V2) {
+/// Try to place `kind` on a clear spot spiralling out from the keep. Eight
+/// rays cover ordinary structures; a shoreline building needs the FULL ring
+/// perimeter — its one valid waterside tile is rarely on a ray.
+fn place_near(world: &mut World, owner: u64, kind: BuildingKind, keep: V2) -> bool {
     if build(world, owner, kind, keep, 0) {
-        return;
+        return true;
+    }
+    if building_def(kind).requires_water {
+        for r in 2..=SHORE_SCAN {
+            for (dx, dy) in ring_perimeter(r) {
+                let pos = V2::new(keep.x + Fx::from_num(dx), keep.y + Fx::from_num(dy));
+                if build(world, owner, kind, pos, 0) {
+                    return true;
+                }
+            }
+        }
+        return false;
     }
     for r in 3..26 {
         for (dx, dy) in [(1, 0), (1, 1), (0, 1), (-1, 1), (-1, 0), (-1, -1), (0, -1), (1, -1)] {
             let pos = V2::new(keep.x + Fx::from_num(dx * r), keep.y + Fx::from_num(dy * r));
             if build(world, owner, kind, pos, 0) {
-                return;
+                return true;
             }
         }
     }
+    false
+}
+
+/// Every tile on the square ring of radius `r`, in deterministic scan order.
+fn ring_perimeter(r: i32) -> Vec<(i32, i32)> {
+    let mut v = Vec::with_capacity((8 * r) as usize);
+    for dx in -r..=r {
+        v.push((dx, -r));
+        v.push((dx, r));
+    }
+    for dy in (-r + 1)..r {
+        v.push((-r, dy));
+        v.push((r, dy));
+    }
+    v
 }
 
 fn assault_intel(

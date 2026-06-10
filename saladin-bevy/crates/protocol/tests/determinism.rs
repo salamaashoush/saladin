@@ -123,14 +123,22 @@ fn starvation_drains_soldiers() {
     for _ in 0..40 {
         step(app.world_mut());
     }
+    {
+        let world = app.world_mut();
+        // player starved to 0 food, but the grace period holds bodies together
+        let mut pq = world.query::<&Player>();
+        assert_eq!(pq.iter(world).next().unwrap().stock.food, 0);
+        let mut uq = world.query::<&Unit>();
+        assert_eq!(uq.iter(world).next().unwrap().hp, 70, "no attrition during the grace");
+    }
+    // past the grace the famine ramp bleeds hp every economy tick
+    for _ in 0..40 * 11 {
+        step(app.world_mut());
+    }
     let world = app.world_mut();
-    // player starved to 0 food
-    let mut pq = world.query::<&Player>();
-    assert_eq!(pq.iter(world).next().unwrap().stock.food, 0);
-    // each soldier bled hp (70 -> 62, drain round(4*2)=8)
     let mut uq = world.query::<&Unit>();
     let hp = uq.iter(world).next().unwrap().hp;
-    assert_eq!(hp, 62);
+    assert!(hp < 70, "sustained famine must drain hp (got {hp})");
 }
 
 fn find_land_block(seed: u32) -> (i32, i32) {

@@ -127,7 +127,7 @@ fn pick(
     field: Option<&HeightField>,
     q_units: &Query<(&GameId, &Owner, &Pos, &Unit)>,
     q_buildings: &Query<(&GameId, &Owner, &Pos, &Building)>,
-    q_nodes: &Query<(&GameId, &Pos), With<ResourceNode>>,
+    q_nodes: &Query<(&GameId, &Pos, &ResourceNode)>,
 ) -> Option<Picked> {
     // units first — small targets beat big footprints
     let mut best: Option<(u64, u64)> = None;
@@ -161,7 +161,7 @@ fn pick(
             return Some(Picked::Building(g.0, o.0));
         }
     }
-    for (g, p) in q_nodes {
+    for (g, p, _) in q_nodes {
         let nx = p.pos.x.to_num::<f32>();
         let nz = p.pos.y.to_num::<f32>();
         if (gx - nx).hypot(gz - nz) <= 0.8 {
@@ -171,10 +171,32 @@ fn pick(
     Some(Picked::Ground(ground))
 }
 
+/// Voice of the selection: the first selected unit answers for the group.
+fn selected_kind(
+    selection: &Selection,
+    q_units: &Query<(&GameId, &Owner, &Pos, &Unit)>,
+) -> Option<saladin_sim::UnitKind> {
+    let id = selection.units.iter().min()?;
+    q_units.iter().find(|(g, ..)| g.0 == *id).map(|(_, _, _, u)| u.kind)
+}
+
 fn occupied_tiles(q_buildings: &Query<(&GameId, &Owner, &Pos, &Building)>) -> HashSet<i32> {
     let occ: Vec<saladin_sim::Occupant> =
         q_buildings.iter().map(|(_, _, p, b)| saladin_sim::Occupant { kind: b.kind, pos: p.pos }).collect();
     occupancy_set(&occ, true)
+}
+
+/// Tile keys of `me`'s wall segments — transparent to composing defense pieces
+/// (the sim absorbs the segment on build; the ghost must agree).
+pub fn own_wall_keys(
+    q_buildings: &Query<(&GameId, &Owner, &Pos, &Building)>,
+    me: u64,
+) -> HashSet<i32> {
+    q_buildings
+        .iter()
+        .filter(|(_, o, _, b)| o.0 == me && b.kind == BuildingKind::Wall)
+        .map(|(_, _, p, _)| tile_key(p.pos.x.to_num::<i32>(), p.pos.y.to_num::<i32>()))
+        .collect()
 }
 
 /// Client-side placement validity (mirror of the module's gate, for the ghost).
@@ -216,6 +238,7 @@ pub fn pointer_input(
     local: Res<LocalPlayer>,
     cfg: Res<saladin_protocol::WorldConfig>,
     (mut mode, mut input, mut selection): (ResMut<InputMode>, ResMut<LocalInput>, ResMut<Selection>),
+    mut voice: ResMut<crate::audio::VoiceQueue>,
     ghost_rot: Res<GhostRot>,
     (mut drag, mut wall_drag, mut demolish, mut last_click): (
         ResMut<DragState>,
@@ -225,7 +248,7 @@ pub fn pointer_input(
     ),
     q_units: Query<(&GameId, &Owner, &Pos, &Unit)>,
     q_buildings: Query<(&GameId, &Owner, &Pos, &Building)>,
-    q_nodes: Query<(&GameId, &Pos), With<ResourceNode>>,
+    q_nodes: Query<(&GameId, &Pos, &ResourceNode)>,
 ) {
     let me = local.0;
     let Ok(window) = windows.single() else { return };
@@ -305,19 +328,37 @@ pub fn pointer_input(
         match pick(cursor, camera, cam_tf, field_ref, &q_units, &q_buildings, &q_nodes) {
             Some(Picked::Unit(target, owner)) if owner != me => {
                 command_attack(&selection, &q_units, me, target, &mut input);
+                if let Some(k) = selected_kind(&selection, &q_units) {
+                    voice.0.push((k, crate::audio::Bark::Attack));
+                }
             }
             Some(Picked::Node(node)) => {
+                let mut any = false;
                 for &id in &selection.units {
                     if let Some((_, _, _, u)) = q_units.iter().find(|(g, ..)| g.0 == id) {
                         if unit_def(u.kind).carry > 0 {
                             input.0.push(PlayerCommand::Gather { player_id: me, unit: id, node });
+                            any = true;
                         }
                     }
+                }
+                if any {
+                    let bark = match q_nodes.iter().find(|(g, ..)| g.0 == node).map(|(_, _, n)| n.res_type) {
+                        Some(saladin_sim::ResourceType::Wood) => crate::audio::Bark::Wood,
+                        Some(saladin_sim::ResourceType::Food) => crate::audio::Bark::Food,
+                        Some(saladin_sim::ResourceType::Stone) => crate::audio::Bark::Stone,
+                        Some(saladin_sim::ResourceType::Gold) => crate::audio::Bark::Gold,
+                        None => crate::audio::Bark::Ack,
+                    };
+                    voice.0.push((saladin_sim::UnitKind::Peasant, bark));
                 }
             }
             Some(Picked::Building(target, owner)) => {
                 if owner != me {
                     command_attack(&selection, &q_units, me, target, &mut input);
+                    if let Some(k) = selected_kind(&selection, &q_units) {
+                        voice.0.push((k, crate::audio::Bark::Attack));
+                    }
                 } else {
                     let bkind = q_buildings.iter().find(|(g, ..)| g.0 == target).map(|(_, _, _, b)| b.kind);
                     let host = bkind.map(|k| building_def(k)).filter(|d| can_host_garrison(d));
@@ -348,7 +389,12 @@ pub fn pointer_input(
                     }
                 }
             }
-            Some(Picked::Ground(g)) => command_move(&selection, me, g.x, g.z, &mut input),
+            Some(Picked::Ground(g)) => {
+                command_move(&selection, me, g.x, g.z, &mut input);
+                if let Some(k) = selected_kind(&selection, &q_units) {
+                    voice.0.push((k, crate::audio::Bark::Ack));
+                }
+            }
             _ => {}
         }
         return;
@@ -494,7 +540,12 @@ fn commit_build(
     q_buildings: &Query<(&GameId, &Owner, &Pos, &Building)>,
     input: &mut LocalInput,
 ) {
-    let occ = occupied_tiles(q_buildings);
+    let mut occ = occupied_tiles(q_buildings);
+    if saladin_sim::composes_with_walls(kind) {
+        for k in own_wall_keys(q_buildings, me) {
+            occ.remove(&k);
+        }
+    }
     let own: Vec<V2> =
         q_buildings.iter().filter(|(_, o, _, _)| o.0 == me).map(|(_, _, p, _)| p.pos).collect();
     let cells = build_cells(kind, hx, hz, wall_start);

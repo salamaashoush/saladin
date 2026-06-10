@@ -13,7 +13,8 @@ mod unit_cmds;
 pub use spawn::scatter_world_nodes;
 
 pub(crate) use build_cmds::{build, train};
-pub(crate) use economy_cmds::start_research;
+pub(crate) use economy_cmds::{market_buy_cmd, market_trade, start_research};
+pub(crate) use garrison_cmds::{garrison, ungarrison};
 pub(crate) use unit_cmds::{assign_idle_gatherers, path_to};
 
 /// Player intents. Under lockstep these are the ONLY thing shipped over the wire;
