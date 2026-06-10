@@ -9,6 +9,12 @@ use bevy_ecs::prelude::World;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
+/// Out-of-band connection news for the client UI (never sim state).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum NetEvent {
+    PeerLeft(u64),
+}
+
 /// Carries each peer's inputs for a future tick and returns the complete,
 /// deterministically-ordered batch for a tick once every peer has submitted.
 pub trait Transport {
@@ -16,6 +22,10 @@ pub trait Transport {
     /// All peers' inputs for `tick` (sorted by player id) if everyone submitted,
     /// else `None` (the sim must stall — never advance on partial input).
     fn batch(&mut self, tick: u64) -> Option<Vec<(u64, Vec<PlayerCommand>)>>;
+    /// Drain connection events (peer drops etc.) for UI banners.
+    fn take_events(&mut self) -> Vec<NetEvent> {
+        Vec::new()
+    }
 }
 
 /// Drives one client through lockstep ticks. Local input is buffered and shipped

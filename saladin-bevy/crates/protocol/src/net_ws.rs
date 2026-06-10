@@ -18,6 +18,7 @@ pub struct WsTransport {
     outbox: Vec<Msg>,
     pub lobby: LobbyState,
     batches: HashMap<u64, Vec<(u64, Vec<PlayerCommand>)>>,
+    events: Vec<crate::net::NetEvent>,
 }
 
 impl WsTransport {
@@ -33,6 +34,7 @@ impl WsTransport {
             outbox: vec![Msg::Hello { version: PROTOCOL_VERSION, name: name.to_string(), intent }],
             lobby: LobbyState::default(),
             batches: HashMap::new(),
+            events: Vec::new(),
         })
     }
 
@@ -59,6 +61,7 @@ impl WsTransport {
                     Some(Msg::Batch { tick, entries }) => {
                         self.batches.insert(tick, entries);
                     }
+                    Some(Msg::PeerLeft { id }) => self.events.push(crate::net::NetEvent::PeerLeft(id)),
                     Some(m) => self.lobby.apply(&m),
                     None => {}
                 },
@@ -85,6 +88,9 @@ impl Transport for WsTransport {
     fn batch(&mut self, tick: u64) -> Option<Vec<(u64, Vec<PlayerCommand>)>> {
         self.poll();
         self.batches.get(&tick).cloned()
+    }
+    fn take_events(&mut self) -> Vec<crate::net::NetEvent> {
+        std::mem::take(&mut self.events)
     }
 }
 

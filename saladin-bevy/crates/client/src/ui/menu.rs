@@ -22,6 +22,7 @@ pub enum MenuScreen {
     Main,
     Singleplayer,
     Multiplayer,
+    Settings,
 }
 
 /// Menu-only actions (kept separate from the HUD's `UiAction`).
@@ -128,6 +129,7 @@ pub fn sync_mp_form(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn update_menu(
     mut commands: Commands,
     font: Res<UiFont>,
@@ -135,12 +137,21 @@ pub fn update_menu(
     screen: Res<MenuScreen>,
     form: Res<MpForm>,
     err: Res<MpError>,
+    user: Res<config::UserConfig>,
     mut digest: ResMut<MenuDigest>,
     q_root: Query<Entity, With<MenuRoot>>,
 ) {
     let key = format!(
-        "{:?}|{:?}|{:?}|{}|{}|{:?}",
-        *screen, cfg.faction, cfg.opponents, cfg.difficulty as u8, cfg.seed, err.0
+        "{:?}|{:?}|{:?}|{}|{}|{:?}|{}|{:.2}|{:.2}",
+        *screen,
+        cfg.faction,
+        cfg.opponents,
+        cfg.difficulty as u8,
+        cfg.seed,
+        err.0,
+        user.edge_scroll,
+        user.ui_scale,
+        user.master_volume
     );
     if digest.0 == key {
         return;
@@ -166,6 +177,11 @@ pub fn update_menu(
             MenuScreen::Main => main_screen(p, &font),
             MenuScreen::Singleplayer => sp_screen(p, &font, &cfg),
             MenuScreen::Multiplayer => mp_screen(p, &font, &form, &err),
+            MenuScreen::Settings => {
+                label(p, &font, "SETTINGS", FONT_LG, GOLD);
+                super::pause::settings_controls(p, &font, &user);
+                menu_button(p, &font, MenuAction::Goto(MenuScreen::Main), "Back", false, false);
+            }
         });
     });
 }
@@ -176,6 +192,7 @@ fn main_screen(p: &mut ChildSpawnerCommands, font: &UiFont) {
     menu_button(p, font, MenuAction::Goto(MenuScreen::Singleplayer), "Singleplayer", false, false);
     menu_button(p, font, MenuAction::Goto(MenuScreen::Multiplayer), "Multiplayer", false, false);
     menu_button(p, font, MenuAction::LoadGame, "Load Game", false, !crate::save_exists());
+    menu_button(p, font, MenuAction::Goto(MenuScreen::Settings), "Settings", false, false);
     menu_button(p, font, MenuAction::Quit, "Quit", false, false);
 }
 
@@ -332,7 +349,7 @@ pub fn menu_actions(
             }
             MenuAction::LoadGame => {
                 cfg.load = true;
-                next.set(GameState::Playing);
+                next.set(GameState::Loading);
             }
             MenuAction::Faction(f) => cfg.faction = *f,
             MenuAction::AddOpponent => cfg.opponents = (cfg.opponents + 1).min(7),
@@ -341,7 +358,7 @@ pub fn menu_actions(
             MenuAction::CycleSeed => {
                 cfg.seed = cfg.seed.wrapping_mul(1664525).wrapping_add(1013904223) % 100_000
             }
-            MenuAction::Start => next.set(GameState::Playing),
+            MenuAction::Start => next.set(GameState::Loading),
             MenuAction::HostLan | MenuAction::JoinIp | MenuAction::HostInternet | MenuAction::JoinRoom => {
                 remember_name(&mut user, &form);
                 let name = display_name(&user);
@@ -411,9 +428,14 @@ pub fn setup_gameover(
     font: Res<UiFont>,
     local: Res<crate::LocalPlayer>,
     q_players: Query<&saladin_protocol::Player>,
+    stats: Res<saladin_protocol::MatchStats>,
+    tick: Res<saladin_protocol::Tick>,
 ) {
     let won = q_players.iter().find(|p| p.player_id == local.0).map(|p| !p.defeated).unwrap_or(false);
     let (title, color) = if won { ("VICTORY", ACCENT) } else { ("DEFEAT", WARN) };
+    let s = stats.0.get(&local.0).copied().unwrap_or_default();
+    let secs = tick.0 / 20; // 20 Hz base tick
+    let duration = format!("{}:{:02}", secs / 60, secs % 60);
     commands
         .spawn((
             GameOverRoot,
@@ -431,6 +453,24 @@ pub fn setup_gameover(
         ))
         .with_children(|p| {
             label(p, &font, title, 48.0, color);
+            p.spawn((
+                Node {
+                    flex_direction: FlexDirection::Column,
+                    align_items: AlignItems::Center,
+                    row_gap: Val::Px(4.0),
+                    padding: UiRect::all(Val::Px(14.0)),
+                    border: UiRect::all(Val::Px(1.0)),
+                    ..default()
+                },
+                BackgroundColor(PANEL_BG),
+                BorderColor::all(PANEL_BORDER),
+            ))
+            .with_children(|p| {
+                label(p, &font, &format!("Match duration   {duration}"), FONT_MD, TEXT);
+                label(p, &font, &format!("Units trained    {}", s.trained), FONT_MD, TEXT);
+                label(p, &font, &format!("Units lost       {}", s.lost), FONT_MD, TEXT);
+                label(p, &font, &format!("Resources banked {}", s.gathered), FONT_MD, TEXT);
+            });
             p.spawn((
                 Button,
                 GameOverAction,

@@ -106,3 +106,34 @@ pub fn lan_ips() -> Vec<String> {
 pub fn lan_ips() -> Vec<String> {
     Vec::new()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn roundtrips_through_toml() {
+        let cfg = UserConfig {
+            player_name: "Saladin".into(),
+            relay_addr: "vps.example.com:5000".into(),
+            edge_scroll: false,
+            ui_scale: 1.25,
+            master_volume: 0.4,
+        };
+        let s = toml::to_string_pretty(&cfg).unwrap();
+        let back: UserConfig = toml::from_str(&s).unwrap();
+        assert_eq!(back.player_name, "Saladin");
+        assert_eq!(back.relay_addr, "vps.example.com:5000");
+        assert!(!back.edge_scroll);
+        assert_eq!(back.ui_scale, 1.25);
+        assert_eq!(back.master_volume, 0.4);
+    }
+
+    #[test]
+    fn partial_files_fall_back_per_field() {
+        let back: UserConfig = toml::from_str("player_name = \"Just A Name\"\n").unwrap();
+        assert_eq!(back.player_name, "Just A Name");
+        assert_eq!(back.relay_addr, UserConfig::default().relay_addr);
+        assert!(back.edge_scroll);
+    }
+}

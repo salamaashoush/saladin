@@ -64,6 +64,7 @@ pub fn pan_camera(
     keys: Res<ButtonInput<KeyCode>>,
     windows: Query<&Window>,
     time: Res<Time>,
+    user: Res<crate::config::UserConfig>,
     mut state: ResMut<CameraState>,
     mut q: Query<&mut Transform, With<GameCamera>>,
 ) {
@@ -81,8 +82,8 @@ pub fn pan_camera(
     if keys.pressed(KeyCode::KeyD) || keys.pressed(KeyCode::ArrowRight) {
         dx += 1.0;
     }
-    // edge scroll
-    if let Ok(window) = windows.single() {
+    // edge scroll (toggle in settings)
+    if user.edge_scroll && let Ok(window) = windows.single() {
         if let Some(c) = window.cursor_position() {
             const EDGE: f32 = 10.0;
             if c.x <= EDGE {

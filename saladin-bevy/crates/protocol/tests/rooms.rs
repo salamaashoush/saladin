@@ -221,3 +221,59 @@ fn lobby_metadata_propagates_and_match_stays_in_sync() {
     let hb = b.world().resource::<StateHash>().0;
     assert_eq!(ha, hb, "room lockstep clients must stay bit-identical");
 }
+
+#[test]
+fn peer_drop_mid_match_notifies_and_lockstep_continues() {
+    use saladin_protocol::net::NetEvent;
+    let addr = "127.0.0.1:39485";
+    spawn_host_relay(addr).expect("relay binds");
+    std::thread::sleep(Duration::from_millis(100));
+
+    let mut t1 = TcpTransport::connect(addr, "stays", JoinIntent::Direct).expect("t1");
+    let mut t2 = TcpTransport::connect(addr, "drops", JoinIntent::Direct).expect("t2");
+    wait_for(|| t1.lobby().players.len() == 2, "roster");
+    t2.set_ready(true);
+    wait_for(|| t1.lobby().all_ready(), "ready");
+    t1.request_start();
+    wait_for(|| t1.lobby().started && t2.lobby().started, "start");
+
+    let (p1, p2) = (t1.lobby().you, t2.lobby().you);
+    let mut a = build(1);
+    let mut b = build(1);
+    let mut d1 = LockstepDriver::new(p1, 2);
+    let mut d2 = LockstepDriver::new(p2, 2);
+    d1.push(PlayerCommand::Join { player_id: p1, name: "A".into(), faction: Faction::Ayyubid, match_id: 1 });
+    d2.push(PlayerCommand::Join { player_id: p2, name: "B".into(), faction: Faction::Crusader, match_id: 1 });
+
+    // both play 30 ticks, then client 2 vanishes
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let mut done = (0u64, 0u64);
+    while (done.0 < 30 || done.1 < 30) && Instant::now() < deadline {
+        if done.0 < 30 && d1.advance(a.world_mut(), &mut t1) {
+            done.0 += 1;
+        }
+        if done.1 < 30 && d2.advance(b.world_mut(), &mut t2) {
+            done.1 += 1;
+        }
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    assert_eq!(done, (30, 30));
+    drop(t2);
+    drop(b);
+
+    // the survivor keeps completing ticks and hears about the drop
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let mut more = 0u64;
+    let mut saw_leave = false;
+    while more < 60 && Instant::now() < deadline {
+        if d1.advance(a.world_mut(), &mut t1) {
+            more += 1;
+        }
+        if t1.take_events().contains(&NetEvent::PeerLeft(p2)) {
+            saw_leave = true;
+        }
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    assert_eq!(more, 60, "remaining player's ticks complete without the leaver");
+    assert!(saw_leave, "client is told the peer left");
+}

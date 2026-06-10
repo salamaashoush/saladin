@@ -58,6 +58,7 @@ pub fn gather(
     mut q_nodes: Query<(&GameId, &Pos, &mut ResourceNode, &MatchId)>,
     mut q_players: Query<(Entity, &mut Player)>,
     mut q_units: Query<(&GameId, &Pos, &Owner, &MatchId, &mut Unit)>,
+    mut stats: ResMut<crate::MatchStats>,
 ) {
     let seed = cfg.seed;
 
@@ -229,6 +230,7 @@ pub fn gather(
                     if let Some(&pe) = player_ent.get(&owner.0) {
                         if let Ok((_, mut player)) = q_players.get_mut(pe) {
                             player.stock.add(u.carry_type, u.carrying);
+                            stats.of(owner.0).gathered += u.carrying as u64;
                         }
                     }
                     u.carrying = 0;

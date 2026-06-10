@@ -28,7 +28,7 @@ pub use net_ws::WsTransport;
 
 pub use commands::{CommandQueue, PlayerCommand, apply_commands, scatter_world_nodes};
 pub use components::*;
-pub use net::{LockstepDriver, MemTransport, RelayState, SharedRelay, Transport, shared_relay};
+pub use net::{LockstepDriver, MemTransport, NetEvent, RelayState, SharedRelay, Transport, shared_relay};
 
 use bevy_app::prelude::*;
 use bevy_ecs::prelude::*;
@@ -137,6 +137,25 @@ impl Default for SimRng {
     }
 }
 
+/// Per-player running totals for the victory/defeat screen, maintained by the
+/// sim as it trains/kills/banks (deterministic — same on every client, but
+/// never part of the state hash).
+#[derive(Clone, Copy, Default, Debug, PartialEq, Eq)]
+pub struct PlayerStats {
+    pub trained: u32,
+    pub lost: u32,
+    pub gathered: u64,
+}
+
+#[derive(Resource, Default)]
+pub struct MatchStats(pub HashMap<u64, PlayerStats>);
+
+impl MatchStats {
+    pub fn of(&mut self, player: u64) -> &mut PlayerStats {
+        self.0.entry(player).or_default()
+    }
+}
+
 /// `match_id → status` snapshot, rebuilt each tick from the `MatchInfo` rows so
 /// every sub-rate system can cheaply skip entities in Paused/Ended matches.
 #[derive(Resource, Default)]
@@ -161,6 +180,7 @@ impl Plugin for SimPlugin {
             .init_resource::<StateHash>()
             .init_resource::<SimRng>()
             .init_resource::<MatchStatuses>()
+            .init_resource::<MatchStats>()
             .init_resource::<ShotEvents>()
             .init_resource::<CommandQueue>()
             .init_schedule(SimSchedule);

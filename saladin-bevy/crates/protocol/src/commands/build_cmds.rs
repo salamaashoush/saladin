@@ -61,6 +61,7 @@ pub(crate) fn train(world: &mut World, owner: u64, kind: UnitKind) -> bool {
     let passable = |tx: i32, ty: i32| is_passable(seed, tx, ty) && !occ.contains(&tile_key(tx, ty));
     let snap = nearest_passable_grid(&passable, raw_x, raw_y);
     let id = spawn::spawn_unit(world, owner, kind, snap, match_id, GatherState::Idle, 0);
+    world.resource_mut::<crate::MatchStats>().of(owner).trained += 1;
 
     // march to the rally point when it was moved off the building
     if dist(rally, bpos) > saladin_sim::fx!("1.2") {

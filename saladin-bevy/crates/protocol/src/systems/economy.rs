@@ -14,6 +14,7 @@ pub fn economy(
     mut commands: Commands,
     mut q_players: Query<(&GameId, &mut Player, &MatchId)>,
     mut q_units: Query<(Entity, &Owner, &mut Unit)>,
+    mut stats: ResMut<crate::MatchStats>,
 ) {
     // Combat-unit entities grouped by owner (read pass).
     let mut eaters: HashMap<u64, Vec<Entity>> = HashMap::new();
@@ -44,6 +45,7 @@ pub fn economy(
                         continue;
                     }
                     if hp <= 0 {
+                        stats.of(p.player_id).lost += 1;
                         commands.entity(e).despawn();
                     } else {
                         u.hp = hp;

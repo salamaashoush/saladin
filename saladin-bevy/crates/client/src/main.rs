@@ -53,6 +53,9 @@ pub enum GameState {
     #[default]
     Menu,
     Lobby,
+    /// One rendered frame of "building the world" before the heavy
+    /// `OnEnter(Playing)` setup blocks — a note instead of a freeze.
+    Loading,
     Playing,
     GameOver,
 }
@@ -144,6 +147,8 @@ fn main() {
     let args: Vec<String> = std::env::args().collect();
     let connect = args.iter().position(|a| a == "connect").and_then(|i| args.get(i + 1)).cloned();
     let (net, local, multiplayer) = build_net(None);
+    let user_config = config::load();
+    let ui_scale = user_config.ui_scale.clamp(0.75, 1.5);
 
     let mut app = App::new();
     app.add_plugins(
@@ -163,6 +168,8 @@ fn main() {
     .add_plugins(SimPlugin)
     .init_state::<GameState>()
     .insert_resource(net)
+    .insert_resource(user_config)
+    .insert_resource(UiScale(ui_scale))
     .insert_resource(LocalPlayer(local))
     .insert_resource(Multiplayer(multiplayer))
     .insert_resource(Time::<Fixed>::from_hz(20.0))
@@ -190,7 +197,6 @@ fn main() {
     .init_resource::<ui::menu::MpError>()
     .init_resource::<ui::menu::LobbyMode>()
     .init_resource::<ui::text_input::CursorBlink>()
-    .insert_resource(config::load())
     .init_resource::<perf::PerfVisible>()
     .add_systems(Startup, (perf::setup_perf, input::spawn_drag_box, ui::widgets::prewarm_font_atlas))
     .add_systems(
@@ -210,6 +216,10 @@ fn main() {
         Update,
         (lobby_poll, ui::menu::update_lobby, ui::menu::lobby_actions).run_if(in_state(GameState::Lobby)),
     )
+    // loading interstitial
+    .add_systems(OnEnter(GameState::Loading), ui::pause::setup_loading)
+    .add_systems(OnExit(GameState::Loading), ui::pause::cleanup_loading)
+    .add_systems(Update, ui::pause::tick_loading.run_if(in_state(GameState::Loading)))
     // menu
     .add_systems(OnEnter(GameState::Menu), ui::menu::setup_menu)
     .add_systems(OnExit(GameState::Menu), ui::menu::cleanup_menu)
@@ -231,7 +241,13 @@ fn main() {
     )
     .add_systems(
         OnExit(GameState::Playing),
-        (ui::hud::cleanup_hud, minimap::despawn_minimap, teardown_match),
+        (
+            ui::hud::cleanup_hud,
+            ui::pause::cleanup_pause,
+            ui::pause::cleanup_disconnects,
+            minimap::despawn_minimap,
+            teardown_match,
+        ),
     )
     .add_systems(FixedUpdate, drive_sim.run_if(in_state(GameState::Playing)))
     .add_systems(Update, do_save.run_if(in_state(GameState::Playing)))
@@ -282,6 +298,24 @@ fn main() {
             check_gameover,
         )
             .run_if(in_state(GameState::Playing)),
+    )
+    .init_resource::<ui::pause::PauseScreen>()
+    .init_resource::<ui::pause::Disconnects>()
+    .add_systems(
+        Update,
+        (
+            ui::pause::pause_hotkey,
+            ui::pause::update_pause_overlay,
+            ui::pause::render_disconnect_banner,
+        )
+            .run_if(in_state(GameState::Playing)),
+    )
+    // settings buttons dispatch PauseActions from both the pause overlay and
+    // the main menu's settings screen
+    .add_systems(
+        Update,
+        ui::pause::pause_actions
+            .run_if(in_state(GameState::Playing).or_else(in_state(GameState::Menu))),
     )
     // game over
     .add_systems(OnEnter(GameState::GameOver), ui::menu::setup_gameover)
@@ -336,6 +370,15 @@ fn main() {
         }
         Ok("mp") => {
             app.insert_resource(ui::menu::MenuScreen::Multiplayer);
+            app.add_systems(Update, auto_screenshot);
+        }
+        Ok("settings") => {
+            app.insert_resource(ui::menu::MenuScreen::Settings);
+            app.add_systems(Update, auto_screenshot);
+        }
+        Ok("pause") => {
+            app.insert_state(GameState::Playing);
+            app.insert_resource(ui::pause::PauseScreen::Menu);
             app.add_systems(Update, auto_screenshot);
         }
         Ok("lobby") => {
@@ -403,21 +446,32 @@ fn lobby_poll(world: &mut World) {
         driver: LockstepDriver::new(you, 3),
         transport: std::sync::Mutex::new(Box::new(t)),
     });
-    world.resource_mut::<NextState<GameState>>().set(GameState::Playing);
+    world.resource_mut::<NextState<GameState>>().set(GameState::Loading);
 }
 
 // ── lockstep sim driver ──────────────────────────────────────────────────────
 
 fn drive_sim(world: &mut World) {
     let inputs = std::mem::take(&mut world.resource_mut::<LocalInput>().0);
-    world.resource_scope::<Net, _>(|world, net| {
+    let events = world.resource_scope::<Net, _>(|world, net| {
         let net = net.into_inner();
         for c in inputs {
             net.driver.push(c);
         }
         let mut transport = net.transport.lock().unwrap();
         net.driver.advance(world, transport.as_mut());
+        transport.take_events()
     });
+    for ev in events {
+        let saladin_protocol::NetEvent::PeerLeft(id) = ev;
+        let name = {
+            let mut q = world.query::<&Player>();
+            q.iter(world).find(|p| p.player_id == id).map(|p| p.name.clone())
+        }
+        .unwrap_or_else(|| format!("Player {id}"));
+        println!("{name} disconnected");
+        world.resource_mut::<ui::pause::Disconnects>().0.push(name);
+    }
 }
 
 fn setup_world(world: &mut World) {
@@ -602,6 +656,9 @@ fn teardown_match(world: &mut World) {
     *world.resource_mut::<saladin_protocol::Tick>() = default();
     *world.resource_mut::<saladin_protocol::StateHash>() = default();
     *world.resource_mut::<saladin_protocol::SimRng>() = default();
+    world.resource_mut::<saladin_protocol::MatchStats>().0.clear();
+    world.resource_mut::<ui::pause::Disconnects>().0.clear();
+    *world.resource_mut::<ui::pause::PauseScreen>() = default();
     world.resource_mut::<saladin_protocol::GameIndex>().0.clear();
     world.resource_mut::<saladin_protocol::MatchStatuses>().0.clear();
     world.resource_mut::<saladin_protocol::ShotEvents>().0.clear();

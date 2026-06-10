@@ -89,6 +89,9 @@ pub enum Msg {
     Start,
     /// Relay → all: the match begins — final roster + the world everyone builds.
     Welcome { seed: u32, preset: u8, players: Vec<LobbyPlayer> },
+    /// Relay → all (mid-match): a peer's connection dropped; remaining players'
+    /// ticks complete without it.
+    PeerLeft { id: u64 },
     Submit { tick: u64, player_id: u64, cmds: Vec<PlayerCommand> },
     Batch { tick: u64, entries: Vec<(u64, Vec<PlayerCommand>)> },
 }

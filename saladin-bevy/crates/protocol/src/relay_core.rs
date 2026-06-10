@@ -305,6 +305,7 @@ impl ClientHandle {
                 room.broadcast_roster();
             } else {
                 // remaining players' ticks complete without the leaver
+                room.broadcast(&Msg::PeerLeft { id: self.id });
                 room.flush_batches();
             }
             room.humans().count() == 0

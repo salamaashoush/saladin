@@ -53,6 +53,7 @@ fn read_msg(s: &mut TcpStream) -> std::io::Result<Msg> {
 struct ClientState {
     lobby: LobbyState,
     batches: HashMap<u64, Vec<(u64, Vec<PlayerCommand>)>>,
+    events: Vec<crate::net::NetEvent>,
 }
 
 /// Client side: a writer handle plus a reader thread that fills lobby state and
@@ -93,6 +94,9 @@ impl TcpTransport {
                 match read_msg(&mut reader) {
                     Ok(Msg::Batch { tick, entries }) => {
                         s2.lock().unwrap().batches.insert(tick, entries);
+                    }
+                    Ok(Msg::PeerLeft { id }) => {
+                        s2.lock().unwrap().events.push(crate::net::NetEvent::PeerLeft(id));
                     }
                     Ok(m) => s2.lock().unwrap().lobby.apply(&m),
                     Err(e) => {
@@ -135,12 +139,24 @@ impl TcpTransport {
     }
 }
 
+impl Drop for TcpTransport {
+    /// `shutdown` reaches the OS socket shared by the reader thread's fd clone
+    /// — without it the relay would never see this client leave (the reader's
+    /// clone keeps the connection alive past the drop).
+    fn drop(&mut self) {
+        let _ = self.stream.shutdown(std::net::Shutdown::Both);
+    }
+}
+
 impl Transport for TcpTransport {
     fn submit(&mut self, tick: u64, player_id: u64, cmds: Vec<PlayerCommand>) {
         let _ = write_msg(&mut self.stream, &Msg::Submit { tick, player_id, cmds });
     }
     fn batch(&mut self, tick: u64) -> Option<Vec<(u64, Vec<PlayerCommand>)>> {
         self.state.lock().unwrap().batches.get(&tick).cloned()
+    }
+    fn take_events(&mut self) -> Vec<crate::net::NetEvent> {
+        std::mem::take(&mut self.state.lock().unwrap().events)
     }
 }
 

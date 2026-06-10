@@ -219,6 +219,7 @@ pub fn combat(
     mut q_units: Query<(Entity, &GameId, &mut Pos, &Owner, &MatchId, &mut Unit), Without<Building>>,
     mut q_buildings: Query<(Entity, &GameId, &Pos, &Owner, &MatchId, &mut Building), Without<Unit>>,
     mut q_players: Query<&mut Player>,
+    mut stats: ResMut<crate::MatchStats>,
 ) {
     let seed = cfg.seed;
     shots.0.clear();
@@ -646,6 +647,7 @@ pub fn combat(
     for (i, snap) in s.units.iter().enumerate() {
         let Ok((ent, _g, mut p, _o, _m, mut u)) = q_units.get_mut(snap.entity) else { continue };
         if s.udead[i] {
+            stats.of(snap.owner).lost += 1;
             commands.entity(ent).despawn();
             continue;
         }
