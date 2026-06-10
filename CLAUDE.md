@@ -44,28 +44,63 @@ saladin-bevy/crates/
    `passable_grid` / `region_grid` / `elevation_at` (thread-local last-seed
    memo). Use them — never resample fbm in a hot loop.
    `node_reachable(seed, from, to)` answers "can a walker ever get there".
+8. **The map preset rides in the seed's top 3 bits** (`compose_seed(base,
+   preset)`), so every per-seed cache and the wire stay plain u32. Always
+   compose before writing `WorldConfig.seed`; `seed_base`/`seed_preset`/
+   `seed_bias` decode.
 
 ## Commands
 
 ```bash
 cd saladin-bevy
-cargo test --workspace                 # 100 tests, all must stay green
+cargo test --workspace                 # 116 tests, all must stay green
 cargo run -p saladin-client --bin saladin-client          # single player
-cargo run -p saladin-client --bin saladin-client connect <ip>   # join LAN game
-cargo run -p saladin-server                                # dedicated relay
+cargo run -p saladin-client --bin saladin-client connect <ip>   # dev shortcut (menus cover all MP flows)
+cargo run -p saladin-server                                # internet relay (rooms) — VPS docs: crates/server/README.md
 cargo run --release -p saladin-protocol --example net_bench -- 2 50000 200
                                        # lockstep benchmark: clients units ticks
+cargo run -p saladin-sim --example mapdump -- <base> <preset> [out.ppm]
+                                       # worldgen tuning: biome map + dominant-region dump
 SALADIN_AUTO=1 cargo run -p saladin-client --bin saladin-client
    # skip menu + screenshot to /tmp/saladin_shot.png at ~6s (headless verify:
-   # then `magick /tmp/saladin_shot.png -crop ...` and view the crop)
+   # then `magick /tmp/saladin_shot.png -crop ...` and view the crop).
+   # IMPORTANT: `cargo build` FIRST or the 30s timeout eats the build and you
+   # stare at a STALE screenshot (this burned an hour once).
+   # Other modes: menu | sp | mp | settings | lobby | pause | research |
+   # market | layout (computed-rect dump). Overrides: SALADIN_SEED,
+   # SALADIN_PRESET, SALADIN_TAB.
 ```
 
-Multiplayer: menu "Host Game (LAN)" embeds the relay (port 5000) and
-self-connects; joiners use `connect <ip>`; lobby shows the roster; host
-clicks Start. Lockstep = inputs only on the wire; client count barely affects
-cost. TCP is intentional (lockstep needs reliable+ordered; UDP buys nothing
-at 20 Hz). `net_ws.rs` (ewebsock) exists for a future browser build but has
-a known client-side stall — unused.
+Multiplayer (all menu-driven; protocol v2 handshake rejects mismatched builds):
+- Host LAN: embeds the relay (port 5000), self-connects, shows LAN IPs.
+- Join by IP: text input (LAN/port-forwarded hosts).
+- Host Internet / Join Room: both sides connect OUTBOUND to a public relay
+  (`saladin-server` on any VPS) — room-keyed (`relay_core::Rooms`), 6-char
+  codes, zero NAT config. Relay address in `~/.config/saladin/config.toml`.
+- Lobby: names (persisted in config), per-player faction, ready flags, host
+  adds AI seats + picks map (seed+preset ship in `Welcome`; only the host
+  originates `AddAi` commands — still lockstep-deterministic).
+- Mid-match drops broadcast `PeerLeft`: survivors get a banner, ticks
+  complete without the leaver. `TcpTransport` shuts the socket down on Drop
+  (the reader thread's fd clone otherwise keeps dead clients seated).
+Lockstep = inputs only on the wire; client count barely affects cost. TCP is
+intentional (lockstep needs reliable+ordered; UDP buys nothing at 20 Hz).
+`net_ws.rs` (ewebsock) shares the same wire protocol for a future browser
+build but has a known client-side stall — unused.
+
+## Worldgen (sim/terrain.rs)
+
+WORLD_SIZE 288. Seeded continental-plate noise blended with a weak center
+dome (no two seeds share geography; ocean ring guaranteed). Features, all
+fixed-point + cache-compatible: rivers with FORD crossings (River/Ford
+biomes; fords walkable, never buildable), gradient CLIFFS with ramp openings,
+mountain passes (ranges never bisect the mainland), clustered forest groves,
+desert oasis pockets. 4 presets: Continental / River Valley / Highlands /
+Archipelago (`MAP_PRESETS`, bias fields incl. river/cliff/island gain).
+Fair starts: `fair_start_nodes` tops every spawn slot up to wood/stone/food
+minima within `FAIR_RADIUS`; `start_point` snaps spawns to the dominant
+region (`dominant_region`). Invariants tested across 100 worlds in
+`sim/tests/worldgen.rs` — keep them green when touching terrain.
 
 ## Sim cadences
 
@@ -99,8 +134,25 @@ Every gameplay fix ships with a test (`crates/protocol/tests/`).
   do NOT downgrade to 0.18 (its text renderer shreds glyphs on this machine).
 - Ortho iso camera: keep `near` at 0 — negative near pulls behind-camera
   geometry (the ocean disc) over the map.
-- UI = `ui/` module: theme tokens, widget builders, `UiAction` central
-  dispatch, digest-based rebuild (rebuild section only when its state key
-  changes). Render = shared mesh+material handles per kind×team so Bevy
+- UI = `ui/` module: ALL art is baked procedurally at startup in
+  `ui/assets.rs` (parchment 9-slice panels, flat bronze buttons, 31 pixel-art
+  icons as string-art tables, ring/flag textures) — no binary assets. Widget
+  builders in `ui/widgets.rs` (`tool_button` icon cards, `screen_button`/
+  `wide_button`, `panel_bg`); button states are ImageNode tints via
+  `button_feedback`. `UiAction` central dispatch, digest-based rebuild
+  (rebuild section only when its state key changes). Text inputs:
+  `ui/text_input.rs` (values live in `MpForm` so rebuilds never eat typed
+  text — always compare-before-write to avoid rebuild loops).
+- HUD UX rules: market trading lives on the selected Market only; Orders
+  (Gather/Demolish mode) only when nothing is selected; build tabs sit ABOVE
+  the card grid. Absolute bottom-anchored panels need explicit min_height.
+- Render = shared mesh+material handles per kind×team so Bevy
   auto-instances; sim→render reconciliation in `render/sync.rs`.
-- The embedded `ui.ttf` (DejaVu) has no emoji glyphs — text labels only.
+- The embedded `ui.ttf` (DejaVu) has no emoji glyphs AND the atlas pre-warm
+  is ASCII-only — never put non-ASCII in UI strings (em dashes included).
+- Config (`~/.config/saladin/config.toml`): player name, relay address,
+  edge-scroll, UI scale, volume placeholder — `client/src/config.rs`.
+- Game states: Menu → (Lobby) → Loading (one rendered frame before the heavy
+  world build) → Playing (Esc = pause overlay; SP also ships Pause command) →
+  GameOver (MatchStats: trained/lost/gathered tallied in sim at train/death/
+  deposit sites).
