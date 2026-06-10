@@ -100,8 +100,9 @@ fn build_sky_mesh() -> Mesh {
 }
 
 fn ocean_color(d: f32) -> [f32; 4] {
-    let deep = lin(0x1e5f86);
-    let shallow = lin(0x3f93a8);
+    // match the terrain mesh's water gradient so the map edge has no seam
+    let deep = lin(0x1f5673);
+    let shallow = lin(0x3a86a8);
     let haze = horizon();
 
     // Near the centre (under the camera): lighter shallow water. Farther: deep teal.

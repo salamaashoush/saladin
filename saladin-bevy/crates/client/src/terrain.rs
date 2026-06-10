@@ -68,17 +68,41 @@ fn raw_height(seed: u32, vx: i32, vy: i32) -> f32 {
     render_height(s.height, biome_height_emphasis(s.biome), seed_bias(seed).elev_gain).to_num::<f32>()
 }
 
+fn smooth01(t: f32) -> f32 {
+    let t = t.clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
+}
+
+/// Continuous water shading by DEPTH below the waterline — one gradient from
+/// a bright shoreline sliver through shallow turquoise into deep sea, instead
+/// of the old hard Shallow/Deep biome swap that drew a sharp two-tone edge.
+fn water_color(biome: Biome, h_norm: f32, sea: f32) -> [f32; 3] {
+    let depth = (sea - h_norm).max(0.0);
+    let shore = hex_linear(0x8fd0de);
+    let shallow = hex_linear(0x3a86a8);
+    let deep = hex_linear(0x1f5673);
+    let base = if biome == Biome::River { hex_linear(0x3e8fb5) } else { shallow };
+    let mut c = lerp3(shore, base, smooth01(depth / 0.02));
+    // rivers stay readable as rivers: they only darken partway
+    let deep_max = if biome == Biome::River { 0.45 } else { 1.0 };
+    c = lerp3(c, deep, smooth01((depth - 0.025) / 0.12) * deep_max);
+    c
+}
+
 /// Biome base blended toward its shade by elevation, plus snow-cap whitening
 /// and a foam strip on the first sliver of beach above the waterline.
 /// `h_norm` is the raw 0..1 field height; `rel_y` the unscaled render height.
-fn biome_color(biome: Biome, h_norm: f32, rel_y: f32) -> [f32; 3] {
+fn biome_color(biome: Biome, h_norm: f32, rel_y: f32, sea: f32) -> [f32; 3] {
+    if matches!(biome, Biome::DeepWater | Biome::ShallowWater | Biome::River) {
+        return water_color(biome, h_norm, sea);
+    }
     let def = biome_def(biome);
     let mut c = lerp3(hex_linear(def.color), hex_linear(def.shade), rel_y * 0.045);
     if biome == Biome::Snow {
         c = lerp3(c, hex_linear(0xf4f8fb), (h_norm - 0.82) * 4.0);
     }
     if biome == Biome::Sand {
-        let beach = 1.0 - ((h_norm - SEA_LEVEL).abs() * 18.0).min(1.0);
+        let beach = 1.0 - ((h_norm - sea).abs() * 18.0).min(1.0);
         if beach > 0.0 {
             c = lerp3(c, hex_linear(0xefe4bf), beach * 0.5);
         }
@@ -96,6 +120,7 @@ pub fn build_terrain_mesh(seed: u32) -> Mesh {
     let mut colors: Vec<[f32; 4]> = Vec::with_capacity(stride * stride);
     let sun = SUN.normalize();
 
+    let sea = SEA_LEVEL + seed_bias(seed).sea_shift.to_num::<f32>();
     for vy in 0..=n {
         for vx in 0..=n {
             let s = sample_terrain(seed, Fx::from_num(vx), Fx::from_num(vy));
@@ -103,7 +128,7 @@ pub fn build_terrain_mesh(seed: u32) -> Mesh {
                 render_height(s.height, biome_height_emphasis(s.biome), seed_bias(seed).elev_gain).to_num::<f32>();
             positions.push([vx as f32, h_raw * TERRAIN_SCALE, vy as f32]);
 
-            let c = biome_color(s.biome, s.height.to_num::<f32>(), h_raw);
+            let c = biome_color(s.biome, s.height.to_num::<f32>(), h_raw, sea);
 
             // Directional slope tint: finite-difference normal from neighbour
             // render heights — sun-facing slopes lighten, far sides darken.
