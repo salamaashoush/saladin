@@ -3,7 +3,7 @@
 A historic real-time strategy game (Crusades era) written in Rust on
 [Bevy](https://bevy.org), with deterministic-lockstep multiplayer over TCP.
 
-All code lives in the [`saladin-bevy/`](saladin-bevy/) cargo workspace:
+The repo root is the cargo workspace:
 
 - `crates/sim` — pure deterministic game core (fixed-point math, worldgen,
   pathfinding, combat/economy/AI formulas)
@@ -12,7 +12,6 @@ All code lives in the [`saladin-bevy/`](saladin-bevy/) cargo workspace:
 - `crates/client` — the game: rendering, camera, input, UI
 
 ```bash
-cd saladin-bevy
 cargo test --workspace
 cargo run -p saladin-client --bin saladin-client            # play vs AI
 cargo run -p saladin-client --bin saladin-client connect <ip>  # join a LAN game

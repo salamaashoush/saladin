@@ -28,21 +28,18 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: saladin-bevy
       - name: Linux build deps (alsa, udev, wayland, xkb)
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y libasound2-dev libudev-dev libwayland-dev libxkbcommon-dev
       - name: Build client + relay server
-        working-directory: saladin-bevy
         run: cargo build --release -p saladin-client -p saladin-server
       - name: Package
         run: |
           mkdir -p dist/${{ matrix.artifact }}
-          cp saladin-bevy/target/release/saladin-client dist/${{ matrix.artifact }}/
-          cp saladin-bevy/target/release/saladin-server dist/${{ matrix.artifact }}/
+          cp target/release/saladin-client dist/${{ matrix.artifact }}/
+          cp target/release/saladin-server dist/${{ matrix.artifact }}/
           tar -C dist -czf ${{ matrix.artifact }}.tar.gz ${{ matrix.artifact }}
       - uses: actions/upload-artifact@v4
         with:

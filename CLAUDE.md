@@ -1,14 +1,13 @@
 # Saladin — Bevy/Rust RTS
 
 Historic RTS (Crusades-era) built on **Bevy 0.19** with **deterministic
-lockstep multiplayer**. All game code lives in `saladin-bevy/` (cargo
-workspace). The old TypeScript/SpacetimeDB game was deleted; it exists only in
+lockstep multiplayer**. The repo root is the cargo workspace. The old TypeScript/SpacetimeDB game was deleted; it exists only in
 git history and is NOT a reference — design correctness here directly.
 
 ## Workspace layout
 
 ```
-saladin-bevy/crates/
+crates/
   sim/        pure deterministic game math + data. NO bevy, NO floats.
               fixed-point (Fx = I32F32), stat tables, terrain/worldgen,
               pathfinding (A*), combat/morale/economy formulas, AI planner.
@@ -52,7 +51,6 @@ saladin-bevy/crates/
 ## Commands
 
 ```bash
-cd saladin-bevy
 cargo test --workspace                 # 116 tests, all must stay green
 cargo run -p saladin-client --bin saladin-client          # single player
 cargo run -p saladin-client --bin saladin-client connect <ip>   # dev shortcut (menus cover all MP flows)

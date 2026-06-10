@@ -1,12 +1,9 @@
-node_modules
-dist
+/target
+/assets/voices/
 *.log
-
+dist/
 .DS_Store
-
-spacetime.local.json
 .ferridriver/
 .claude/scheduled_tasks.lock
-
-# rust
-saladin-bevy/target/
+spacetime.local.json
+node_modules

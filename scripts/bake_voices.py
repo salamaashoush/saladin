@@ -13,7 +13,7 @@
 # ///
 """Bake unit voice barks with Chatterbox multilingual TTS (Arabic).
 
-Output: saladin-bevy/assets/voices/{kind}_{bark}_{variant}.wav
+Output: assets/voices/{kind}_{bark}_{variant}.wav
         (22.05 kHz mono 16-bit — what the engine's loader expects)
 
 The engine falls back to its procedural formant voices for any file that is
