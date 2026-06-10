@@ -201,7 +201,7 @@ const BUILDING_DEFS: [BuildingDef; 13] = [
     // 10 FishingHut
     BuildingDef {
         label: "Fishing Hut",
-        blurb: "Shoreline food drop-off: build beside water, near fish.",
+        blurb: "Shore food drop-off; fish in reach are netted 2x faster.",
         icon: "🎣",
         footprint: 1,
         height: crate::fx!("1.0"),

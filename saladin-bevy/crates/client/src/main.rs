@@ -311,6 +311,9 @@ fn main() {
         (
             environment::follow_camera,
             environment::shimmer_ocean,
+            environment::animate_sparkle,
+            environment::animate_gulls,
+            environment::spawn_shore_ripples,
             ui::hud::update_resource_bar,
             ui::hud::update_bottom_bar,
             ui::hud::watch_toasts,
@@ -873,6 +876,7 @@ fn setup_visuals(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
+    mut images: ResMut<Assets<Image>>,
     cfg: Res<WorldConfig>,
     ui_assets: Res<ui::assets::UiAssets>,
 ) {
@@ -907,6 +911,117 @@ fn setup_visuals(
     }
 
     environment::spawn_environment(&mut commands, &mut meshes, &mut materials);
+
+    // ── living world: shore anchors, glinting sea, wheeling gulls ────────────
+    {
+        use saladin_sim::{Biome, Fx, is_passable, sample_terrain};
+        let half = Fx::lit("0.5");
+        let mut shore: Vec<Vec3> = Vec::new();
+        for ty in 1..WORLD_SIZE - 1 {
+            for tx in 1..WORLD_SIZE - 1 {
+                if is_passable(cfg.seed, tx, ty) {
+                    continue;
+                }
+                let s = sample_terrain(cfg.seed, Fx::from_num(tx) + half, Fx::from_num(ty) + half);
+                if !matches!(s.biome, Biome::ShallowWater | Biome::DeepWater | Biome::River) {
+                    continue;
+                }
+                if [(1, 0), (-1, 0), (0, 1), (0, -1)]
+                    .iter()
+                    .any(|(dx, dy)| is_passable(cfg.seed, tx + dx, ty + dy))
+                {
+                    let (x, z) = (tx as f32 + 0.5, ty as f32 + 0.5);
+                    shore.push(Vec3::new(x, terrain::height_at(&field, x, z), z));
+                }
+            }
+        }
+
+        // two counter-drifting glint layers over the sea
+        let sparkle_tex = images.add(environment::sparkle_image());
+        let center = WORLD_SIZE as f32 / 2.0;
+        for (y, speed, alpha, tile) in [
+            (-0.035f32, Vec2::new(0.010, 0.006), 0.34f32, 36.0f32),
+            (-0.05, Vec2::new(-0.007, 0.011), 0.26, 22.0),
+        ] {
+            let mut mat = StandardMaterial {
+                base_color: Color::WHITE.with_alpha(alpha),
+                base_color_texture: Some(sparkle_tex.clone()),
+                unlit: true,
+                alpha_mode: AlphaMode::Blend,
+                ..default()
+            };
+            mat.uv_transform = bevy::math::Affine2 {
+                matrix2: Mat2::from_diagonal(Vec2::splat(tile)),
+                translation: Vec2::ZERO,
+            };
+            commands.spawn((
+                environment::SparkleLayer { speed },
+                Mesh3d(meshes.add(bevy::mesh::PlaneMeshBuilder::new(Dir3::Y, Vec2::ONE).build())),
+                MeshMaterial3d(materials.add(mat)),
+                Transform::from_xyz(center, y, center).with_scale(Vec3::splat(WORLD_SIZE as f32 + 380.0)),
+                bevy::light::NotShadowCaster,
+                bevy::light::NotShadowReceiver,
+                MatchScoped,
+            ));
+        }
+
+        // gulls wheeling over the coastline
+        if !shore.is_empty() {
+            let white = materials.add(StandardMaterial {
+                base_color: Color::srgb(0.96, 0.96, 0.94),
+                perceptual_roughness: 0.8,
+                ..default()
+            });
+            let body = meshes.add(Mesh::from(Cuboid::new(0.14, 0.06, 0.34)));
+            let wing_l = meshes.add(
+                Mesh::from(Cuboid::new(0.42, 0.015, 0.13))
+                    .transformed_by(Transform::from_xyz(-0.24, 0.0, 0.0)),
+            );
+            let wing_r = meshes.add(
+                Mesh::from(Cuboid::new(0.42, 0.015, 0.13))
+                    .transformed_by(Transform::from_xyz(0.24, 0.0, 0.0)),
+            );
+            // wheel most of the flock over the player's home coast
+            let home = saladin_sim::start_point(cfg.seed, 0);
+            let hx = home.x.to_num::<f32>();
+            let hz = home.y.to_num::<f32>();
+            let mut near: Vec<Vec3> = shore.clone();
+            near.sort_by(|a, b| {
+                let da = (a.x - hx).powi(2) + (a.z - hz).powi(2);
+                let db = (b.x - hx).powi(2) + (b.z - hz).powi(2);
+                da.partial_cmp(&db).unwrap_or(std::cmp::Ordering::Equal)
+            });
+            for i in 0..9usize {
+                let at = if i < 5 {
+                    near[(i * 13).min(near.len() - 1)]
+                } else {
+                    shore[(i * 7919) % shore.len()]
+                };
+                let g = environment::Gull {
+                    center: at + Vec3::Y * 3.2,
+                    r: 2.5 + (i % 4) as f32 * 1.1,
+                    w: (0.22 + (i % 3) as f32 * 0.08) * if i % 2 == 0 { 1.0 } else { -1.0 },
+                    phase: i as f32 * 0.81,
+                };
+                commands
+                    .spawn((g, Transform::from_translation(at), Visibility::Inherited, MatchScoped))
+                    .with_children(|p| {
+                        p.spawn((Mesh3d(body.clone()), MeshMaterial3d(white.clone())));
+                        p.spawn((
+                            environment::GullWing { left: true },
+                            Mesh3d(wing_l.clone()),
+                            MeshMaterial3d(white.clone()),
+                        ));
+                        p.spawn((
+                            environment::GullWing { left: false },
+                            Mesh3d(wing_r.clone()),
+                            MeshMaterial3d(white.clone()),
+                        ));
+                    });
+            }
+        }
+        commands.insert_resource(environment::ShoreList(shore));
+    }
 
     commands.insert_resource(field);
     commands.insert_resource(render::sync::build_assets(&mut meshes));

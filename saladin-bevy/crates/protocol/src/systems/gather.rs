@@ -3,9 +3,9 @@ use crate::{GameIndex, MatchStatuses, PathScratch, WorldConfig};
 use bevy_ecs::prelude::*;
 use bevy_platform::collections::HashMap;
 use saladin_sim::{
-    AStar, BuildingKind, DEPOSIT_RANGE, Fx, GatherState, HARVEST_RANGE, HARVEST_TIME, MAX_EXPANSIONS,
-    Occupant, ResourceType, V2, building_def, dist, is_passable, nearest_passable_grid,
-    nearest_reachable_passable_grid, occupancy_set, tile_key, unit_def,
+    AStar, BuildingKind, DEPOSIT_RANGE, FISHING_HUT_RANGE, Fx, GatherState, HARVEST_RANGE,
+    HARVEST_TIME, MAX_EXPANSIONS, Occupant, ResourceType, V2, building_def, dist, is_passable,
+    nearest_passable_grid, nearest_reachable_passable_grid, occupancy_set, tile_key, unit_def,
 };
 
 const AI_DT: Fx = saladin_sim::AI_DT;
@@ -79,6 +79,13 @@ pub fn gather(
                 food_dropoff: def.food_dropoff,
             }
         })
+        .collect();
+
+    // friendly fishing huts double the harvest rate of nearby water food nodes
+    let huts: Vec<(u64, V2)> = q_buildings
+        .iter()
+        .filter(|(_, b, _)| b.kind == BuildingKind::FishingHut)
+        .map(|(p, _, o)| (o.0, p.pos))
         .collect();
 
     let mut node_map: HashMap<u64, V2> = HashMap::new();
@@ -181,7 +188,7 @@ pub fn gather(
                     retarget(&mut u, here, mid, 0, &nearest_node);
                     continue;
                 };
-                let Ok((_, _, mut node, _)) = q_nodes.get_mut(node_e) else {
+                let Ok((_, npos, mut node, _)) = q_nodes.get_mut(node_e) else {
                     retarget(&mut u, here, mid, 0, &nearest_node);
                     continue;
                 };
@@ -191,7 +198,15 @@ pub fn gather(
                     retarget(&mut u, here, mid, 0, &nearest_node);
                     continue;
                 }
-                let timer = u.harvest_timer + AI_DT;
+                // fish (water food node) near a friendly hut: nets work double
+                let is_fish = node.res_type == ResourceType::Food
+                    && !is_passable(seed, npos.pos.x.to_num::<i32>(), npos.pos.y.to_num::<i32>());
+                let boosted = is_fish
+                    && huts
+                        .iter()
+                        .any(|(o, hp)| *o == owner.0 && dist(*hp, npos.pos) <= FISHING_HUT_RANGE);
+                let step = if boosted { AI_DT + AI_DT } else { AI_DT };
+                let timer = u.harvest_timer + step;
                 if timer < HARVEST_TIME {
                     u.harvest_timer = timer;
                     continue;

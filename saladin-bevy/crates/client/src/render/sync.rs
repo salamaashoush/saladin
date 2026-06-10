@@ -44,6 +44,7 @@ pub struct RenderAssets {
     pub carry_sack: Handle<Mesh>,
     pub puff: Handle<Mesh>,
     pub flame: Handle<Mesh>,
+    pub ripple: Handle<Mesh>,
     pub scorch: Handle<Mesh>,
     pub rubble_chunk: Handle<Mesh>,
     pub rubble_pile: Handle<Mesh>,
@@ -72,6 +73,7 @@ pub struct RenderMaterials {
     pub ghost_bad: Handle<StandardMaterial>,
     pub demolish: Handle<StandardMaterial>,
     pub arrow: Handle<StandardMaterial>,
+    pub foam: Handle<StandardMaterial>,
     pub smoke_light: Handle<StandardMaterial>,
     pub smoke_dark: Handle<StandardMaterial>,
     pub flame: Handle<StandardMaterial>,
@@ -149,6 +151,7 @@ pub fn build_materials(
         ghost_bad: overlay(mats, Color::srgb_u8(0xee, 0x44, 0x33), 0.5),
         demolish: overlay(mats, Color::srgb_u8(0xff, 0x40, 0x30), 0.4),
         arrow: overlay(mats, Color::srgb_u8(0x2e, 0x21, 0x14), 1.0),
+        foam: overlay(mats, Color::srgb_u8(0xe8, 0xf6, 0xf8), 0.4),
         smoke_light: overlay(mats, Color::srgb_u8(0xb8, 0xb4, 0xac), 0.5),
         smoke_dark: overlay(mats, Color::srgb_u8(0x45, 0x41, 0x3c), 0.55),
         flame: overlay(mats, Color::srgb_u8(0xff, 0x9a, 0x2e), 0.85),
@@ -1224,7 +1227,12 @@ pub fn update_building_highlight(
             let x = p.pos.x.to_num::<f32>();
             let z = p.pos.y.to_num::<f32>();
             let pos = Vec3::new(x, height_at(&field, x, z) + 0.06, z);
-            let scale = Vec3::splat(def.footprint as f32 * 1.5);
+            // the fishing hut's ring shows its work aura, not its footprint
+            let scale = if b.kind == BuildingKind::FishingHut {
+                Vec3::splat(saladin_sim::FISHING_HUT_RANGE.to_num::<f32>() * 2.0)
+            } else {
+                Vec3::splat(def.footprint as f32 * 1.5)
+            };
             match q_ring.single_mut() {
                 Ok((_, mut tf)) => {
                     tf.translation = pos;
@@ -1312,6 +1320,13 @@ pub fn build_assets(meshes: &mut Assets<Mesh>) -> RenderAssets {
         carry_sack: meshes.add(crate::render::models::units::carry_sack_mesh()),
         puff: meshes.add(Sphere::new(1.0).mesh().uv(6, 5)),
         flame: meshes.add(Cone { radius: 0.5, height: 1.0 }.mesh().resolution(5).build()),
+        ripple: meshes.add(
+            Torus { minor_radius: 0.03, major_radius: 1.0 }
+                .mesh()
+                .minor_resolution(4)
+                .major_resolution(24)
+                .build(),
+        ),
         scorch: meshes.add(crate::render::models::props::scorch_mesh()),
         rubble_chunk: meshes.add(crate::render::models::props::rubble_chunk_mesh()),
         rubble_pile: meshes.add(crate::render::models::props::rubble_pile_mesh()),

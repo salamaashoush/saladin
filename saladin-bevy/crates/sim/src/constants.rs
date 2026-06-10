@@ -25,6 +25,9 @@ pub const TOWN_RADIUS: Fx = crate::fx!("28");
 pub const HARVEST_RANGE: Fx = crate::fx!("0.7");
 pub const DEPOSIT_RANGE: Fx = crate::fx!("1.1");
 pub const HARVEST_TIME: Fx = crate::fx!("1.2");
+/// Fishing-hut work aura: fish nodes within this range of a friendly hut are
+/// harvested at double speed (nets + boats).
+pub const FISHING_HUT_RANGE: Fx = crate::fx!("6");
 
 // Resource node counts per map and per-node yields.
 pub const TREE_COUNT: i32 = 2160;

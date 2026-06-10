@@ -5,7 +5,7 @@
 //! probability), a second hash stream jitters position/rotation/scale.
 
 use saladin_sim::rng::mix_seed;
-use saladin_sim::{Decoration, Fx, WORLD_SIZE, biome_decoration, hash2, sample_terrain};
+use saladin_sim::{Biome, Decoration, Fx, WORLD_SIZE, biome_decoration, hash2, sample_terrain};
 
 /// One decoration instance: (mesh index into `prop_meshes()`, world x, world z,
 /// yaw radians, uniform scale).
@@ -43,6 +43,22 @@ pub fn vegetation_placements(seed: u32) -> Vec<Placement> {
     for ty in 1..WORLD_SIZE - 1 {
         for tx in 1..WORLD_SIZE - 1 {
             let s = sample_terrain(seed, Fx::from_num(tx) + half, Fx::from_num(ty) + half);
+            // wildflower patches sprinkle the grass independently of the
+            // biome's main decoration channel
+            if matches!(s.biome, Biome::Grassland | Biome::Oasis) {
+                let roll = hash2(tx, ty, mix_seed(seed, 9001));
+                if roll < Fx::lit("0.05") {
+                    let jx = hash2(tx, ty, mix_seed(seed, 9103)).to_num::<f32>();
+                    let jy = hash2(tx, ty, mix_seed(seed, 9207)).to_num::<f32>();
+                    out.push(Placement {
+                        mesh: crate::render::models::props::PROP_FLOWERS,
+                        x: tx as f32 + 0.2 + jx * 0.6,
+                        z: ty as f32 + 0.2 + jy * 0.6,
+                        rot: jx * std::f32::consts::TAU,
+                        scale: 0.8 + jy * 0.5,
+                    });
+                }
+            }
             let dec = biome_decoration(s.biome);
             if dec.density <= Fx::ZERO {
                 continue;

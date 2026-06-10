@@ -18,10 +18,26 @@ pub const PROP_BOULDER: usize = 3;
 pub const PROP_REEDS: usize = 4;
 pub const PROP_PALM: usize = 5;
 pub const PROP_PINE: usize = 6;
+pub const PROP_FLOWERS: usize = 7;
 
 /// Mesh templates for the vegetation/prop instancer, indexed by placement.
 pub fn prop_meshes() -> Vec<Mesh> {
-    vec![shrub(), dune_grass(), rock(), boulder(), reeds(), palm(), pine()]
+    vec![shrub(), dune_grass(), rock(), boulder(), reeds(), palm(), pine(), flowers()]
+}
+
+// A little meadow patch: thin stems with white/red/gold heads.
+fn flowers() -> Mesh {
+    let stem = lin(0x5d7a3a);
+    let heads = [lin(0xe8e2d2), lin(0xc24a3a), lin(0xd9a83a), lin(0xe8e2d2), lin(0xb46ac0)];
+    let mut parts = Vec::new();
+    for (i, &(dx, dz)) in
+        [(0.0f32, 0.0f32), (0.16, 0.08), (-0.14, 0.12), (0.05, -0.16), (-0.1, -0.1)].iter().enumerate()
+    {
+        let h = 0.16 + (i % 3) as f32 * 0.05;
+        parts.push(part(cyl8(0.008, 0.012, h), stem, xyz(dx, h / 2.0, dz)));
+        parts.push(part(sphere_uv(0.035), heads[i % heads.len()], xyz(dx, h + 0.02, dz)));
+    }
+    merge(parts)
 }
 
 /// Resource-node mesh variants by type. Several meshes per kind; the renderer

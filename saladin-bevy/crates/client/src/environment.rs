@@ -244,6 +244,157 @@ pub fn follow_camera(
     }
 }
 
+// ── living world: water sparkle, shore ripples, seagulls ────────────────────
+
+/// Shallow/deep-water tiles that border land — anchor points for shore
+/// ripples and gull roosts. Computed once per match.
+#[derive(Resource, Default)]
+pub struct ShoreList(pub Vec<Vec3>);
+
+/// A drifting glint layer over the open water (scrolling baked sparkle dots).
+#[derive(Component)]
+pub struct SparkleLayer {
+    pub speed: Vec2,
+}
+
+#[derive(Component)]
+pub struct Gull {
+    pub center: Vec3,
+    pub r: f32,
+    pub w: f32,
+    pub phase: f32,
+}
+
+#[derive(Component)]
+pub struct GullWing {
+    pub left: bool,
+}
+
+/// Soft white sparkle dots on transparency, tiled across the sea.
+pub fn sparkle_image() -> Image {
+    use bevy::asset::RenderAssetUsages;
+    use bevy::image::{ImageSampler, ImageSamplerDescriptor};
+    use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
+    let n = 128u32;
+    let mut data = vec![0u8; (n * n * 4) as usize];
+    let mut h = 0x1234_5678u32;
+    let mut rnd = || {
+        h ^= h << 13;
+        h ^= h >> 17;
+        h ^= h << 5;
+        h
+    };
+    for _ in 0..70 {
+        let cx = (rnd() % n) as i32;
+        let cy = (rnd() % n) as i32;
+        let bright = 190 + (rnd() % 66) as i32;
+        // a 2-3px soft glint
+        for dy in -1i32..=1 {
+            for dx in -1i32..=1 {
+                let (x, y) = ((cx + dx).rem_euclid(n as i32), (cy + dy).rem_euclid(n as i32));
+                let fall = if dx == 0 && dy == 0 { 1.0 } else { 0.35 };
+                let i = ((y as u32 * n + x as u32) * 4) as usize;
+                let a = (bright as f32 * fall) as u8;
+                data[i] = 255;
+                data[i + 1] = 255;
+                data[i + 2] = 255;
+                data[i + 3] = data[i + 3].max(a);
+            }
+        }
+    }
+    let mut img = Image::new(
+        Extent3d { width: n, height: n, depth_or_array_layers: 1 },
+        TextureDimension::D2,
+        data,
+        TextureFormat::Rgba8UnormSrgb,
+        RenderAssetUsages::RENDER_WORLD,
+    );
+    img.sampler = ImageSampler::Descriptor(ImageSamplerDescriptor {
+        address_mode_u: bevy::image::ImageAddressMode::Repeat,
+        address_mode_v: bevy::image::ImageAddressMode::Repeat,
+        ..ImageSamplerDescriptor::linear()
+    });
+    img
+}
+
+/// Scroll the two glint layers in opposite drifts — the sea glitters.
+pub fn animate_sparkle(
+    time: Res<Time>,
+    q: Query<(&SparkleLayer, &MeshMaterial3d<StandardMaterial>)>,
+    mut mats: ResMut<Assets<StandardMaterial>>,
+) {
+    let t = time.elapsed_secs();
+    for (layer, handle) in &q {
+        if let Some(mut mat) = mats.get_mut(&handle.0) {
+            mat.uv_transform.translation = layer.speed * t;
+        }
+    }
+}
+
+/// Gulls wheel over the coast: circular soar, gentle height swell, wings
+/// flapping in bursts.
+pub fn animate_gulls(
+    time: Res<Time>,
+    mut roots: Query<(&Gull, &mut Transform)>,
+    mut wings: Query<(&GullWing, &mut Transform), Without<Gull>>,
+) {
+    let t = time.elapsed_secs();
+    for (g, mut tf) in &mut roots {
+        let a = t * g.w + g.phase;
+        let pos = g.center + Vec3::new(a.cos() * g.r, 1.6 + (t * 0.7 + g.phase).sin() * 0.5, a.sin() * g.r);
+        tf.translation = pos;
+        // face the tangent of the circle
+        let tangent = Vec3::new(-a.sin(), 0.0, a.cos()) * g.w.signum();
+        tf.rotation = Quat::from_rotation_y(tangent.x.atan2(tangent.z));
+    }
+    for (w, mut tf) in &mut wings {
+        // flap bursts: quick beats, then a glide
+        let beat = ((t * 7.0).sin() * 0.55).max(-0.15) * if w.left { 1.0 } else { -1.0 };
+        tf.rotation = Quat::from_rotation_z(beat);
+    }
+}
+
+/// Occasionally bloom a foam ring on a shore tile (expand-and-fade pulse via
+/// the shared particle curve).
+pub fn spawn_shore_ripples(
+    time: Res<Time>,
+    mut commands: Commands,
+    shore: Option<Res<ShoreList>>,
+    assets: Option<Res<crate::render::sync::RenderAssets>>,
+    rmats: Option<Res<crate::render::sync::RenderMaterials>>,
+    cam: Res<crate::camera::CameraState>,
+    mut acc: Local<f32>,
+) {
+    let (Some(shore), Some(assets), Some(rmats)) = (shore, assets, rmats) else { return };
+    if shore.0.is_empty() {
+        return;
+    }
+    // only bloom ripples the camera can actually see
+    let reach = cam.view_size * 1.6;
+    let c = cam.center;
+    let visible: Vec<&Vec3> = shore
+        .0
+        .iter()
+        .filter(|p| (p.x - c.x).abs() < reach && (p.z - c.z).abs() < reach)
+        .collect();
+    if visible.is_empty() {
+        return;
+    }
+    *acc += time.delta_secs() * 6.0;
+    let t = time.elapsed_secs();
+    while *acc >= 1.0 {
+        *acc -= 1.0;
+        let k = ((t * 977.0 + *acc * 131.0).sin() * 0.5 + 0.5).abs();
+        let at = *visible[(k * (visible.len() - 1) as f32) as usize];
+        commands.spawn((
+            crate::render::sync::Particle { vel: Vec3::ZERO, age: 0.0, life: 1.6, base: 0.55 },
+            Mesh3d(assets.ripple.clone()),
+            MeshMaterial3d(rmats.foam.clone()),
+            Transform::from_translation(at + Vec3::Y * 0.04).with_scale(Vec3::splat(0.01)),
+        ));
+    }
+}
+
 /// Faint shimmer so the flat sea isn't a dead colour field — base_color pulse
 /// multiplies the baked vertex gradient (the TS version used a sine band in
 /// the fragment shader).

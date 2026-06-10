@@ -301,3 +301,66 @@ fn gather_cycle_keeps_producing() {
         last = w;
     }
 }
+
+/// A fishing hut doubles the harvest rate of fish (water food nodes) in its
+/// reach: after the same ticks, the hut-side peasant has already filled its
+/// carry while the lone one is still hauling the net.
+#[test]
+fn fishing_hut_speeds_nearby_fish() {
+    // find a land tile orthogonally adjacent to water
+    let seed = 1u32;
+    let mut spot = None;
+    'scan: for ty in 8..280 {
+        for tx in 8..280 {
+            if !is_passable(seed, tx, ty) {
+                continue;
+            }
+            for (dx, dy) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
+                if !is_passable(seed, tx + dx, ty + dy) {
+                    spot = Some((tx, ty, tx + dx, ty + dy));
+                    break 'scan;
+                }
+            }
+        }
+    }
+    let (lx, ly, wx, wy) = spot.expect("seed 1 has a coastline");
+    let c = |t: i32| Fx::from_num(t) + Fx::lit("0.5");
+    let land = V2::new(c(lx), c(ly));
+    let water = V2::new(c(wx), c(wy));
+
+    let fish = |app: &mut App, id: u64| {
+        app.world_mut().spawn((
+            GameId(id),
+            MatchId(1),
+            Pos { pos: water, facing: ZERO },
+            ResourceNode { res_type: ResourceType::Food, remaining: 200 },
+        ));
+    };
+
+    let mut plain = build(seed);
+    spawn_player(&mut plain, 1);
+    fish(&mut plain, 20);
+    spawn_peasant(&mut plain, 30, 1, land, GatherState::Harvesting, 20, 0, ZERO);
+
+    let mut hutted = build(seed);
+    spawn_player(&mut hutted, 1);
+    fish(&mut hutted, 20);
+    spawn_peasant(&mut hutted, 30, 1, land, GatherState::Harvesting, 20, 0, ZERO);
+    let hdef = building_def(BuildingKind::FishingHut);
+    hutted.world_mut().spawn((
+        GameId(40),
+        Owner(1),
+        MatchId(1),
+        Pos { pos: land, facing: ZERO },
+        Building { kind: BuildingKind::FishingHut, hp: hdef.max_hp, cooldown: ZERO, rally: land },
+    ));
+
+    // 16 sim steps = 4 gather ticks: 4 * 0.2 = 0.8 < 1.2 unboosted,
+    // 4 * 0.4 = 1.6 >= 1.2 boosted
+    for _ in 0..16 {
+        step(plain.world_mut());
+        step(hutted.world_mut());
+    }
+    assert_eq!(unit(&mut plain, 30).carrying, 0, "unboosted net must still be working");
+    assert!(unit(&mut hutted, 30).carrying > 0, "hut-boosted net must have landed the catch");
+}
