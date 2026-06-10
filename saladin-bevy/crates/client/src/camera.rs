@@ -257,10 +257,13 @@ pub fn drag_pan(
     match grab.0 {
         None => grab.0 = Some(hit),
         Some(anchor) => {
+            // `delta` is measured against the CURRENT camera, so it must be
+            // applied to the current center — stacking it on target_center
+            // (already ahead of the camera while easing) double-counts the
+            // motion and the view oscillates ("pan shake").
             let delta = anchor - hit;
-            let t = state.target_center + Vec3::new(delta.x, 0.0, delta.z);
+            let t = state.center + Vec3::new(delta.x, 0.0, delta.z);
             state.target_center = clamp_center(t);
-            // the camera moves this frame, so re-anchor against the new view
         }
     }
 }

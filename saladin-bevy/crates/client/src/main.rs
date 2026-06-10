@@ -471,7 +471,7 @@ fn main() {
             app.insert_resource(ui::pause::PauseScreen::Menu);
             app.add_systems(Update, auto_screenshot);
         }
-        Ok("research") | Ok("market") | Ok("keep") => {
+        Ok("research") | Ok("market") | Ok("keep") | Ok("hut") => {
             // conjure + select a building so the screenshot shows its panel
             // (research on the blacksmith / trade on the market)
             app.insert_state(GameState::Playing);
@@ -661,6 +661,7 @@ fn auto_select_building(world: &mut World) {
     let kind = match std::env::var("SALADIN_AUTO").as_deref() {
         Ok("market") => BuildingKind::Market,
         Ok("keep") => BuildingKind::Keep,
+        Ok("hut") => BuildingKind::FishingHut,
         _ => BuildingKind::Blacksmith,
     };
     let t = world.resource::<Time>().elapsed_secs();

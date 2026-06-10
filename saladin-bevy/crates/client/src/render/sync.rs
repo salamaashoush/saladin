@@ -45,6 +45,7 @@ pub struct RenderAssets {
     pub puff: Handle<Mesh>,
     pub flame: Handle<Mesh>,
     pub ripple: Handle<Mesh>,
+    pub aura_ring: Handle<Mesh>,
     pub scorch: Handle<Mesh>,
     pub rubble_chunk: Handle<Mesh>,
     pub rubble_pile: Handle<Mesh>,
@@ -74,6 +75,7 @@ pub struct RenderMaterials {
     pub demolish: Handle<StandardMaterial>,
     pub arrow: Handle<StandardMaterial>,
     pub foam: Handle<StandardMaterial>,
+    pub aura: Handle<StandardMaterial>,
     pub smoke_light: Handle<StandardMaterial>,
     pub smoke_dark: Handle<StandardMaterial>,
     pub flame: Handle<StandardMaterial>,
@@ -152,6 +154,7 @@ pub fn build_materials(
         demolish: overlay(mats, Color::srgb_u8(0xff, 0x40, 0x30), 0.4),
         arrow: overlay(mats, Color::srgb_u8(0x2e, 0x21, 0x14), 1.0),
         foam: overlay(mats, Color::srgb_u8(0xe8, 0xf6, 0xf8), 0.4),
+        aura: overlay(mats, Color::srgb_u8(0x5f, 0xd6, 0xe8), 0.55),
         smoke_light: overlay(mats, Color::srgb_u8(0xb8, 0xb4, 0xac), 0.5),
         smoke_dark: overlay(mats, Color::srgb_u8(0x45, 0x41, 0x3c), 0.55),
         flame: overlay(mats, Color::srgb_u8(0xff, 0x9a, 0x2e), 0.85),
@@ -284,6 +287,11 @@ pub struct HpBar {
 /// Selected-building ring + rally flag markers (one of each at most).
 #[derive(Component)]
 pub struct BuildingSelRing;
+/// Thin world-space circle showing a selected building's work radius
+/// (fishing hut aura) — a dedicated mesh, NOT the dashed ring texture
+/// scaled up (that blows the dashes into giant blobs).
+#[derive(Component)]
+pub struct AuraRing;
 #[derive(Component)]
 pub struct RallyFlag;
 
@@ -1112,7 +1120,9 @@ pub fn update_hp_bars(
     assets: Res<RenderAssets>,
     rmats: Res<RenderMaterials>,
     field: Res<HeightField>,
+    map: Res<RenderMap>,
     cam: Query<&Transform, (With<crate::camera::GameCamera>, Without<HpBar>)>,
+    q_roots: Query<&Transform, (With<RenderRoot>, Without<HpBar>, Without<crate::camera::GameCamera>)>,
     q_units: Query<(&GameId, &Pos, &Unit)>,
     q_buildings: Query<(&GameId, &Pos, &Building)>,
     q_players: Query<&Player>,
@@ -1122,6 +1132,17 @@ pub fn update_hp_bars(
     let bill = cam_tf.rotation;
     let mask: HashMap<u64, u64> = HashMap::new();
     let _ = (&q_players, &mask);
+
+    // anchor bars on the INTERPOLATED render root, not the 20 Hz sim row —
+    // a bar stepping at tick rate over a smoothly-gliding body reads as
+    // flicker/jitter
+    let anchor = |id: u64, sim_x: f32, sim_z: f32| -> Vec3 {
+        map.0
+            .get(&id)
+            .and_then(|e| q_roots.get(*e).ok())
+            .map(|tf| tf.translation)
+            .unwrap_or_else(|| Vec3::new(sim_x, height_at(&field, sim_x, sim_z), sim_z))
+    };
 
     // desired bars: id → (world pos above head, ratio)
     let mut want: HashMap<u64, (Vec3, f32)> = HashMap::new();
@@ -1137,13 +1158,9 @@ pub fn update_hp_bars(
         if ratio >= 0.999 {
             continue;
         }
-        let x = p.pos.x.to_num::<f32>();
-        let z = p.pos.y.to_num::<f32>();
-        let y = height_at(&field, x, z)
-            + def.height.to_num::<f32>()
-            + def.radius.to_num::<f32>() * 2.4
-            + 0.35;
-        want.insert(g.0, (Vec3::new(x, y, z), ratio.clamp(0.0, 1.0)));
+        let base = anchor(g.0, p.pos.x.to_num::<f32>(), p.pos.y.to_num::<f32>());
+        let lift = def.height.to_num::<f32>() + def.radius.to_num::<f32>() * 2.4 + 0.35;
+        want.insert(g.0, (base + Vec3::Y * lift, ratio.clamp(0.0, 1.0)));
     }
     for (g, p, b) in &q_buildings {
         let def = building_def(b.kind);
@@ -1154,10 +1171,8 @@ pub fn update_hp_bars(
         if ratio >= 0.999 {
             continue;
         }
-        let x = p.pos.x.to_num::<f32>();
-        let z = p.pos.y.to_num::<f32>();
-        let y = height_at(&field, x, z) + def.height.to_num::<f32>() + 0.6;
-        want.insert(g.0, (Vec3::new(x, y, z), ratio.clamp(0.0, 1.0)));
+        let base = anchor(g.0, p.pos.x.to_num::<f32>(), p.pos.y.to_num::<f32>());
+        want.insert(g.0, (base + Vec3::Y * (def.height.to_num::<f32>() + 0.6), ratio.clamp(0.0, 1.0)));
     }
 
     let mut have: HashSet<u64> = HashSet::new();
@@ -1167,7 +1182,9 @@ pub fn update_hp_bars(
                 have.insert(bar.of);
                 tf.rotation = bill;
                 if bar.fill {
-                    tf.translation = pos + bill * Vec3::new(-(BAR_W * (1.0 - ratio)) / 2.0, 0.0, 0.001);
+                    // push the fill clearly in front of the backplate — a
+                    // 1 mm gap z-fights at ortho distances and shimmers
+                    tf.translation = pos + bill * Vec3::new(-(BAR_W * (1.0 - ratio)) / 2.0, 0.0, 0.025);
                     tf.scale = Vec3::new(ratio.max(0.001), 1.0, 1.0);
                     let want_mat = if ratio > 0.5 {
                         rmats.bar_green.clone()
@@ -1190,11 +1207,12 @@ pub fn update_hp_bars(
         if have.contains(&id) {
             continue;
         }
+        // backplate slightly oversized: reads as a crisp border
         commands.spawn((
             HpBar { of: id, fill: false },
             Mesh3d(assets.bar_quad.clone()),
             MeshMaterial3d(rmats.bar_bg.clone()),
-            Transform::from_translation(pos),
+            Transform::from_translation(pos).with_scale(Vec3::new(1.08, 1.45, 1.0)),
         ));
         commands.spawn((
             HpBar { of: id, fill: true },
@@ -1216,6 +1234,10 @@ pub fn update_building_highlight(
     q_buildings: Query<(&GameId, &Pos, &Building)>,
     mut q_ring: Query<(Entity, &mut Transform), (With<BuildingSelRing>, Without<RallyFlag>)>,
     mut q_flag: Query<(Entity, &mut Transform), (With<RallyFlag>, Without<BuildingSelRing>)>,
+    mut q_aura: Query<
+        (Entity, &mut Transform),
+        (With<AuraRing>, Without<BuildingSelRing>, Without<RallyFlag>),
+    >,
 ) {
     let sel = selection
         .building
@@ -1227,12 +1249,7 @@ pub fn update_building_highlight(
             let x = p.pos.x.to_num::<f32>();
             let z = p.pos.y.to_num::<f32>();
             let pos = Vec3::new(x, height_at(&field, x, z) + 0.06, z);
-            // the fishing hut's ring shows its work aura, not its footprint
-            let scale = if b.kind == BuildingKind::FishingHut {
-                Vec3::splat(saladin_sim::FISHING_HUT_RANGE.to_num::<f32>() * 2.0)
-            } else {
-                Vec3::splat(def.footprint as f32 * 1.5)
-            };
+            let scale = Vec3::splat(def.footprint as f32 * 1.5);
             match q_ring.single_mut() {
                 Ok((_, mut tf)) => {
                     tf.translation = pos;
@@ -1246,6 +1263,22 @@ pub fn update_building_highlight(
                         Transform::from_translation(pos).with_scale(scale),
                     ));
                 }
+            }
+            // work-radius circle for buildings with an aura (fishing hut)
+            if b.kind == BuildingKind::FishingHut {
+                match q_aura.single_mut() {
+                    Ok((_, mut tf)) => tf.translation = pos + Vec3::Y * 0.02,
+                    Err(_) => {
+                        commands.spawn((
+                            AuraRing,
+                            Mesh3d(assets.aura_ring.clone()),
+                            MeshMaterial3d(rmats.aura.clone()),
+                            Transform::from_translation(pos + Vec3::Y * 0.02),
+                        ));
+                    }
+                }
+            } else if let Ok((e, _)) = q_aura.single_mut() {
+                commands.entity(e).despawn();
             }
             // rally flag when moved off the building
             let rx = b.rally.x.to_num::<f32>();
@@ -1281,6 +1314,9 @@ pub fn update_building_highlight(
                 commands.entity(e).despawn();
             }
             if let Ok((e, _)) = q_flag.single_mut() {
+                commands.entity(e).despawn();
+            }
+            if let Ok((e, _)) = q_aura.single_mut() {
                 commands.entity(e).despawn();
             }
         }
@@ -1320,6 +1356,16 @@ pub fn build_assets(meshes: &mut Assets<Mesh>) -> RenderAssets {
         carry_sack: meshes.add(crate::render::models::units::carry_sack_mesh()),
         puff: meshes.add(Sphere::new(1.0).mesh().uv(6, 5)),
         flame: meshes.add(Cone { radius: 0.5, height: 1.0 }.mesh().resolution(5).build()),
+        aura_ring: meshes.add(
+            Torus {
+                minor_radius: 0.06,
+                major_radius: saladin_sim::FISHING_HUT_RANGE.to_num::<f32>(),
+            }
+            .mesh()
+            .minor_resolution(4)
+            .major_resolution(48)
+            .build(),
+        ),
         ripple: meshes.add(
             Torus { minor_radius: 0.03, major_radius: 1.0 }
                 .mesh()
