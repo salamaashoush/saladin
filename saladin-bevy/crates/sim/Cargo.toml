@@ -1,0 +1,10 @@
+[package]
+name = "saladin-sim"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+fixed.workspace = true
+serde.workspace = true
