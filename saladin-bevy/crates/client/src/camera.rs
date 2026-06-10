@@ -14,12 +14,16 @@ use saladin_sim::{BuildingKind, WORLD_SIZE};
 pub struct GameCamera;
 
 /// The iso rig: a look-at `center` plus a fixed offset, zoomed by `view_size`
-/// (half the vertical world-units visible).
+/// (half the vertical world-units visible). Input mutates the `target_*`
+/// fields; `smooth_camera` eases the live values toward them every frame so
+/// pan/zoom glide instead of stepping.
 #[derive(Resource)]
 pub struct CameraState {
     pub center: Vec3,
+    pub target_center: Vec3,
     pub offset: Vec3,
     pub view_size: f32,
+    pub target_view: f32,
     pub framed: bool,
 }
 
@@ -28,9 +32,59 @@ impl Default for CameraState {
         let c = WORLD_SIZE as f32 / 2.0;
         CameraState {
             center: Vec3::new(c, 0.0, c),
+            target_center: Vec3::new(c, 0.0, c),
             offset: Vec3::new(42.0, 56.0, 42.0),
             view_size: 22.0,
+            target_view: 22.0,
             framed: false,
+        }
+    }
+}
+
+impl CameraState {
+    /// Jump both live and target (teardown reset, initial framing).
+    pub fn snap_center(&mut self, c: Vec3) {
+        self.center = c;
+        self.target_center = c;
+    }
+}
+
+fn clamp_center(v: Vec3) -> Vec3 {
+    let m = WORLD_SIZE as f32;
+    Vec3::new(v.x.clamp(-10.0, m + 10.0), v.y, v.z.clamp(-10.0, m + 10.0))
+}
+
+/// Middle-mouse grab-pan: the ground point seized at press stays under the
+/// cursor while dragging.
+#[derive(Resource, Default)]
+pub struct DragPan(pub Option<Vec3>);
+
+/// Ease the live camera toward its targets and write transform + frustum.
+pub fn smooth_camera(
+    time: Res<Time>,
+    mut state: ResMut<CameraState>,
+    mut q: Query<(&mut Transform, &mut Projection), With<GameCamera>>,
+) {
+    let dt = time.delta_secs();
+    let k_pan = 1.0 - (-12.0 * dt).exp();
+    let k_zoom = 1.0 - (-10.0 * dt).exp();
+    let dc = state.target_center - state.center;
+    let dv = state.target_view - state.view_size;
+    if dc.length_squared() < 1e-6 && dv.abs() < 1e-4 {
+        return;
+    }
+    state.center += dc * k_pan;
+    state.view_size += dv * k_zoom;
+    if dc.length_squared() < 4e-4 {
+        state.center = state.target_center;
+    }
+    if dv.abs() < 1e-2 {
+        state.view_size = state.target_view;
+    }
+    if let Ok((mut tf, mut proj)) = q.single_mut() {
+        aim(&state, &mut tf);
+        if let Projection::Orthographic(o) = &mut *proj {
+            o.scaling_mode = ScalingMode::FixedVertical { viewport_height: state.view_size * 2.0 };
         }
     }
 }
@@ -66,7 +120,6 @@ pub fn pan_camera(
     time: Res<Time>,
     user: Res<crate::config::UserConfig>,
     mut state: ResMut<CameraState>,
-    mut q: Query<&mut Transform, With<GameCamera>>,
 ) {
     let mut dx = 0.0_f32;
     let mut dz = 0.0_f32;
@@ -103,19 +156,19 @@ pub fn pan_camera(
     if dx == 0.0 && dz == 0.0 {
         return;
     }
-    let sp = state.view_size * 1.6 * time.delta_secs();
-    state.center.x = (state.center.x + (dx + dz) * sp).clamp(-10.0, WORLD_SIZE as f32 + 10.0);
-    state.center.z = (state.center.z + (dz - dx) * sp).clamp(-10.0, WORLD_SIZE as f32 + 10.0);
-    if let Ok(mut tf) = q.single_mut() {
-        aim(&state, &mut tf);
-    }
+    let sp = state.view_size * 1.8 * time.delta_secs();
+    let t = state.target_center + Vec3::new((dx + dz) * sp, 0.0, (dz - dx) * sp);
+    state.target_center = clamp_center(t);
 }
 
-/// Wheel zoom: resize the ortho frustum (clamped 10..85 world half-height).
+/// Wheel zoom toward the CURSOR: the ground point under the mouse stays put
+/// while the frustum resizes (clamped 10..85 world half-height).
 pub fn zoom_camera(
     mut wheel: MessageReader<MouseWheel>,
+    windows: Query<&Window>,
+    cam: Query<(&Camera, &GlobalTransform), With<GameCamera>>,
+    field: Option<Res<HeightField>>,
     mut state: ResMut<CameraState>,
-    mut q: Query<&mut Projection, With<GameCamera>>,
 ) {
     let mut delta = 0.0_f32;
     for e in wheel.read() {
@@ -128,10 +181,57 @@ pub fn zoom_camera(
     if delta == 0.0 {
         return;
     }
-    state.view_size = (state.view_size + delta).clamp(10.0, 85.0);
-    if let Ok(mut proj) = q.single_mut() {
-        if let Projection::Orthographic(o) = &mut *proj {
-            o.scaling_mode = ScalingMode::FixedVertical { viewport_height: state.view_size * 2.0 };
+    let old = state.target_view;
+    let new = (old + delta).clamp(10.0, 85.0);
+    if new == old {
+        return;
+    }
+    state.target_view = new;
+    // keep the point under the cursor fixed: scale its offset from center
+    if let (Ok(window), Ok((camera, cam_tf))) = (windows.single(), cam.single())
+        && let Some(cursor) = window.cursor_position()
+        && let Some(p) = pick_ground(camera, cam_tf, cursor, field.as_deref())
+    {
+        let k = new / old;
+        let c = state.target_center;
+        let t = Vec3::new(p.x + (c.x - p.x) * k, c.y, p.z + (c.z - p.z) * k);
+        state.target_center = clamp_center(t);
+    }
+}
+
+/// Middle-mouse grab-pan: drag the world; the seized point follows the cursor.
+pub fn drag_pan(
+    mouse: Res<ButtonInput<MouseButton>>,
+    windows: Query<&Window>,
+    cam: Query<(&Camera, &GlobalTransform), With<GameCamera>>,
+    mut grab: ResMut<DragPan>,
+    mut state: ResMut<CameraState>,
+) {
+    if !mouse.pressed(MouseButton::Middle) {
+        grab.0 = None;
+        return;
+    }
+    let (Ok(window), Ok((camera, cam_tf))) = (windows.single(), cam.single()) else { return };
+    let Some(cursor) = window.cursor_position() else { return };
+    // flat-plane ray hit at the grab height keeps the drag stable over hills
+    let plane_y = grab.0.map(|g| g.y).unwrap_or(0.0);
+    let Ok(ray) = camera.viewport_to_world(cam_tf, cursor) else { return };
+    let d = ray.direction.as_vec3();
+    if d.y.abs() < 1e-6 {
+        return;
+    }
+    let t = (plane_y - ray.origin.y) / d.y;
+    if t < 0.0 {
+        return;
+    }
+    let hit = ray.origin + d * t;
+    match grab.0 {
+        None => grab.0 = Some(hit),
+        Some(anchor) => {
+            let delta = anchor - hit;
+            let t = state.target_center + Vec3::new(delta.x, 0.0, delta.z);
+            state.target_center = clamp_center(t);
+            // the camera moves this frame, so re-anchor against the new view
         }
     }
 }
@@ -158,7 +258,7 @@ pub fn frame_keep(
     let fx = x + (c - x).signum() * 5.0;
     let fz = z + (c - z).signum() * 5.0;
     let fy = field.map(|f| height_at(&f, fx, fz)).unwrap_or(0.0);
-    state.center = Vec3::new(fx, fy, fz);
+    state.snap_center(Vec3::new(fx, fy, fz));
     state.framed = true;
     if let Ok(mut tf) = cam.single_mut() {
         aim(&state, &mut tf);
@@ -166,11 +266,9 @@ pub fn frame_keep(
 }
 
 /// Move the camera focus (minimap click navigation).
-pub fn focus_on(state: &mut CameraState, tf: &mut Transform, x: f32, z: f32, field: Option<&HeightField>) {
-    state.center.x = x.clamp(-10.0, WORLD_SIZE as f32 + 10.0);
-    state.center.z = z.clamp(-10.0, WORLD_SIZE as f32 + 10.0);
-    state.center.y = field.map(|f| height_at(f, x, z)).unwrap_or(0.0);
-    aim(state, tf);
+pub fn focus_on(state: &mut CameraState, _tf: &mut Transform, x: f32, z: f32, field: Option<&HeightField>) {
+    let y = field.map(|f| height_at(f, x, z)).unwrap_or(0.0);
+    state.target_center = clamp_center(Vec3::new(x, y, z));
 }
 
 /// Ray-march the cursor ray against the height field for an accurate ground

@@ -196,6 +196,7 @@ fn main() {
     .init_resource::<input::DemolishDrag>()
     .init_resource::<input::LastClick>()
     .init_resource::<input::GhostRot>()
+    .init_resource::<camera::DragPan>()
     .init_resource::<render::sync::RenderMap>()
     .init_resource::<render::sync::OccupiedTiles>()
     .init_resource::<ui::actions::BuildTab>()
@@ -269,6 +270,8 @@ fn main() {
         (
             camera::pan_camera,
             camera::zoom_camera,
+            camera::drag_pan,
+            camera::smooth_camera,
             camera::frame_keep,
             minimap::update_minimap_viewport,
             minimap::minimap_click,
@@ -400,7 +403,11 @@ fn main() {
     {
         let v = v.clamp(10.0, 85.0);
         let world = app.world_mut();
-        world.resource_mut::<camera::CameraState>().view_size = v;
+        {
+            let mut st = world.resource_mut::<camera::CameraState>();
+            st.view_size = v;
+            st.target_view = v;
+        }
         let mut q = world.query_filtered::<&mut Projection, bevy::prelude::With<camera::GameCamera>>();
         for mut proj in q.iter_mut(world) {
             if let Projection::Orthographic(o) = &mut *proj {
@@ -834,7 +841,7 @@ fn teardown_match(world: &mut World) {
     *world.resource_mut::<LocalInput>() = default();
     world.resource_mut::<camera::CameraState>().framed = false;
     let c = WORLD_SIZE as f32 / 2.0;
-    world.resource_mut::<camera::CameraState>().center = Vec3::new(c, 0.0, c);
+    world.resource_mut::<camera::CameraState>().snap_center(Vec3::new(c, 0.0, c));
 
     // a fresh in-memory relay for the next single-player match
     if !world.resource::<Multiplayer>().0 {
