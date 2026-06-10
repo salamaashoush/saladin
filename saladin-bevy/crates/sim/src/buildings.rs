@@ -1,7 +1,8 @@
 use crate::buildings_defs::building_def;
-use crate::constants::WORLD_SIZE;
+use crate::constants::{TOWN_RADIUS, WORLD_SIZE};
 use crate::enums::BuildingKind;
-use crate::math::{Fx, V2};
+use crate::math::{Fx, V2, dist2};
+use crate::terrain::{is_buildable_tile, is_passable, is_water_tile};
 use std::collections::HashSet;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -104,7 +105,8 @@ pub fn is_water_adjacent<P: Fn(i32, i32) -> bool>(footprint: i32, x: Fx, y: Fx, 
     false
 }
 
-/// Placeable if every footprint tile is passable and unoccupied.
+/// Placeable if every footprint tile is passable and unoccupied (terrain-only
+/// core; the full game rule set is `check_place`).
 pub fn can_place<P, O>(kind: BuildingKind, x: Fx, y: Fx, passable: P, occupied: O) -> bool
 where
     P: Fn(i32, i32) -> bool,
@@ -117,6 +119,71 @@ where
         }
     }
     true
+}
+
+/// Why a placement was refused — the ghost tints red for any of these and the
+/// build command rejects identically (one rule set, no UI lies).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PlaceError {
+    /// A footprint tile is water/mountain/cliff/ford or out of bounds.
+    Terrain,
+    /// A footprint tile is covered by a building or a resource node.
+    Occupied,
+    /// `requires_water` building with no open water (sea/river) on its border.
+    NeedsWaterside,
+    /// Farther than TOWN_RADIUS from every building you own — towns grow
+    /// outward, you cannot plant structures across the map.
+    OutsideTown,
+    /// Fully sealed footprint: no walkable tile borders it (peasants could
+    /// never reach it to deposit or repair).
+    NoApproach,
+}
+
+/// The COMPLETE placement rule set, shared by the build command, the wall
+/// drag, the AI planner and the client's ghost preview.
+pub fn check_place<O: Fn(i32, i32) -> bool>(
+    seed: u32,
+    kind: BuildingKind,
+    x: Fx,
+    y: Fx,
+    occupied: O,
+    own_buildings: &[V2],
+) -> Result<(), PlaceError> {
+    let def = building_def(kind);
+    let tiles = footprint_tiles(def.footprint, x, y);
+    for t in &tiles {
+        if !is_buildable_tile(seed, t.tx, t.ty) {
+            return Err(PlaceError::Terrain);
+        }
+        if occupied(t.tx, t.ty) {
+            return Err(PlaceError::Occupied);
+        }
+    }
+    if def.requires_water {
+        let waterside = {
+            let inside: HashSet<i32> = tiles.iter().map(|t| tile_key(t.tx, t.ty)).collect();
+            tiles.iter().any(|t| {
+                DIRS4.iter().any(|(dx, dy)| {
+                    let (nx, ny) = (t.tx + dx, t.ty + dy);
+                    !inside.contains(&tile_key(nx, ny)) && is_water_tile(seed, nx, ny)
+                })
+            })
+        };
+        if !waterside {
+            return Err(PlaceError::NeedsWaterside);
+        }
+    }
+    if !own_buildings.is_empty() {
+        let c = footprint_center(def.footprint, x, y);
+        let r2 = TOWN_RADIUS * TOWN_RADIUS;
+        if !own_buildings.iter().any(|b| dist2(c, *b) <= r2) {
+            return Err(PlaceError::OutsideTown);
+        }
+    }
+    if !def.passable && !has_passable_approach(def.footprint, x, y, |tx, ty| is_passable(seed, tx, ty)) {
+        return Err(PlaceError::NoApproach);
+    }
+    Ok(())
 }
 
 /// Nearest spot where the WHOLE footprint sits on passable land AND has a

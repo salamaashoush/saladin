@@ -19,6 +19,9 @@ pub const RESEARCH_TICK_MS: i64 = 1000;
 pub const RESEARCH_DT: Fx = crate::fx!("1");
 
 pub const ARRIVE_EPS: Fx = crate::fx!("0.05");
+/// Buildings must rise within this range of an existing own building — towns
+/// grow outward instead of teleporting structures across the map.
+pub const TOWN_RADIUS: Fx = crate::fx!("28");
 pub const HARVEST_RANGE: Fx = crate::fx!("0.7");
 pub const DEPOSIT_RANGE: Fx = crate::fx!("1.1");
 pub const HARVEST_TIME: Fx = crate::fx!("1.2");

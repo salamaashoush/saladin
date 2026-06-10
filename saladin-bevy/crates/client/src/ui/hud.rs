@@ -303,6 +303,7 @@ fn build_command_card(
         } else if let Some(_id) = sel_building.id {
             let def = building_def(sel_building.kind);
             label(c, font, def.label, FONT_MD, ACCENT);
+            label(c, font, def.blurb, 11.0, TEXT_DIM);
             if def.garrison_cap > 0 {
                 label(
                     c,

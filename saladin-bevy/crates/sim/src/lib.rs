@@ -52,11 +52,12 @@ pub use terrain::{
     FAIR_MIN_FOOD, FAIR_MIN_STONE, FAIR_MIN_WOOD, FAIR_RADIUS, ScatterRule, ScatteredNode,
     TerrainSample, compose_seed, fair_start_nodes, find_land_near, is_coastal, is_land,
     is_passable, node_reachable, passable_grid, region_at, region_grid, render_height,
-    dominant_region, find_keep_site, sample_terrain, scatter_nodes, seed_base, seed_bias, seed_preset, start_point,
+    dominant_region, buildable_grid, find_keep_site, is_buildable_tile, is_water_tile, sample_terrain, scatter_nodes,
+    seed_base, seed_bias, seed_preset, start_point,
 };
 pub use buildings::{
-    Occupant, Tile, can_place, find_buildable_near, footprint_center, footprint_tiles,
-    has_passable_approach, is_water_adjacent, occupancy_set, tile_key,
+    Occupant, PlaceError, Tile, can_place, check_place, find_buildable_near, footprint_center,
+    footprint_tiles, has_passable_approach, is_water_adjacent, occupancy_set, tile_key,
 };
 pub use buildings_defs::{BUILD_CATEGORIES, BuildCategory, BuildingDef, building_def};
 pub use combat::{Attacker, CombatAct, DEFENSIVE_LEASH, acquire_target, combat_action, effective_damage};

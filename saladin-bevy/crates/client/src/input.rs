@@ -9,8 +9,8 @@ use crate::{LocalInput, LocalPlayer};
 use bevy::prelude::*;
 use saladin_protocol::{Building, GameId, Owner, PlayerCommand, Pos, ResourceNode, Unit};
 use saladin_sim::{
-    BuildingKind, Fx, V2, building_def, can_garrison, can_host_garrison, can_place,
-    footprint_center, garrison_free_slots, is_passable, occupancy_set, tile_key, unit_def,
+    BuildingKind, Fx, V2, building_def, can_garrison, can_host_garrison,
+    footprint_center, garrison_free_slots, occupancy_set, tile_key, unit_def,
 };
 use std::collections::HashSet;
 
@@ -174,10 +174,10 @@ pub fn place_valid(
     cy: f32,
     seed: u32,
     occ: &HashSet<i32>,
+    own: &[saladin_sim::V2],
 ) -> bool {
-    let passable = |tx: i32, ty: i32| is_passable(seed, tx, ty);
     let occupied = |tx: i32, ty: i32| occ.contains(&tile_key(tx, ty));
-    can_place(kind, Fx::from_num(cx), Fx::from_num(cy), passable, occupied)
+    saladin_sim::check_place(seed, kind, Fx::from_num(cx), Fx::from_num(cy), occupied, own).is_ok()
 }
 
 /// Placement cells under the cursor: one footprint, or the dragged wall line.
@@ -470,20 +470,21 @@ fn commit_build(
     input: &mut LocalInput,
 ) {
     let occ = occupied_tiles(q_buildings);
+    let own: Vec<V2> =
+        q_buildings.iter().filter(|(_, o, _, _)| o.0 == me).map(|(_, _, p, _)| p.pos).collect();
     let cells = build_cells(kind, hx, hz, wall_start);
     if kind == BuildingKind::Wall {
-        let tiles: Vec<(i32, i32)> = cells
-            .iter()
-            .filter(|&&(cx, cy)| place_valid(kind, cx, cy, seed, &occ))
-            .map(|&(cx, cy)| (cx.floor() as i32, cy.floor() as i32))
-            .collect();
+        // send the whole dragged line — the sim re-validates per segment with
+        // the chain-extended anchor set the client cannot predict
+        let tiles: Vec<(i32, i32)> =
+            cells.iter().map(|&(cx, cy)| (cx.floor() as i32, cy.floor() as i32)).collect();
         if !tiles.is_empty() {
             input.0.push(PlayerCommand::PlaceWall { player_id: me, tiles });
         }
         return;
     }
     for (cx, cy) in cells {
-        if place_valid(kind, cx, cy, seed, &occ) {
+        if place_valid(kind, cx, cy, seed, &occ, &own) {
             input.0.push(PlayerCommand::Build {
                 player_id: me,
                 kind,

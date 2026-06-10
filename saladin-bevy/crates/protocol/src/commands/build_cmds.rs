@@ -82,7 +82,22 @@ pub(crate) fn train(world: &mut World, owner: u64, kind: UnitKind) -> bool {
     true
 }
 
-/// Place `kind` at `pos` (buildable + prereq + afford + footprint clear).
+/// Tile keys occupied by resource nodes (no building on a tree/quarry/etc.).
+pub(crate) fn node_occupancy(world: &mut World) -> std::collections::HashSet<i32> {
+    let mut q = world.query::<(&Pos, &ResourceNode)>();
+    q.iter(world)
+        .map(|(p, _)| tile_key(p.pos.x.to_num::<i32>(), p.pos.y.to_num::<i32>()))
+        .collect()
+}
+
+/// Positions of the owner's standing buildings (town-radius anchor set).
+pub(crate) fn own_building_positions(world: &mut World, owner: u64) -> Vec<V2> {
+    let mut q = world.query::<(&Owner, &Pos, &Building)>();
+    q.iter(world).filter(|(o, _, _)| o.0 == owner).map(|(_, p, _)| p.pos).collect()
+}
+
+/// Place `kind` at `pos` — the full `check_place` rule set (buildable biome,
+/// node/building occupancy, waterside, town radius, approach) + prereq + cost.
 pub(crate) fn build(world: &mut World, owner: u64, kind: BuildingKind, pos: V2) -> bool {
     let def = building_def(kind);
     if !def.buildable {
@@ -93,10 +108,11 @@ pub(crate) fn build(world: &mut World, owner: u64, kind: BuildingKind, pos: V2) 
         return false;
     }
     let seed = world.resource::<WorldConfig>().seed;
-    let occ = building_occupancy(world, true);
-    let passable = |tx: i32, ty: i32| is_passable(seed, tx, ty);
+    let mut occ = building_occupancy(world, true);
+    occ.extend(node_occupancy(world));
+    let own = own_building_positions(world, owner);
     let occupied = |tx: i32, ty: i32| occ.contains(&tile_key(tx, ty));
-    if !can_place(kind, pos.x, pos.y, passable, occupied) {
+    if check_place(seed, kind, pos.x, pos.y, occupied, &own).is_err() {
         return false;
     }
     let (paid, match_id) = {
@@ -124,6 +140,8 @@ pub(crate) fn place_wall(world: &mut World, owner: u64, tiles: &[(i32, i32)]) {
     let def = building_def(BuildingKind::Wall);
     let seed = world.resource::<WorldConfig>().seed;
     let mut occ = building_occupancy(world, true);
+    occ.extend(node_occupancy(world));
+    let mut own = own_building_positions(world, owner);
     let (mut bal, match_id) = {
         let mut q = world.query::<(&Player, &MatchId)>();
         let Some((p, m)) = q.iter(world).find(|(p, _)| p.player_id == owner) else { return };
@@ -136,13 +154,14 @@ pub(crate) fn place_wall(world: &mut World, owner: u64, tiles: &[(i32, i32)]) {
         }
         let x = Fx::from_num(tx);
         let y = Fx::from_num(ty);
-        let passable = |px: i32, py: i32| is_passable(seed, px, py);
         let occupied = |px: i32, py: i32| occ.contains(&tile_key(px, py));
-        if !can_place(BuildingKind::Wall, x, y, passable, occupied) {
+        if check_place(seed, BuildingKind::Wall, x, y, occupied, &own).is_err() {
             continue;
         }
         let c = footprint_center(def.footprint, x, y);
         spawn::spawn_building(world, owner, BuildingKind::Wall, c, match_id);
+        // each placed segment extends the town anchor — drags can snake outward
+        own.push(c);
         for k in occupancy_set(&[Occupant { kind: BuildingKind::Wall, pos: V2::new(x, y) }], true) {
             occ.insert(k);
         }

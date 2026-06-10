@@ -293,6 +293,67 @@ pub fn passable_grid(seed: u32) -> &'static [bool] {
     grid
 }
 
+/// Per-seed BUILDABLE bitmap (biome_buildable: excludes water, mountains,
+/// cliffs AND fords — fords stay walkable chokepoints, never tower platforms),
+/// cached+leaked like `passable_grid`.
+pub fn buildable_grid(seed: u32) -> &'static [bool] {
+    use std::cell::Cell;
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+
+    const EMPTY: &[bool] = &[];
+    thread_local! {
+        static LAST: Cell<(u32, &'static [bool])> = const { Cell::new((u32::MAX, EMPTY)) };
+    }
+    let (last_seed, last_grid) = LAST.with(|c| c.get());
+    if last_seed == seed && !last_grid.is_empty() {
+        return last_grid;
+    }
+
+    static GRIDS: OnceLock<Mutex<HashMap<u32, &'static [bool]>>> = OnceLock::new();
+    let grids = GRIDS.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut g = grids.lock().unwrap();
+    let grid: &'static [bool] = match g.get(&seed) {
+        Some(&grid) => grid,
+        None => {
+            let half = crate::fx!("0.5");
+            let mut v = vec![false; (WORLD_SIZE * WORLD_SIZE) as usize];
+            for ty in 0..WORLD_SIZE {
+                for tx in 0..WORLD_SIZE {
+                    let b = sample_terrain(seed, Fx::from_num(tx) + half, Fx::from_num(ty) + half).biome;
+                    v[(ty * WORLD_SIZE + tx) as usize] = crate::biomes::biome_buildable(b);
+                }
+            }
+            let leaked: &'static [bool] = Box::leak(v.into_boxed_slice());
+            g.insert(seed, leaked);
+            leaked
+        }
+    };
+    LAST.with(|c| c.set((seed, grid)));
+    grid
+}
+
+/// Tile-space buildability (in-bounds + buildable biome).
+pub fn is_buildable_tile(seed: u32, tx: i32, ty: i32) -> bool {
+    if tx < 0 || ty < 0 || tx >= WORLD_SIZE || ty >= WORLD_SIZE {
+        return false;
+    }
+    buildable_grid(seed)[(ty * WORLD_SIZE + tx) as usize]
+}
+
+/// True open water (sea or river) — the Fishing Hut's shoreline test. NOT the
+/// same as "impassable" (cliffs/mountains are impassable but dry).
+pub fn is_water_tile(seed: u32, tx: i32, ty: i32) -> bool {
+    if tx < 0 || ty < 0 || tx >= WORLD_SIZE || ty >= WORLD_SIZE {
+        return false;
+    }
+    let half = crate::fx!("0.5");
+    matches!(
+        sample_terrain(seed, Fx::from_num(tx) + half, Fx::from_num(ty) + half).biome,
+        Biome::DeepWater | Biome::ShallowWater | Biome::River
+    )
+}
+
 /// Connected-region id per tile (flood fill over `passable_grid`), cached per
 /// seed like the grids above. `u16::MAX` = impassable. Lets gameplay ask
 /// "can this unit ever walk there?" in O(1) — the cure for gatherers

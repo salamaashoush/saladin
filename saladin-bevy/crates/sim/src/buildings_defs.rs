@@ -7,6 +7,8 @@ use crate::math::Fx;
 #[derive(Clone, Copy, Debug)]
 pub struct BuildingDef {
     pub label: &'static str,
+    /// One-line role shown on the command card — what this building is FOR.
+    pub blurb: &'static str,
     pub icon: &'static str,
     pub footprint: i32,
     pub height: Fx,
@@ -32,6 +34,7 @@ pub struct BuildingDef {
 /// Defaults mirroring the TS `B()` helper; entries override fields after spread.
 const DEFAULT: BuildingDef = BuildingDef {
     label: "",
+    blurb: "",
     icon: "🏗️",
     footprint: 1,
     height: crate::fx!("1"),
@@ -58,6 +61,7 @@ const BUILDING_DEFS: [BuildingDef; 13] = [
     // 0 Keep
     BuildingDef {
         label: "Keep",
+        blurb: "Town heart: trains peasants, drops off all resources, fires on raiders.",
         icon: "🏰",
         footprint: 3,
         height: crate::fx!("1.8"),
@@ -75,6 +79,7 @@ const BUILDING_DEFS: [BuildingDef; 13] = [
     // 1 Barracks
     BuildingDef {
         label: "Barracks",
+        blurb: "Trains infantry: spearmen, archers, crossbowmen.",
         icon: "🏛️",
         footprint: 2,
         height: crate::fx!("1.4"),
@@ -87,6 +92,7 @@ const BUILDING_DEFS: [BuildingDef; 13] = [
     // 2 Tower
     BuildingDef {
         label: "Tower",
+        blurb: "Defensive tower; garrison archers to stack its volleys.",
         icon: "🗼",
         footprint: 1,
         height: crate::fx!("2.6"),
@@ -102,6 +108,7 @@ const BUILDING_DEFS: [BuildingDef; 13] = [
     // 3 Wall
     BuildingDef {
         label: "Wall",
+        blurb: "Blocks movement. Garrison 2 to fire from the parapet.",
         icon: "🧱",
         footprint: 1,
         height: crate::fx!("1.2"),
@@ -114,6 +121,7 @@ const BUILDING_DEFS: [BuildingDef; 13] = [
     // 4 Gatehouse
     BuildingDef {
         label: "Gatehouse",
+        blurb: "A wall your own units walk through.",
         icon: "🚪",
         footprint: 1,
         height: crate::fx!("1.5"),
@@ -126,6 +134,7 @@ const BUILDING_DEFS: [BuildingDef; 13] = [
     // 5 House
     BuildingDef {
         label: "House",
+        blurb: "Houses 6 population.",
         icon: "🏠",
         footprint: 2,
         height: crate::fx!("1.2"),
@@ -138,6 +147,7 @@ const BUILDING_DEFS: [BuildingDef; 13] = [
     // 6 Stable
     BuildingDef {
         label: "Stable",
+        blurb: "Trains cavalry: knights, horse archers, mamluks.",
         icon: "🐴",
         footprint: 2,
         height: crate::fx!("1.4"),
@@ -151,6 +161,7 @@ const BUILDING_DEFS: [BuildingDef; 13] = [
     // 7 Blacksmith
     BuildingDef {
         label: "Blacksmith",
+        blurb: "Researches weapon, armor and economy upgrades.",
         icon: "⚒️",
         footprint: 2,
         height: crate::fx!("1.5"),
@@ -162,6 +173,7 @@ const BUILDING_DEFS: [BuildingDef; 13] = [
     // 8 Market
     BuildingDef {
         label: "Market",
+        blurb: "Sell surplus wood and stone for gold.",
         icon: "🏪",
         footprint: 2,
         height: crate::fx!("1.3"),
@@ -175,12 +187,12 @@ const BUILDING_DEFS: [BuildingDef; 13] = [
     // 9 Granary
     BuildingDef {
         label: "Granary",
+        blurb: "Food drop-off: shortens hunting hauls.",
         icon: "🌾",
         footprint: 2,
         height: crate::fx!("1.3"),
         cost: ResourceCost::new(50, 10, 0, 0),
         max_hp: 400,
-        pop: 4,
         armor_class: ArmorClass::Leather,
         food_dropoff: true,
         requires: Some(BuildingKind::Keep),
@@ -189,6 +201,7 @@ const BUILDING_DEFS: [BuildingDef; 13] = [
     // 10 FishingHut
     BuildingDef {
         label: "Fishing Hut",
+        blurb: "Shoreline food drop-off: build beside water, near fish.",
         icon: "🎣",
         footprint: 1,
         height: crate::fx!("1.0"),
@@ -203,6 +216,7 @@ const BUILDING_DEFS: [BuildingDef; 13] = [
     // 11 SiegeWorkshop
     BuildingDef {
         label: "Siege Workshop",
+        blurb: "Builds rams and mangonels.",
         icon: "🛠️",
         footprint: 2,
         height: crate::fx!("1.5"),
@@ -216,6 +230,7 @@ const BUILDING_DEFS: [BuildingDef; 13] = [
     // 12 Watchtower
     BuildingDef {
         label: "Watchtower",
+        blurb: "Heavy tower: longest reach, garrison 8.",
         icon: "🛡️",
         footprint: 1,
         height: crate::fx!("3.4"),

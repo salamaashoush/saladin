@@ -8,7 +8,7 @@ use crate::render::sync::{RenderAssets, RenderMaterials, wall_angle_at};
 use crate::terrain::{HeightField, height_at};
 use crate::LocalPlayer;
 use bevy::prelude::*;
-use saladin_protocol::{Building, GameId, Owner, Pos, WorldConfig};
+use saladin_protocol::{Building, GameId, Owner, Pos, ResourceNode, WorldConfig};
 use saladin_sim::{BuildingKind, Occupant, building_def, occupancy_set};
 use std::collections::HashSet;
 
@@ -32,7 +32,9 @@ pub fn update_ghost(
     cfg: Res<WorldConfig>,
     assets: Res<RenderAssets>,
     rmats: Res<RenderMaterials>,
-    q_buildings: Query<(&Pos, &Building)>,
+    q_buildings: Query<(&Pos, &Building, &Owner)>,
+    q_nodes: Query<&Pos, With<ResourceNode>>,
+    local: Res<LocalPlayer>,
     q_cells: Query<Entity, With<GhostCell>>,
 ) {
     for e in &q_cells {
@@ -46,14 +48,22 @@ pub fn update_ghost(
     let Some(g) = pick_ground(camera, cam_tf, cursor, field_ref) else { return };
 
     let occ_list: Vec<Occupant> =
-        q_buildings.iter().map(|(p, b)| Occupant { kind: b.kind, pos: p.pos }).collect();
-    let occ = occupancy_set(&occ_list, true);
+        q_buildings.iter().map(|(p, b, _)| Occupant { kind: b.kind, pos: p.pos }).collect();
+    let mut occ = occupancy_set(&occ_list, true);
+    for p in &q_nodes {
+        occ.insert(saladin_sim::tile_key(p.pos.x.to_num::<i32>(), p.pos.y.to_num::<i32>()));
+    }
+    let own: Vec<saladin_sim::V2> = q_buildings
+        .iter()
+        .filter(|(_, _, o)| o.0 == local.0)
+        .map(|(p, _, _)| p.pos)
+        .collect();
     let occ_render: HashSet<i32> = occ.iter().copied().collect();
 
     let is_wall = kind == BuildingKind::Wall;
     let yaw = if is_wall { ghost_wall_angle(&occ_render, wall_drag.0, g.x, g.z) } else { 0.0 };
     for (cx, cy) in build_cells(kind, g.x, g.z, wall_drag.0) {
-        let valid = place_valid(kind, cx, cy, cfg.seed, &occ);
+        let valid = place_valid(kind, cx, cy, cfg.seed, &occ, &own);
         let y = field_ref.map(|f| height_at(f, cx, cy)).unwrap_or(0.0);
         commands.spawn((
             GhostCell,
