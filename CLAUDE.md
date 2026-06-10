@@ -61,14 +61,18 @@ cargo run --release -p saladin-protocol --example net_bench -- 2 50000 200
                                        # lockstep benchmark: clients units ticks
 cargo run -p saladin-sim --example mapdump -- <base> <preset> [out.ppm]
                                        # worldgen tuning: biome map + dominant-region dump
-SALADIN_AUTO=1 cargo run -p saladin-client --bin saladin-client
-   # skip menu + screenshot to /tmp/saladin_shot.png at ~6s (headless verify:
-   # then `magick /tmp/saladin_shot.png -crop ...` and view the crop).
-   # IMPORTANT: `cargo build` FIRST or the 30s timeout eats the build and you
-   # stare at a STALE screenshot (this burned an hour once).
-   # Other modes: menu | sp | mp | settings | lobby | pause | research |
-   # market | layout (computed-rect dump). Overrides: SALADIN_SEED,
-   # SALADIN_PRESET, SALADIN_TAB.
+./shot.sh /tmp/out.png [SALADIN_*=...]   # screenshot harness: builds nothing,
+   # rm's the stale shot, runs SALADIN_AUTO=1 (override with SALADIN_AUTO=x in
+   # args), FAILS LOUDLY if no screenshot was written. ALWAYS use this over a
+   # raw `SALADIN_AUTO=1 cargo run` — a crashed run otherwise leaves the
+   # previous /tmp/saladin_shot.png in place and you stare at a STALE shot
+   # (burned an hour TWICE now). `cargo build` FIRST so the 30s timeout
+   # doesn't eat the build. Inspect via `magick out.png -crop ... && view`.
+   # Modes: menu | sp | mp | settings | lobby | pause | research | market |
+   # layout (computed-rect dump) | units (conjures every unit kind + one node
+   # of each type + a water fish node beside the keep — model verification).
+   # Overrides: SALADIN_SEED, SALADIN_PRESET, SALADIN_TAB, SALADIN_ZOOM
+   # (view_size, min 4 = close-up model inspection), SALADIN_YAW.
 ```
 
 Multiplayer (all menu-driven; protocol v2 handshake rejects mismatched builds):

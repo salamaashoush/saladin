@@ -8,7 +8,7 @@ use crate::selection::Selection;
 use crate::terrain::{HeightField, height_at};
 use bevy::prelude::*;
 use std::collections::HashMap;
-use saladin_protocol::{Building, GameId, Owner, Player, Pos, ResourceNode, Unit};
+use saladin_protocol::{Building, GameId, Owner, Player, Pos, ResourceNode, Unit, WorldConfig};
 use saladin_sim::{
     BuildingKind, PLAYER_COLORS, ResourceType, UnitKind, WORLD_SIZE, building_def,
     footprint_tiles, unit_def,
@@ -22,10 +22,15 @@ pub const BAR_H: f32 = 0.12;
 
 #[derive(Resource)]
 pub struct RenderAssets {
+    /// Base unit meshes (team parts white); per-team copies bake lazily into
+    /// `team_units`/`team_impostors` so detail colors render true.
     pub units: Vec<Handle<Mesh>>,
     pub impostors: Vec<Handle<Mesh>>,
+    pub team_units: HashMap<(usize, u32), Handle<Mesh>>,
+    pub team_impostors: HashMap<(usize, u32), Handle<Mesh>>,
     pub buildings: Vec<Handle<Mesh>>,
-    pub nodes: HashMap<ResourceType, Handle<Mesh>>,
+    pub nodes: HashMap<ResourceType, Vec<Handle<Mesh>>>,
+    pub fish_node: Handle<Mesh>,
     pub ring: Handle<Mesh>,
     pub bar_quad: Handle<Mesh>,
     pub rout_quad: Handle<Mesh>,
@@ -129,17 +134,19 @@ pub fn build_materials(
 }
 
 impl RenderMaterials {
+    /// White-based unit material — team color is baked into the mesh's vertex
+    /// colors (`bake_team`), so the material only carries the selection glow.
     pub fn unit_mat(
         &mut self,
         mats: &mut Assets<StandardMaterial>,
-        hex: u32,
+        _hex: u32,
         selected: bool,
     ) -> Handle<StandardMaterial> {
         self.team_unit
-            .entry((hex, selected))
+            .entry((0, selected))
             .or_insert_with(|| {
                 mats.add(StandardMaterial {
-                    base_color: color_of(hex),
+                    base_color: Color::WHITE,
                     emissive: if selected { LinearRgba::rgb(0.45, 0.45, 0.12) } else { LinearRgba::BLACK },
                     perceptual_roughness: 0.85,
                     ..default()
@@ -249,12 +256,65 @@ fn node_scale(remaining: i32) -> f32 {
     0.5 + 0.5 * (remaining as f32 / 120.0).min(1.0)
 }
 
+impl RenderAssets {
+    /// Lazily bake the (kind, team color) mesh — white team parts recolored,
+    /// every other vertex color kept true. One mesh per pair, so Bevy still
+    /// instances each kind x team batch.
+    pub fn team_mesh(
+        &mut self,
+        meshes: &mut Assets<Mesh>,
+        kind: UnitKind,
+        color: u32,
+        impostor: bool,
+    ) -> Handle<Mesh> {
+        use crate::render::models::bake_team;
+        let (cache, base) = if impostor {
+            (&mut self.team_impostors, &self.impostors[kind as usize])
+        } else {
+            (&mut self.team_units, &self.units[kind as usize])
+        };
+        cache
+            .entry((kind as usize, color))
+            .or_insert_with(|| {
+                let baked = meshes.get(base).map(|m| bake_team(m, color));
+                match baked {
+                    Some(m) => meshes.add(m),
+                    None => base.clone(),
+                }
+            })
+            .clone()
+    }
+}
+
+/// Biome-aware node variant pick: palms at oases, conifers in forest, olives
+/// on the dry steppe; boars root in the woods, deer graze the open grass.
+fn node_variant(res: ResourceType, seed: u32, x: f32, z: f32, roll: usize, len: usize) -> usize {
+    use crate::render::models::props::*;
+    use saladin_sim::{Biome, Fx, sample_terrain};
+    let biome = sample_terrain(seed, Fx::from_num(x), Fx::from_num(z)).biome;
+    let idx = match res {
+        ResourceType::Wood => match biome {
+            Biome::Oasis => TREE_PALM,
+            Biome::Forest => [TREE_CONIFER, TREE_BROADLEAF_TALL, TREE_CONIFER, TREE_BROADLEAF][roll % 4],
+            Biome::Steppe | Biome::Desert | Biome::Dunes | Biome::Sand | Biome::Hills => TREE_OLIVE,
+            _ => [TREE_BROADLEAF, TREE_BROADLEAF_TALL, TREE_BROADLEAF, TREE_CONIFER][roll % 4],
+        },
+        ResourceType::Food => match biome {
+            Biome::Forest => [FOOD_BOAR, FOOD_BERRY, FOOD_BOAR, FOOD_DEER][roll % 4],
+            Biome::Oasis => [FOOD_BERRY, FOOD_DEER_GRAZING][roll % 2],
+            _ => [FOOD_DEER, FOOD_DEER_GRAZING, FOOD_BOAR, FOOD_BERRY][roll % 4],
+        },
+        _ => roll % len,
+    };
+    idx.min(len - 1)
+}
+
 /// Reconcile every sim row into a render tree. Shared handles per (mesh,
 /// material) mean Bevy batches each kind×team into one instanced draw.
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
 pub fn sync_render(
     mut commands: Commands,
-    assets: Res<RenderAssets>,
+    (mut assets, mut meshes): (ResMut<RenderAssets>, ResMut<Assets<Mesh>>),
     mut rmats: ResMut<RenderMaterials>,
     mut mats: ResMut<Assets<StandardMaterial>>,
     mut map: ResMut<RenderMap>,
@@ -262,6 +322,7 @@ pub fn sync_render(
     field: Res<HeightField>,
     selection: Res<Selection>,
     cam_state: Res<CameraState>,
+    world_cfg: Res<WorldConfig>,
     q_sim: Query<(&GameId, &Pos, Option<&Unit>, Option<&Building>, Option<&ResourceNode>, Option<&Owner>)>,
     q_players: Query<&Player>,
     mut q_roots: Query<(&mut Lerp, &mut Visibility, &mut Transform), With<RenderRoot>>,
@@ -298,7 +359,17 @@ pub fn sync_render(
             };
             let world = Vec3::new(x, ground, z);
             let root = *map.0.entry(gid.0).or_insert_with(|| {
-                spawn_unit_tree(&mut commands, &assets, &mut rmats, &mut mats, gid.0, u.kind, color, world)
+                spawn_unit_tree(
+                    &mut commands,
+                    &mut assets,
+                    &mut meshes,
+                    &mut rmats,
+                    &mut mats,
+                    gid.0,
+                    u.kind,
+                    color,
+                    world,
+                )
             });
             if let Ok((mut lerp, mut vis, _)) = q_roots.get_mut(root) {
                 lerp.target = world;
@@ -343,13 +414,25 @@ pub fn sync_render(
             seen.insert(gid.0);
             let world = Vec3::new(x, ground, z);
             let root = *map.0.entry(gid.0).or_insert_with(|| {
+                // Coastal food sits on water tiles — draw a fish school there,
+                // never a deer standing on the sea.
+                let mesh = if n.res_type == ResourceType::Food && ground < -0.005 {
+                    assets.fish_node.clone()
+                } else {
+                    let variants = &assets.nodes[&n.res_type];
+                    let roll = (gid.0 ^ (gid.0 >> 17)) as usize;
+                    let idx = node_variant(n.res_type, world_cfg.seed, x, z, roll, variants.len());
+                    variants[idx].clone()
+                };
+                // Deterministic per-node yaw so herds/groves don't all face north.
+                let yaw = ((gid.0 >> 5) % 628) as f32 * 0.01;
                 commands
                     .spawn((
                         RenderRoot(gid.0),
-                        Mesh3d(assets.nodes[&n.res_type].clone()),
+                        Mesh3d(mesh),
                         MeshMaterial3d(rmats.node[&n.res_type].clone()),
-                        Transform::from_translation(world),
-                        Lerp { target: world, yaw: 0.0, bob_phase: 0.0, bob: false },
+                        Transform::from_translation(world).with_rotation(Quat::from_rotation_y(yaw)),
+                        Lerp { target: world, yaw, bob_phase: 0.0, bob: false },
                     ))
                     .id()
             });
@@ -370,7 +453,7 @@ pub fn sync_render(
         }
         if body.impostor != impostor {
             body.impostor = impostor;
-            mesh.0 = if impostor { assets.impostors[kind as usize].clone() } else { assets.units[kind as usize].clone() };
+            mesh.0 = assets.team_mesh(&mut meshes, kind, color, impostor);
         }
     }
     for (child_of, mut vis) in &mut q_rings {
@@ -391,9 +474,11 @@ pub fn sync_render(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn spawn_unit_tree(
     commands: &mut Commands,
-    assets: &RenderAssets,
+    assets: &mut RenderAssets,
+    meshes: &mut Assets<Mesh>,
     rmats: &mut RenderMaterials,
     mats: &mut Assets<StandardMaterial>,
     id: u64,
@@ -405,6 +490,7 @@ fn spawn_unit_tree(
     let h = def.height.to_num::<f32>();
     let r = def.radius.to_num::<f32>();
     let mat = rmats.unit_mat(mats, color, false);
+    let body_mesh = assets.team_mesh(meshes, kind, color, false);
     commands
         .spawn((
             RenderRoot(id),
@@ -420,7 +506,7 @@ fn spawn_unit_tree(
         .with_children(|p| {
             p.spawn((
                 UnitBody { kind, impostor: false },
-                Mesh3d(assets.units[kind as usize].clone()),
+                Mesh3d(body_mesh),
                 MeshMaterial3d(mat),
             ));
             p.spawn((
@@ -638,11 +724,12 @@ pub fn update_building_highlight(
 
 /// Build the shared mesh handles at match start.
 pub fn build_assets(meshes: &mut Assets<Mesh>) -> RenderAssets {
-    use crate::render::models::props::resource_node_mesh;
+    use crate::render::models::props::{fish_node_mesh, resource_node_meshes};
     let mut nodes = HashMap::new();
     for r in [ResourceType::Wood, ResourceType::Stone, ResourceType::Food, ResourceType::Gold] {
-        nodes.insert(r, meshes.add(resource_node_mesh(r)));
+        nodes.insert(r, resource_node_meshes(r).into_iter().map(|m| meshes.add(m)).collect());
     }
+    let fish_node = meshes.add(fish_node_mesh());
     RenderAssets {
         units: UnitKind::ALL.iter().map(|k| meshes.add(crate::render::models::unit_mesh(*k))).collect(),
         impostors: UnitKind::ALL
@@ -653,7 +740,10 @@ pub fn build_assets(meshes: &mut Assets<Mesh>) -> RenderAssets {
             .iter()
             .map(|k| meshes.add(crate::render::models::building_mesh(*k)))
             .collect(),
+        team_units: HashMap::new(),
+        team_impostors: HashMap::new(),
         nodes,
+        fish_node,
         // flat ground quad; the dashed-ring texture does the shaping
         ring: meshes.add(Plane3d::default().mesh().size(1.0, 1.0).build()),
         bar_quad: meshes.add(Mesh::from(Rectangle::new(BAR_W, BAR_H))),

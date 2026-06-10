@@ -10,8 +10,26 @@ use bevy::mesh::{Mesh, MeshBuilder, Meshable};
 use bevy::prelude::*;
 use saladin_sim::{UnitKind, unit_def};
 
-/// Team-tintable parts: pure white so instance/material tint multiplies in.
+/// Team-tintable parts: pure white, replaced by the owner's color in
+/// `bake_team` — the material stays white so every baked detail color
+/// (skin, wood, steel, hide) renders true instead of being multiplied
+/// toward the team hue.
 const TINT: [f32; 4] = [1.0, 1.0, 1.0, 1.0];
+
+/// Clone a unit mesh with its pure-white (team) vertices recolored to `hex`.
+pub fn bake_team(mesh: &Mesh, hex: u32) -> Mesh {
+    use bevy::mesh::VertexAttributeValues;
+    let team = srgb(hex);
+    let mut m = mesh.clone();
+    if let Some(VertexAttributeValues::Float32x4(colors)) = m.attribute_mut(Mesh::ATTRIBUTE_COLOR) {
+        for c in colors.iter_mut() {
+            if *c == TINT {
+                *c = team;
+            }
+        }
+    }
+    m
+}
 
 fn srgb(hex: u32) -> [f32; 4] {
     let c = Color::srgb_u8((hex >> 16) as u8, (hex >> 8) as u8, hex as u8).to_linear();
@@ -126,9 +144,25 @@ fn is_mounted(k: UnitKind) -> bool {
 
 /// A four-legged horse centred on origin, forward = +Z.
 fn push_horse(parts: &mut Vec<Mesh>, r: f32, h: f32, hide: [f32; 4], p: &Pal) {
-    parts.push(part(boxm(r * 0.85, h * 0.38, h * 1.05), hide, xyz(0.0, h * 0.32, 0.0)));
-    parts.push(part(boxm(r * 0.78, h * 0.34, h * 0.3), hide, xyz(0.0, h * 0.34, h * 0.5)));
-    parts.push(part(boxm(r * 0.82, h * 0.4, h * 0.32), hide, xyz(0.0, h * 0.36, -h * 0.5)));
+    // Rounded barrel + chest + rump instead of stacked boxes.
+    parts.push(part(
+        sphere(1.0, 10, 8),
+        hide,
+        Transform::from_xyz(0.0, h * 0.34, 0.0)
+            .with_scale(Vec3::new(r * 0.44, h * 0.21, h * 0.56)),
+    ));
+    parts.push(part(
+        sphere(1.0, 9, 7),
+        hide,
+        Transform::from_xyz(0.0, h * 0.36, h * 0.46)
+            .with_scale(Vec3::new(r * 0.4, h * 0.2, h * 0.2)),
+    ));
+    parts.push(part(
+        sphere(1.0, 9, 7),
+        hide,
+        Transform::from_xyz(0.0, h * 0.37, -h * 0.46)
+            .with_scale(Vec3::new(r * 0.42, h * 0.22, h * 0.22)),
+    ));
     parts.push(part(
         boxm(r * 0.42, h * 0.5, r * 0.45),
         hide,

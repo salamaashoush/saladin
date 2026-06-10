@@ -102,10 +102,27 @@ fn water_color(biome: Biome, shore_dist: f32, swell: f32) -> [f32; 3] {
 
 /// Biome base blended toward its shade by elevation, plus snow-cap whitening
 /// and a foam strip on the first sliver of beach above the waterline.
-/// `h_norm` is the raw 0..1 field height; `rel_y` the unscaled render height.
-fn biome_color(biome: Biome, h_norm: f32, rel_y: f32, sea: f32) -> [f32; 3] {
+/// `h_norm` is the raw 0..1 field height; `rel_y` the unscaled render height;
+/// `patch` a slow 0..1 noise field that mottles vegetation/sand so big fills
+/// read as meadows and drifts instead of flat paint.
+fn biome_color(biome: Biome, h_norm: f32, rel_y: f32, sea: f32, patch: f32) -> [f32; 3] {
     let def = biome_def(biome);
     let mut c = lerp3(hex_linear(def.color), hex_linear(def.shade), rel_y * 0.045);
+    match biome {
+        Biome::Grassland | Biome::Steppe | Biome::Forest | Biome::Oasis => {
+            // dry-bleached patches on the high side, lush dips on the low side
+            let dry = hex_linear(0xa8a05c);
+            c = lerp3(c, hex_linear(def.shade), (patch - 0.5).max(0.0) * 0.9);
+            c = lerp3(c, dry, (0.5 - patch).max(0.0) * 0.5);
+        }
+        Biome::Desert | Biome::Dunes | Biome::Sand => {
+            c = lerp3(c, hex_linear(def.shade), (patch - 0.5).max(0.0) * 0.6);
+        }
+        Biome::Hills | Biome::Mountain => {
+            c = lerp3(c, hex_linear(def.shade), (patch - 0.5).max(0.0) * 0.7);
+        }
+        _ => {}
+    }
     if biome == Biome::Snow {
         c = lerp3(c, hex_linear(0xf4f8fb), (h_norm - 0.82) * 4.0);
     }
@@ -218,7 +235,14 @@ pub fn build_terrain_mesh(seed: u32) -> Mesh {
                 }
                 water_color(s.biome, acc / cnt.max(1.0), swell(vx, vy))
             } else {
-                biome_color(s.biome, s.height.to_num::<f32>(), h_raw, sea)
+                let patch = fbm(
+                    Fx::from_num(vx) * Fx::lit("0.07"),
+                    Fx::from_num(vy) * Fx::lit("0.07"),
+                    seed ^ 0x9a55,
+                    2,
+                )
+                .to_num::<f32>();
+                biome_color(s.biome, s.height.to_num::<f32>(), h_raw, sea, patch)
             };
 
             // Directional slope tint: finite-difference normal from neighbour

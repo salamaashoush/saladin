@@ -402,7 +402,7 @@ fn main() {
     if let Ok(s) = std::env::var("SALADIN_ZOOM")
         && let Ok(v) = s.parse::<f32>()
     {
-        let v = v.clamp(10.0, 85.0);
+        let v = v.clamp(4.0, 85.0);
         let world = app.world_mut();
         {
             let mut st = world.resource_mut::<camera::CameraState>();
@@ -472,6 +472,11 @@ fn main() {
             app.insert_state(GameState::Playing);
             app.add_systems(Update, (auto_screenshot, debug_layout));
         }
+        Ok("units") => {
+            // conjure one of every unit kind beside the keep (model verification)
+            app.insert_state(GameState::Playing);
+            app.add_systems(Update, (auto_screenshot, auto_spawn_units));
+        }
         Ok("lobby") => {
             let bind = format!("0.0.0.0:{HOST_PORT}");
             if saladin_protocol::spawn_host_relay(&bind).is_ok()
@@ -490,6 +495,106 @@ fn main() {
         _ => {}
     }
     app.run();
+}
+
+/// Screenshot harness only: conjure one of every unit kind in a line beside
+/// the keep so SALADIN_AUTO=units captures all unit models in one shot.
+fn auto_spawn_units(world: &mut World, mut done: Local<bool>) {
+    use saladin_protocol::{MatchId, NextEntityId, Owner, Pos, Unit};
+    use saladin_sim::{GatherState, Stance, UnitKind, unit_def};
+    if *done {
+        return;
+    }
+    if world.resource::<Time>().elapsed_secs() < 3.0 {
+        return;
+    }
+    let keep = {
+        let mut q = world.query::<(&Pos, &saladin_protocol::Building)>();
+        q.iter(world)
+            .find(|(_, b)| b.kind == saladin_sim::BuildingKind::Keep)
+            .map(|(p, _)| p.pos)
+    };
+    let Some(kp) = keep else { return };
+    *done = true;
+    // One node of each kind beside the lineup, plus a food node pushed onto
+    // the nearest water tile so the fish-school variant shows too.
+    {
+        use saladin_protocol::ResourceNode;
+        use saladin_sim::ResourceType;
+        let spawn_node = |world: &mut World, res, x: i32, z: i32| {
+            let id = world.resource_mut::<saladin_protocol::NextEntityId>().alloc();
+            let pos = saladin_sim::V2::new(
+                kp.x + saladin_sim::Fx::from_num(x),
+                kp.y + saladin_sim::Fx::from_num(z),
+            );
+            world.spawn((
+                GameId(id),
+                saladin_protocol::MatchId(1),
+                saladin_protocol::Pos { pos, facing: saladin_sim::Fx::ZERO },
+                ResourceNode { res_type: res, remaining: 200 },
+            ));
+        };
+        for (i, res) in
+            [ResourceType::Wood, ResourceType::Stone, ResourceType::Food, ResourceType::Gold]
+                .into_iter()
+                .enumerate()
+        {
+            spawn_node(world, res, -3, 2 + i as i32 * 2);
+        }
+        // hunt outward for a water tile (render height below sea)
+        let seed = world.resource::<saladin_protocol::WorldConfig>().seed;
+        'water: for ring in 2..60 {
+            for (dx, dz) in [(ring, 0), (-ring, 0), (0, ring), (0, -ring)] {
+                let x = kp.x + saladin_sim::Fx::from_num(dx);
+                let z = kp.y + saladin_sim::Fx::from_num(dz);
+                let s = saladin_sim::sample_terrain(seed, x, z);
+                if !saladin_sim::biome_def(s.biome).passable
+                    && matches!(
+                        s.biome,
+                        saladin_sim::Biome::ShallowWater | saladin_sim::Biome::DeepWater
+                    )
+                {
+                    spawn_node(world, ResourceType::Food, dx, dz);
+                    break 'water;
+                }
+            }
+        }
+    }
+    for (i, &kind) in UnitKind::ALL.iter().enumerate() {
+        let def = unit_def(kind);
+        let pos = saladin_sim::V2::new(
+            kp.x + saladin_sim::Fx::from_num(2 + (i as i32 % 5) * 2),
+            kp.y + saladin_sim::Fx::from_num(3 + (i as i32 / 5) * 3),
+        );
+        let id = world.resource_mut::<NextEntityId>().alloc();
+        world.spawn((
+            GameId(id),
+            Owner(1),
+            MatchId(1),
+            Pos { pos, facing: saladin_sim::Fx::ZERO },
+            Unit {
+                kind,
+                target: pos,
+                has_target: false,
+                speed: def.speed,
+                gather_state: GatherState::Idle,
+                target_node: 0,
+                carrying: 0,
+                carry_type: saladin_sim::ResourceType::Wood,
+                harvest_timer: saladin_sim::Fx::ZERO,
+                hp: def.max_hp,
+                attack_target: 0,
+                attack_cooldown: saladin_sim::Fx::ZERO,
+                stance: Stance::Defensive,
+                morale: saladin_sim::MORALE_MAX,
+                routing: false,
+                home: pos,
+                garrisoned_in: 0,
+                path: vec![],
+                path_idx: 0,
+            },
+        ));
+    }
 }
 
 /// Screenshot harness only: conjure a building row beside the keep (the way

@@ -24,22 +24,457 @@ pub fn prop_meshes() -> Vec<Mesh> {
     vec![shrub(), dune_grass(), rock(), boulder(), reeds(), palm(), pine()]
 }
 
-/// Resource-node mesh by type: conifer / boulder / forage tuft / gold vein.
-pub fn resource_node_mesh(res: ResourceType) -> Mesh {
-    let c = lin(resource_def(res).color);
+/// Resource-node mesh variants by type. Several meshes per kind; the renderer
+/// picks one per node — biome-aware via the `TREE_*`/`FOOD_*` index groups —
+/// so groves and herds read as natural variety while every variant still
+/// instances.
+pub fn resource_node_meshes(res: ResourceType) -> Vec<Mesh> {
+    let _ = resource_def(res);
     match res {
-        ResourceType::Stone => part(
-            dodecahedron(0.55),
-            c,
-            Transform::from_xyz(0.0, 0.4, 0.0).with_scale(Vec3::new(1.0, 0.7, 1.0)),
-        ),
-        ResourceType::Food => part(frustum(0.45, 0.5, 0.5, 8), c, xyz(0.0, 0.32, 0.0)),
-        ResourceType::Gold => part(octahedron(0.45), c, xyz(0.0, 0.45, 0.0)),
-        _ => merge(vec![
-            part(cone(0.6, 1.5, 7), c, xyz(0.0, 1.2, 0.0)),
-            part(frustum(0.12, 0.16, 0.6, 6), lin(0x6b4a2b), xyz(0.0, 0.3, 0.0)),
-        ]),
+        ResourceType::Stone => vec![stone_cluster_a(), stone_cluster_b(), stone_cluster_c()],
+        ResourceType::Food => vec![deer(), boar(), berry_bush(), deer_grazing()],
+        ResourceType::Gold => vec![gold_vein_a(), gold_vein_b()],
+        _ => vec![tree_broadleaf(), tree_conifer(), tree_broadleaf_tall(), tree_olive(), tree_palm()],
     }
+}
+
+/// Wood-node variant indices (into the `ResourceType::Wood` mesh vec).
+pub const TREE_BROADLEAF: usize = 0;
+pub const TREE_CONIFER: usize = 1;
+pub const TREE_BROADLEAF_TALL: usize = 2;
+pub const TREE_OLIVE: usize = 3;
+pub const TREE_PALM: usize = 4;
+
+/// Food-node variant indices.
+pub const FOOD_DEER: usize = 0;
+pub const FOOD_BOAR: usize = 1;
+pub const FOOD_BERRY: usize = 2;
+pub const FOOD_DEER_GRAZING: usize = 3;
+
+/// Coastal food nodes sit on water tiles — render them as a fish school with
+/// a ripple ring instead of a land animal standing on the sea.
+pub fn fish_node_mesh() -> Mesh {
+    let silver = lin(0xa8c4cc);
+    let dark = lin(0x5e7e8c);
+    let ripple = lin(0xc8e8ee);
+    let mut parts = vec![
+        // Two faint concentric ripple rings lying on the water.
+        part(
+            torus_ring(0.42, 0.025),
+            ripple,
+            Transform::from_xyz(0.0, 0.05, 0.0),
+        ),
+        part(
+            torus_ring(0.65, 0.02),
+            ripple,
+            Transform::from_xyz(0.0, 0.04, 0.0),
+        ),
+    ];
+    // A few fish backs arcing out of the water around the center.
+    for (i, &(dx, dz, yaw, s)) in
+        [(0.0f32, 0.0f32, 0.4f32, 1.0f32), (0.35, 0.2, 2.6, 0.8), (-0.3, 0.25, 4.4, 0.85), (-0.1, -0.35, 1.6, 0.7)]
+            .iter()
+            .enumerate()
+    {
+        let c = if i % 2 == 0 { silver } else { dark };
+        let body = Transform::from_xyz(dx, 0.1 * s, dz)
+            * Transform::from_rotation(Quat::from_rotation_y(yaw))
+            * Transform::from_scale(Vec3::new(0.32 * s, 0.5 * s, 1.05 * s));
+        parts.push(part(octahedron(0.22), c, body));
+        // tail fin
+        let tail = Transform::from_xyz(dx, 0.08 * s, dz)
+            * Transform::from_rotation(Quat::from_rotation_y(yaw))
+            * Transform::from_xyz(0.0, 0.06, -0.26 * s)
+            * Transform::from_rotation(Quat::from_rotation_x(0.9))
+            * Transform::from_scale(Vec3::new(0.5, 1.0, 0.35));
+        parts.push(part(cone(0.12 * s, 0.18 * s, 4), c, tail));
+    }
+    merge(parts)
+}
+
+fn torus_ring(major: f32, minor: f32) -> Mesh {
+    Torus { minor_radius: minor, major_radius: major }
+        .mesh()
+        .minor_resolution(4)
+        .major_resolution(18)
+        .build()
+}
+
+// ── trees (Wood nodes) ───────────────────────────────────────────────────────
+
+const TRUNK: u32 = 0x6b4a2b;
+const TRUNK_DARK: u32 = 0x553a20;
+
+/// Round broadleaf: trunk under a clump of overlapping leaf blobs in two
+/// greens — reads as an oak/sycamore instead of a traffic cone.
+fn tree_broadleaf() -> Mesh {
+    let leaf = lin(0x4a7a33);
+    let leaf_lo = lin(0x3d6628);
+    let leaf_hi = lin(0x5d9440);
+    merge(vec![
+        part(frustum(0.09, 0.16, 0.8, 6), lin(TRUNK), xyz(0.0, 0.4, 0.0)),
+        part(icosahedron(0.52), leaf, xyz(0.0, 1.18, 0.0)),
+        part(icosahedron(0.36), leaf_lo, xyz(0.34, 0.95, 0.16)),
+        part(icosahedron(0.32), leaf_lo, xyz(-0.3, 0.98, -0.18)),
+        part(icosahedron(0.3), leaf_hi, xyz(0.06, 1.55, 0.05)),
+    ])
+}
+
+/// Taller, narrower broadleaf for grove variety.
+fn tree_broadleaf_tall() -> Mesh {
+    let leaf = lin(0x456f2f);
+    let leaf_hi = lin(0x558b3a);
+    merge(vec![
+        part(frustum(0.08, 0.14, 1.0, 6), lin(TRUNK_DARK), xyz(0.0, 0.5, 0.0)),
+        part(icosahedron(0.42), leaf, xyz(0.0, 1.3, 0.0)),
+        part(icosahedron(0.34), leaf, xyz(0.22, 1.05, -0.14)),
+        part(icosahedron(0.3), leaf_hi, xyz(-0.05, 1.68, 0.08)),
+    ])
+}
+
+/// Conifer: stacked irregular tiers, visible trunk, dark forest green.
+fn tree_conifer() -> Mesh {
+    let mut parts = vec![part(frustum(0.07, 0.13, 0.6, 6), lin(TRUNK_DARK), xyz(0.0, 0.3, 0.0))];
+    for (r, h, y, c) in [
+        (0.52f32, 0.75f32, 0.78f32, 0x2f5d2a),
+        (0.4, 0.65, 1.2, 0x356b30),
+        (0.27, 0.58, 1.6, 0x3c7a36),
+    ] {
+        parts.push(part(cone(r, h, 7), lin(c), xyz(0.0, y, 0.0)));
+    }
+    merge(parts)
+}
+
+/// Olive/scrub tree: short forked trunk, wide flat grey-green canopy.
+fn tree_olive() -> Mesh {
+    let leaf = lin(0x6e7f4a);
+    let leaf_lo = lin(0x5d6e3c);
+    merge(vec![
+        part(
+            frustum(0.07, 0.13, 0.55, 5),
+            lin(TRUNK),
+            at_rot(0.05, 0.28, 0.0, Quat::from_rotation_z(0.18)),
+        ),
+        part(
+            frustum(0.06, 0.09, 0.45, 5),
+            lin(TRUNK),
+            at_rot(-0.12, 0.32, 0.05, Quat::from_rotation_z(-0.35)),
+        ),
+        part(squashed(icosahedron(0.44), 0.62), leaf, xyz(0.0, 0.78, 0.0)),
+        part(squashed(icosahedron(0.3), 0.6), leaf_lo, xyz(0.32, 0.68, 0.12)),
+        part(squashed(icosahedron(0.26), 0.65), leaf_lo, xyz(-0.3, 0.7, -0.12)),
+    ])
+}
+
+/// Harvestable palm: taller than the cosmetic prop, fuller crown, date
+/// clusters under the fronds.
+fn tree_palm() -> Mesh {
+    let green = lin(0x3f8f49);
+    let green_dk = lin(0x357a3e);
+    let mut parts = vec![part(frustum(0.07, 0.12, 2.0, 5), lin(0x7a5a32), at_rot(0.0, 1.0, 0.0, Quat::from_rotation_z(0.06)))];
+    let n = 7;
+    for i in 0..n {
+        let ang = i as f32 / n as f32 * TAU;
+        let c = if i % 2 == 0 { green } else { green_dk };
+        let tf = Transform::from_xyz(0.12, 2.0, 0.0)
+            * Transform::from_rotation(Quat::from_rotation_y(ang))
+            * Transform::from_rotation(Quat::from_rotation_x(-0.55))
+            * Transform::from_xyz(0.0, 0.0, 0.55)
+            * Transform::from_rotation(Quat::from_rotation_x(FRAC_PI_2));
+        parts.push(part(cone(0.18, 1.1, 3), c, tf));
+    }
+    parts.push(part(icosahedron(0.15), green, xyz(0.12, 2.02, 0.0)));
+    // date clusters
+    parts.push(part(sphere_uv(0.09), lin(0xb07a2a), xyz(0.26, 1.88, 0.1)));
+    parts.push(part(sphere_uv(0.07), lin(0x9a6a24), xyz(-0.02, 1.86, -0.16)));
+    merge(parts)
+}
+
+fn at_rot(x: f32, y: f32, z: f32, q: Quat) -> Transform {
+    Transform::from_xyz(x, y, z).with_rotation(q)
+}
+
+fn squashed(m: Mesh, y: f32) -> Mesh {
+    m.transformed_by(Transform::from_scale(Vec3::new(1.0, y, 1.0)))
+}
+
+// ── stone outcrops ───────────────────────────────────────────────────────────
+
+/// Weathered grey cluster: one big slab leaning, two companions, pebbles.
+fn stone_cluster_a() -> Mesh {
+    merge(vec![
+        part(
+            dodecahedron(0.42),
+            lin(0x878a8e),
+            Transform::from_xyz(-0.08, 0.26, 0.0)
+                .with_rotation(Quat::from_rotation_z(0.22))
+                .with_scale(Vec3::new(1.15, 0.78, 0.95)),
+        ),
+        part(
+            icosahedron(0.28),
+            lin(0x75787d),
+            Transform::from_xyz(0.38, 0.16, 0.18).with_scale(Vec3::new(1.0, 0.72, 1.0)),
+        ),
+        part(
+            dodecahedron(0.2),
+            lin(0x91959b),
+            Transform::from_xyz(0.12, 0.1, -0.38).with_scale(Vec3::new(1.0, 0.6, 1.0)),
+        ),
+        part(icosahedron(0.1), lin(0x7e8187), xyz(-0.42, 0.06, 0.3)),
+    ])
+}
+
+/// Tilted strata: three slabby blocks at stepped angles, cooler grey.
+fn stone_cluster_b() -> Mesh {
+    merge(vec![
+        part(
+            dodecahedron(0.38),
+            lin(0x7d8287),
+            Transform::from_xyz(0.0, 0.3, -0.1)
+                .with_rotation(Quat::from_euler(EulerRot::XYZ, 0.3, 0.4, 0.0))
+                .with_scale(Vec3::new(1.3, 0.9, 0.7)),
+        ),
+        part(
+            dodecahedron(0.3),
+            lin(0x6d7176),
+            Transform::from_xyz(0.22, 0.18, 0.3)
+                .with_rotation(Quat::from_euler(EulerRot::XYZ, 0.15, 1.1, 0.0))
+                .with_scale(Vec3::new(1.2, 0.7, 0.8)),
+        ),
+        part(
+            icosahedron(0.16),
+            lin(0x8a8e94),
+            Transform::from_xyz(-0.38, 0.1, 0.22).with_scale(Vec3::new(1.0, 0.7, 1.0)),
+        ),
+    ])
+}
+
+/// Single warm-grey boulder half-sunk with rubble at its foot.
+fn stone_cluster_c() -> Mesh {
+    merge(vec![
+        part(
+            icosahedron(0.46),
+            lin(0x84827e),
+            Transform::from_xyz(0.0, 0.24, 0.0)
+                .with_rotation(Quat::from_rotation_y(0.7))
+                .with_scale(Vec3::new(1.1, 0.66, 1.0)),
+        ),
+        part(
+            dodecahedron(0.18),
+            lin(0x747371),
+            Transform::from_xyz(0.42, 0.1, -0.2).with_scale(Vec3::new(1.0, 0.65, 1.0)),
+        ),
+        part(icosahedron(0.12), lin(0x8d8c8a), xyz(-0.4, 0.07, -0.3)),
+        part(icosahedron(0.09), lin(0x7c7b78), xyz(0.3, 0.05, 0.4)),
+    ])
+}
+
+// ── gold veins ───────────────────────────────────────────────────────────────
+
+/// Dark host rock studded with bright nuggets — ore in stone, not a floating
+/// gem.
+fn gold_vein_a() -> Mesh {
+    let rock = lin(0x6f655a);
+    let rock_dk = lin(0x5e554b);
+    let gold = lin(0xe8c34a);
+    let gold_dk = lin(0xc9a132);
+    merge(vec![
+        part(
+            dodecahedron(0.42),
+            rock,
+            Transform::from_xyz(0.0, 0.27, 0.0)
+                .with_rotation(Quat::from_rotation_y(0.4))
+                .with_scale(Vec3::new(1.1, 0.75, 1.0)),
+        ),
+        part(
+            icosahedron(0.26),
+            rock_dk,
+            Transform::from_xyz(0.36, 0.14, 0.22).with_scale(Vec3::new(1.0, 0.7, 1.0)),
+        ),
+        part(octahedron(0.16), gold, xyz(0.1, 0.52, 0.16)),
+        part(octahedron(0.12), gold_dk, xyz(-0.24, 0.44, -0.1)),
+        part(octahedron(0.11), gold, xyz(0.3, 0.32, -0.22)),
+        part(octahedron(0.1), gold_dk, xyz(0.42, 0.26, 0.3)),
+        part(octahedron(0.09), gold, xyz(-0.1, 0.32, 0.36)),
+    ])
+}
+
+fn gold_vein_b() -> Mesh {
+    let rock = lin(0x68625a);
+    let gold = lin(0xddb83f);
+    merge(vec![
+        part(
+            icosahedron(0.4),
+            rock,
+            Transform::from_xyz(-0.1, 0.24, 0.0)
+                .with_rotation(Quat::from_rotation_y(1.2))
+                .with_scale(Vec3::new(1.2, 0.7, 0.9)),
+        ),
+        part(
+            dodecahedron(0.22),
+            rock,
+            Transform::from_xyz(0.34, 0.12, -0.18).with_scale(Vec3::new(1.0, 0.65, 1.0)),
+        ),
+        part(octahedron(0.15), gold, xyz(-0.05, 0.48, 0.12)),
+        part(octahedron(0.11), gold, xyz(-0.34, 0.34, -0.14)),
+        part(octahedron(0.1), gold, xyz(0.34, 0.28, -0.1)),
+        part(octahedron(0.09), gold, xyz(0.12, 0.36, -0.3)),
+    ])
+}
+
+// ── game animals + forage (Food nodes) ───────────────────────────────────────
+
+const HIDE_DEER: u32 = 0x8f6a42;
+const HIDE_DEER_DK: u32 = 0x6e5132;
+
+/// Standing deer: tan spheroid body, raised neck + head, antlers, dark legs.
+fn deer() -> Mesh {
+    deer_pose(0.55)
+}
+
+/// Grazing deer: same body, head lowered to the grass.
+fn deer_grazing() -> Mesh {
+    deer_pose(-0.35)
+}
+
+fn deer_pose(neck_pitch: f32) -> Mesh {
+    let hide = lin(HIDE_DEER);
+    let hide_dk = lin(HIDE_DEER_DK);
+    let antler = lin(0xb3a380);
+    let mut parts = vec![
+        // slim barrel body, slightly deeper than wide
+        part(
+            sphere_uv(0.26),
+            hide,
+            Transform::from_xyz(0.0, 0.58, -0.05).with_scale(Vec3::new(0.72, 0.85, 1.75)),
+        ),
+        // chest shoulder mass
+        part(
+            sphere_uv(0.2),
+            hide,
+            Transform::from_xyz(0.0, 0.6, 0.3).with_scale(Vec3::new(0.75, 0.9, 1.0)),
+        ),
+        // rump patch
+        part(sphere_uv(0.1), lin(0xe8ddc8), xyz(0.0, 0.6, -0.5)),
+    ];
+    // neck + head pivot at the chest
+    let pivot = Transform::from_xyz(0.0, 0.68, 0.4) * Transform::from_rotation(Quat::from_rotation_x(neck_pitch));
+    parts.push(part(cyl8(0.055, 0.08, 0.42), hide, pivot * Transform::from_xyz(0.0, 0.18, 0.0)));
+    let head_at = pivot * Transform::from_xyz(0.0, 0.42, 0.04);
+    parts.push(part(
+        sphere_uv(0.1),
+        hide,
+        head_at * Transform::from_scale(Vec3::new(0.9, 0.9, 1.35)),
+    ));
+    parts.push(part(cyl8(0.03, 0.045, 0.12), hide_dk, head_at * Transform::from_xyz(0.0, -0.02, 0.15) * Transform::from_rotation(Quat::from_rotation_x(1.35))));
+    // ears
+    for sx in [-1.0f32, 1.0] {
+        parts.push(part(cone(0.035, 0.1, 4), hide_dk, head_at * Transform::from_xyz(sx * 0.09, 0.09, -0.02)));
+    }
+    // antlers: thick main beam sweeping back + two tines each side
+    for sx in [-1.0f32, 1.0] {
+        let base = head_at * Transform::from_xyz(sx * 0.05, 0.1, 0.0);
+        let beam = base
+            * Transform::from_rotation(Quat::from_euler(EulerRot::XYZ, -0.55, 0.0, sx * 0.55));
+        parts.push(part(cyl8(0.018, 0.026, 0.34), antler, beam * Transform::from_xyz(0.0, 0.15, 0.0)));
+        parts.push(part(
+            cyl8(0.014, 0.018, 0.2),
+            antler,
+            beam * Transform::from_xyz(0.0, 0.2, 0.0)
+                * Transform::from_rotation(Quat::from_euler(EulerRot::XYZ, 0.9, 0.0, sx * 0.5))
+                * Transform::from_xyz(0.0, 0.08, 0.0),
+        ));
+        parts.push(part(
+            cyl8(0.012, 0.016, 0.16),
+            antler,
+            beam * Transform::from_xyz(0.0, 0.3, 0.0)
+                * Transform::from_rotation(Quat::from_euler(EulerRot::XYZ, -0.5, 0.0, sx * 0.7))
+                * Transform::from_xyz(0.0, 0.06, 0.0),
+        ));
+    }
+    // long slim legs
+    for sz in [-1.0f32, 1.0] {
+        for sx in [-1.0f32, 1.0] {
+            parts.push(part(
+                cyl8(0.022, 0.032, 0.55),
+                hide_dk,
+                xyz(sx * 0.12, 0.27, sz * 0.3 - 0.05),
+            ));
+        }
+    }
+    merge(parts)
+}
+
+/// Wild boar: stocky dark body, bristle ridge, snout + tusks, stub legs.
+fn boar() -> Mesh {
+    let hide = lin(0x4f3a28);
+    let hide_dk = lin(0x3a2b1d);
+    let snout = lin(0x8a6a55);
+    let tusk = lin(0xe8e0cc);
+    let mut parts = vec![
+        part(
+            sphere_uv(0.3),
+            hide,
+            Transform::from_xyz(0.0, 0.36, -0.04).with_scale(Vec3::new(0.95, 0.9, 1.6)),
+        ),
+        // bristle ridge along the spine
+        part(boxy(0.1, 0.1, 0.6), hide_dk, xyz(0.0, 0.62, -0.06)),
+        // head
+        part(
+            sphere_uv(0.17),
+            hide,
+            Transform::from_xyz(0.0, 0.38, 0.42).with_scale(Vec3::new(0.9, 0.9, 1.1)),
+        ),
+        part(cyl8(0.06, 0.07, 0.12), snout, at_rot(0.0, 0.34, 0.58, Quat::from_rotation_x(FRAC_PI_2))),
+    ];
+    for sx in [-1.0f32, 1.0] {
+        parts.push(part(cone(0.035, 0.08, 4), hide_dk, xyz(sx * 0.1, 0.52, 0.4)));
+        parts.push(part(
+            cone(0.018, 0.09, 4),
+            tusk,
+            at_rot(sx * 0.08, 0.3, 0.56, Quat::from_euler(EulerRot::XYZ, -0.5, 0.0, sx * 0.6)),
+        ));
+        for sz in [-1.0f32, 1.0] {
+            parts.push(part(cyl8(0.035, 0.045, 0.3), hide_dk, xyz(sx * 0.14, 0.14, sz * 0.3)));
+        }
+    }
+    merge(parts)
+}
+
+/// Berry bush: low leaf clump dotted with red berries.
+fn berry_bush() -> Mesh {
+    let leaf = lin(0x4a6f2e);
+    let leaf_hi = lin(0x5d8138);
+    let berry = lin(0xb33326);
+    let mut parts = vec![
+        part(squashed(icosahedron(0.4), 0.7), leaf, xyz(0.0, 0.26, 0.0)),
+        part(squashed(icosahedron(0.28), 0.75), leaf_hi, xyz(0.3, 0.2, 0.14)),
+        part(squashed(icosahedron(0.24), 0.7), leaf, xyz(-0.28, 0.18, -0.12)),
+    ];
+    for &(x, y, z) in &[
+        (0.12f32, 0.5f32, 0.18f32),
+        (-0.18, 0.44, 0.2),
+        (0.3, 0.4, -0.1),
+        (-0.06, 0.52, -0.2),
+        (0.42, 0.3, 0.22),
+        (-0.38, 0.32, 0.06),
+        (0.0, 0.46, 0.34),
+    ] {
+        parts.push(part(sphere_uv(0.045), berry, xyz(x, y, z)));
+    }
+    merge(parts)
+}
+
+fn sphere_uv(r: f32) -> Mesh {
+    Sphere::new(r).mesh().uv(10, 8)
+}
+
+fn cyl8(r_top: f32, r_bot: f32, h: f32) -> Mesh {
+    frustum(r_top, r_bot, h, 6)
+}
+
+fn boxy(w: f32, h: f32, d: f32) -> Mesh {
+    Mesh::from(Cuboid::new(w, h, d))
 }
 
 fn lin(hex: u32) -> [f32; 4] {
@@ -239,9 +674,11 @@ fn octahedron(r: f32) -> Mesh {
 // A two-lobe brush clump — big blob with a smaller offset companion.
 fn shrub() -> Mesh {
     let c = lin(0x6e7d3a);
+    let c_lo = lin(0x5c6a30);
     merge(vec![
-        part(icosahedron(0.3), c, xyz(0.0, 0.26, 0.0)),
-        part(icosahedron(0.19), c, xyz(0.22, 0.16, 0.1)),
+        part(squashed(icosahedron(0.3), 0.8), c, xyz(0.0, 0.22, 0.0)),
+        part(squashed(icosahedron(0.19), 0.85), c_lo, xyz(0.24, 0.13, 0.1)),
+        part(squashed(icosahedron(0.14), 0.8), c_lo, xyz(-0.2, 0.1, -0.12)),
     ])
 }
 
@@ -262,13 +699,19 @@ fn dune_grass() -> Mesh {
     merge(parts)
 }
 
-// A faceted loose stone, squashed so it sits like a rock.
+// A faceted loose stone with a pebble companion, half-sunk so it sits in the
+// ground instead of resting on it.
 fn rock() -> Mesh {
-    part(
-        dodecahedron(0.3),
-        lin(0x8a8175),
-        Transform::from_xyz(0.0, 0.16, 0.0).with_scale(Vec3::new(1.0, 0.7, 1.0)),
-    )
+    merge(vec![
+        part(
+            dodecahedron(0.28),
+            lin(0x82807e),
+            Transform::from_xyz(0.0, 0.13, 0.0)
+                .with_rotation(Quat::from_rotation_y(0.5))
+                .with_scale(Vec3::new(1.15, 0.6, 0.9)),
+        ),
+        part(icosahedron(0.12), lin(0x767472), xyz(0.26, 0.06, 0.14)),
+    ])
 }
 
 // A big two-mass boulder for the high, cold biomes.
@@ -318,12 +761,16 @@ fn palm() -> Mesh {
     merge(parts)
 }
 
-// A small cosmetic conifer: stacked cone tiers over a stub trunk.
+// A small cosmetic conifer: stacked cone tiers over a stub trunk, each tier
+// its own green so the silhouette reads as foliage layers.
 fn pine() -> Mesh {
     let mut parts = vec![part(frustum(0.08, 0.11, 0.5, 5), lin(0x5b4127), xyz(0.0, 0.25, 0.0))];
-    let tiers = lin(0x2f6b30);
-    for (r, h, y) in [(0.55, 0.8, 0.6), (0.42, 0.7, 1.05), (0.28, 0.6, 1.45)] {
-        parts.push(part(cone(r, h, 6), tiers, xyz(0.0, y, 0.0)));
+    for (r, h, y, c) in [
+        (0.5, 0.75, 0.62, 0x2a5c2b),
+        (0.38, 0.65, 1.02, 0x316a31),
+        (0.25, 0.55, 1.4, 0x3a7a38),
+    ] {
+        parts.push(part(cone(r, h, 7), lin(c), xyz(0.0, y, 0.0)));
     }
     merge(parts)
 }
