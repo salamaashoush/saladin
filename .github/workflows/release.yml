@@ -1,0 +1,78 @@
+name: release
+
+# Every push to main refreshes the rolling "latest" prerelease; a v* tag cuts
+# a proper versioned release. Lockstep multiplayer requires every player on
+# the SAME build — grab client + server from the same release.
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            artifact: saladin-linux-x86_64
+          - os: macos-latest # Apple Silicon (aarch64) runner
+            artifact: saladin-macos-aarch64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: saladin-bevy
+      - name: Linux build deps (alsa, udev, wayland, xkb)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libasound2-dev libudev-dev libwayland-dev libxkbcommon-dev
+      - name: Build client + relay server
+        working-directory: saladin-bevy
+        run: cargo build --release -p saladin-client -p saladin-server
+      - name: Package
+        run: |
+          mkdir -p dist/${{ matrix.artifact }}
+          cp saladin-bevy/target/release/saladin-client dist/${{ matrix.artifact }}/
+          cp saladin-bevy/target/release/saladin-server dist/${{ matrix.artifact }}/
+          tar -C dist -czf ${{ matrix.artifact }}.tar.gz ${{ matrix.artifact }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: ${{ matrix.artifact }}.tar.gz
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+      - name: Versioned release (tag push)
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          gh release create "${GITHUB_REF_NAME}" \
+            --title "Saladin ${GITHUB_REF_NAME}" \
+            --notes "Client + relay server. All players must use the same release (lockstep handshake rejects mismatched builds). macOS: unsigned binary — if Gatekeeper complains, run: xattr -d com.apple.quarantine saladin-client" \
+            saladin-linux-x86_64.tar.gz saladin-macos-aarch64.tar.gz
+      - name: Rolling latest prerelease (main push)
+        if: github.ref == 'refs/heads/main'
+        run: |
+          gh release delete latest --yes --cleanup-tag || true
+          gh release create latest \
+            --prerelease \
+            --target "${GITHUB_SHA}" \
+            --title "Latest main (${GITHUB_SHA:0:7})" \
+            --notes "Rolling build of main @ ${GITHUB_SHA}. All players must use the same build (lockstep handshake rejects mismatches). macOS: unsigned binary — if Gatekeeper complains, run: xattr -d com.apple.quarantine saladin-client" \
+            saladin-linux-x86_64.tar.gz saladin-macos-aarch64.tar.gz
