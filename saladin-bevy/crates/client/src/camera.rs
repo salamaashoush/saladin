@@ -21,9 +21,11 @@ pub struct GameCamera;
 pub struct CameraState {
     pub center: Vec3,
     pub target_center: Vec3,
-    pub offset: Vec3,
     pub view_size: f32,
     pub target_view: f32,
+    /// Accumulating yaw in radians; Q/E step it by 90° and the rig glides.
+    pub yaw: f32,
+    pub target_yaw: f32,
     pub framed: bool,
 }
 
@@ -33,9 +35,10 @@ impl Default for CameraState {
         CameraState {
             center: Vec3::new(c, 0.0, c),
             target_center: Vec3::new(c, 0.0, c),
-            offset: Vec3::new(42.0, 56.0, 42.0),
             view_size: 22.0,
             target_view: 22.0,
+            yaw: 0.0,
+            target_yaw: 0.0,
             framed: false,
         }
     }
@@ -46,6 +49,23 @@ impl CameraState {
     pub fn snap_center(&mut self, c: Vec3) {
         self.center = c;
         self.target_center = c;
+    }
+
+    /// The rig offset for the current zoom + yaw: a fixed iso ring rotated
+    /// by yaw, with the camera dropping a little as you zoom in (subtle
+    /// SC2-style dolly tilt — close feels closer, far feels flatter).
+    pub fn rig_offset(&self) -> Vec3 {
+        let t = ((self.view_size - 10.0) / 75.0).clamp(0.0, 1.0);
+        let height = 48.0 + t * 14.0; // 48 close .. 62 far (56-ish at default)
+        let dist = 59.4; // |(42, 42)| — the original horizontal reach
+        let a = std::f32::consts::FRAC_PI_4 + self.yaw;
+        Vec3::new(dist * a.cos(), height, dist * a.sin())
+    }
+
+    /// Camera-forward projected on the ground (pan basis), from yaw.
+    pub fn forward_h(&self) -> Vec2 {
+        let o = self.rig_offset();
+        -Vec2::new(o.x, o.z).normalize()
     }
 }
 
@@ -68,18 +88,24 @@ pub fn smooth_camera(
     let dt = time.delta_secs();
     let k_pan = 1.0 - (-12.0 * dt).exp();
     let k_zoom = 1.0 - (-10.0 * dt).exp();
+    let k_rot = 1.0 - (-9.0 * dt).exp();
     let dc = state.target_center - state.center;
     let dv = state.target_view - state.view_size;
-    if dc.length_squared() < 1e-6 && dv.abs() < 1e-4 {
+    let dy = state.target_yaw - state.yaw;
+    if dc.length_squared() < 1e-6 && dv.abs() < 1e-4 && dy.abs() < 1e-5 {
         return;
     }
     state.center += dc * k_pan;
     state.view_size += dv * k_zoom;
+    state.yaw += dy * k_rot;
     if dc.length_squared() < 4e-4 {
         state.center = state.target_center;
     }
     if dv.abs() < 1e-2 {
         state.view_size = state.target_view;
+    }
+    if dy.abs() < 1e-3 {
+        state.yaw = state.target_yaw;
     }
     if let Ok((mut tf, mut proj)) = q.single_mut() {
         aim(&state, &mut tf);
@@ -91,7 +117,7 @@ pub fn smooth_camera(
 
 pub fn spawn_camera(world: &mut World) {
     let state = CameraState::default();
-    let tf = Transform::from_translation(state.center + state.offset).looking_at(state.center, Vec3::Y);
+    let tf = Transform::from_translation(state.center + state.rig_offset()).looking_at(state.center, Vec3::Y);
     world.spawn((
         Camera3d::default(),
         Projection::Orthographic(OrthographicProjection {
@@ -110,7 +136,7 @@ pub fn spawn_camera(world: &mut World) {
 }
 
 fn aim(state: &CameraState, tf: &mut Transform) {
-    *tf = Transform::from_translation(state.center + state.offset).looking_at(state.center, Vec3::Y);
+    *tf = Transform::from_translation(state.center + state.rig_offset()).looking_at(state.center, Vec3::Y);
 }
 
 /// WASD/arrows + screen-edge pan, in iso screen space (TS panCamera mapping).
@@ -156,8 +182,11 @@ pub fn pan_camera(
     if dx == 0.0 && dz == 0.0 {
         return;
     }
-    let sp = state.view_size * 1.8 * time.delta_secs();
-    let t = state.target_center + Vec3::new((dx + dz) * sp, 0.0, (dz - dx) * sp);
+    // pan in SCREEN space whatever the yaw: right/forward from the rig
+    let fwd = state.forward_h();
+    let right = Vec2::new(-fwd.y, fwd.x);
+    let m = (right * dx - fwd * dz) * state.view_size * 2.5 * time.delta_secs();
+    let t = state.target_center + Vec3::new(m.x, 0.0, m.y);
     state.target_center = clamp_center(t);
 }
 
@@ -233,6 +262,16 @@ pub fn drag_pan(
             state.target_center = clamp_center(t);
             // the camera moves this frame, so re-anchor against the new view
         }
+    }
+}
+
+/// Q/E rotate the view in 90-degree steps (the rig glides between them).
+pub fn rotate_camera(keys: Res<ButtonInput<KeyCode>>, mut state: ResMut<CameraState>) {
+    if keys.just_pressed(KeyCode::KeyQ) {
+        state.target_yaw += std::f32::consts::FRAC_PI_2;
+    }
+    if keys.just_pressed(KeyCode::KeyE) {
+        state.target_yaw -= std::f32::consts::FRAC_PI_2;
     }
 }
 

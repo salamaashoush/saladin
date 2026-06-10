@@ -270,6 +270,7 @@ fn main() {
         (
             camera::pan_camera,
             camera::zoom_camera,
+            camera::rotate_camera.run_if(not(ui::text_input::any_input_focused)),
             camera::drag_pan,
             camera::smooth_camera,
             camera::frame_keep,
@@ -414,6 +415,15 @@ fn main() {
                 o.scaling_mode = bevy::camera::ScalingMode::FixedVertical { viewport_height: v * 2.0 };
             }
         }
+    }
+    // SALADIN_YAW=<quarter turns> pre-rotates the camera (rotation screenshots)
+    if let Ok(s) = std::env::var("SALADIN_YAW")
+        && let Ok(q) = s.parse::<i32>()
+    {
+        let yaw = q as f32 * std::f32::consts::FRAC_PI_2;
+        let mut st = app.world_mut().resource_mut::<camera::CameraState>();
+        st.yaw = yaw;
+        st.target_yaw = yaw;
     }
     // SALADIN_SEED / SALADIN_PRESET override the menu defaults (screenshot runs)
     if let Ok(s) = std::env::var("SALADIN_SEED")
