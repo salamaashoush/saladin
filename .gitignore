@@ -7,3 +7,6 @@ dist
 spacetime.local.json
 .ferridriver/
 .claude/scheduled_tasks.lock
+
+# rust
+saladin-bevy/target/
