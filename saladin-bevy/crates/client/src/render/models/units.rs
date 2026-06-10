@@ -48,6 +48,23 @@ pub struct RigPart {
     pub mesh: Mesh,
 }
 
+/// Small resource bundle shown on a peasant's back while hauling.
+pub fn carry_sack_mesh() -> Mesh {
+    let p = pal();
+    merge(vec![
+        part(
+            sphere(0.16, 8, 6),
+            p.leather,
+            Transform::from_xyz(0.0, 0.0, 0.0).with_scale(Vec3::new(1.0, 0.85, 0.7)),
+        ),
+        part(
+            torus(0.1, 0.02, 4, 8, PI * 2.0),
+            p.rope,
+            at(0.0, 0.1, 0.0, Quat::from_rotation_x(0.2)),
+        ),
+    ])
+}
+
 /// Clone a unit mesh with its pure-white (team) vertices recolored to `hex`.
 pub fn bake_team(mesh: &Mesh, hex: u32) -> Mesh {
     use bevy::mesh::VertexAttributeValues;

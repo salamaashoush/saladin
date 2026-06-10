@@ -6,6 +6,7 @@
 use crate::camera::CameraState;
 use crate::selection::Selection;
 use crate::terrain::{HeightField, height_at};
+use bevy::mesh::{MeshBuilder, Meshable};
 use bevy::prelude::*;
 use std::collections::HashMap;
 use saladin_protocol::{Building, GameId, Owner, Player, Pos, ResourceNode, Unit, WorldConfig};
@@ -40,6 +41,9 @@ pub struct RenderAssets {
     pub buildings: Vec<Handle<Mesh>>,
     pub nodes: HashMap<ResourceType, Vec<Handle<Mesh>>>,
     pub fish_node: Handle<Mesh>,
+    pub carry_sack: Handle<Mesh>,
+    pub puff: Handle<Mesh>,
+    pub flame: Handle<Mesh>,
     pub ring: Handle<Mesh>,
     pub bar_quad: Handle<Mesh>,
     pub rout_quad: Handle<Mesh>,
@@ -65,6 +69,9 @@ pub struct RenderMaterials {
     pub ghost_bad: Handle<StandardMaterial>,
     pub demolish: Handle<StandardMaterial>,
     pub arrow: Handle<StandardMaterial>,
+    pub smoke_light: Handle<StandardMaterial>,
+    pub smoke_dark: Handle<StandardMaterial>,
+    pub flame: Handle<StandardMaterial>,
 }
 
 fn color_of(hex: u32) -> Color {
@@ -139,6 +146,9 @@ pub fn build_materials(
         ghost_bad: overlay(mats, Color::srgb_u8(0xee, 0x44, 0x33), 0.5),
         demolish: overlay(mats, Color::srgb_u8(0xff, 0x40, 0x30), 0.4),
         arrow: overlay(mats, Color::srgb_u8(0x2e, 0x21, 0x14), 1.0),
+        smoke_light: overlay(mats, Color::srgb_u8(0xb8, 0xb4, 0xac), 0.5),
+        smoke_dark: overlay(mats, Color::srgb_u8(0x45, 0x41, 0x3c), 0.55),
+        flame: overlay(mats, Color::srgb_u8(0xff, 0x9a, 0x2e), 0.85),
     }
 }
 
@@ -194,7 +204,11 @@ pub struct Lerp {
     pub target: Vec3,
     pub yaw: f32,
     pub bob_phase: f32,
-    pub bob: bool,
+    /// Smoothly turn toward `yaw` (units + animals; static props never).
+    pub turn: bool,
+    /// Step-bounce on Y — ONLY while actually moving; a standing army that
+    /// bobs in place reads as pulsing.
+    pub hop: bool,
 }
 
 #[derive(Component)]
@@ -203,6 +217,9 @@ pub struct UnitBody {
     pub pivot: Vec3,
     /// true = the far-zoom merged impostor child (hidden at gameplay zoom).
     pub impostor_part: bool,
+    /// Peasant hauling bundle — visibility owned by the animator (shown only
+    /// while `AnimState.carrying`).
+    pub sack: bool,
 }
 
 /// Per-unit animation inputs mirrored from the sim each sync — the animator
@@ -213,6 +230,7 @@ pub struct AnimState {
     pub moving: bool,
     pub combat: bool,
     pub harvest: bool,
+    pub carrying: bool,
     pub phase: f32,
 }
 
@@ -382,7 +400,7 @@ pub fn sync_render(
     q_sim: Query<(&GameId, &Pos, Option<&Unit>, Option<&Building>, Option<&ResourceNode>, Option<&Owner>)>,
     q_players: Query<&Player>,
     mut q_roots: Query<
-        (&mut Lerp, &mut Visibility, &mut Transform, Option<&mut AnimState>),
+        (&mut Lerp, &mut Visibility, &mut Transform, Option<&mut AnimState>, Option<&mut DamageState>),
         With<RenderRoot>,
     >,
     mut q_bodies: Query<
@@ -436,8 +454,9 @@ pub fn sync_render(
                     world,
                 )
             });
-            if let Ok((mut lerp, mut vis, _, anim)) = q_roots.get_mut(root) {
+            if let Ok((mut lerp, mut vis, _, anim, _)) = q_roots.get_mut(root) {
                 lerp.target = world;
+                lerp.hop = u.has_target;
                 if !yaw.is_nan() {
                     lerp.yaw = yaw;
                 }
@@ -446,6 +465,7 @@ pub fn sync_render(
                     anim.moving = u.has_target;
                     anim.combat = u.attack_target != 0;
                     anim.harvest = u.gather_state == saladin_sim::GatherState::Harvesting;
+                    anim.carrying = u.carrying > 0;
                 }
             }
             unit_state.insert(root, (color, selected, u.routing, u.kind));
@@ -454,19 +474,30 @@ pub fn sync_render(
             let world = Vec3::new(x, ground, z);
             let root = *map.0.entry(gid.0).or_insert_with(|| {
                 let mat = rmats.tint_mat(&mut mats, team.unwrap_or(0x9c958a));
+                let def = building_def(b.kind);
                 commands
                     .spawn((
                         RenderRoot(gid.0),
                         Mesh3d(assets.buildings[b.kind as usize].clone()),
                         MeshMaterial3d(mat),
                         Transform::from_translation(world),
-                        Lerp { target: world, yaw: 0.0, bob_phase: 0.0, bob: false },
+                        Lerp { target: world, yaw: 0.0, bob_phase: 0.0, turn: false, hop: false },
+                        DamageState {
+                            ratio: 1.0,
+                            span: def.footprint as f32 * 0.55,
+                            roof: def.height.to_num::<f32>(),
+                            acc: [0.0; 2],
+                        },
                     ))
                     .id()
             });
-            if let Ok((mut lerp, _, mut tf, _)) = q_roots.get_mut(root) {
+            if let Ok((mut lerp, _, mut tf, _, dmg)) = q_roots.get_mut(root) {
                 lerp.target = world;
                 tf.translation = world; // buildings snap
+                if let Some(mut dmg) = dmg {
+                    let max = building_def(b.kind).max_hp.max(1);
+                    dmg.ratio = b.hp as f32 / max as f32;
+                }
                 if b.kind == BuildingKind::Wall {
                     let yaw = wall_angle_at(&occ.0, x, z);
                     lerp.yaw = yaw;
@@ -502,7 +533,7 @@ pub fn sync_render(
                     Mesh3d(mesh),
                     MeshMaterial3d(rmats.node[&n.res_type].clone()),
                     Transform::from_translation(world).with_rotation(Quat::from_rotation_y(yaw)),
-                    Lerp { target: world, yaw, bob_phase: 0.0, bob: false },
+                    Lerp { target: world, yaw, bob_phase: 0.0, turn: false, hop: false },
                 ));
                 // Land game animals get a wander/graze/carcass brain.
                 if n.res_type == ResourceType::Food
@@ -526,12 +557,12 @@ pub fn sync_render(
                 }
                 e.id()
             });
-            if let Ok((_, _, mut tf, _)) = q_roots.get_mut(root) {
+            if let Ok((_, _, mut tf, _, _)) = q_roots.get_mut(root) {
                 tf.scale = Vec3::splat(node_scale(n.remaining));
             }
             if let Ok(mut animal) = q_animals.get_mut(root) {
                 animal.remaining = n.remaining;
-            } else if let Ok((_, _, mut tf, _)) = q_roots.get_mut(root) {
+            } else if let Ok((_, _, mut tf, _, _)) = q_roots.get_mut(root) {
                 // static nodes snap to the sim position; animals own their pose
                 tf.translation = world;
             }
@@ -544,6 +575,13 @@ pub fn sync_render(
         let want = rmats.unit_mat(&mut mats, color, selected);
         if mat.0 != want {
             mat.0 = want;
+        }
+        if body.sack {
+            // near-zoom visibility owned by the animator (carrying flag)
+            if impostor && *vis != Visibility::Hidden {
+                *vis = Visibility::Hidden;
+            }
+            continue;
         }
         let show = body.impostor_part == impostor;
         let want_vis = if show { Visibility::Inherited } else { Visibility::Hidden };
@@ -560,10 +598,154 @@ pub fn sync_render(
         *vis = if on { Visibility::Inherited } else { Visibility::Hidden };
     }
 
-    // cleanup
+    // cleanup: dead rows play a render-only death (units tip over, buildings
+    // and nodes sink) instead of popping out of existence
     let gone: Vec<u64> = map.0.keys().copied().filter(|id| !seen.contains(id)).collect();
     for id in gone {
         if let Some(e) = map.0.remove(&id) {
+            let fall = q_roots.get(e).map(|(_, _, _, anim, _)| anim.is_some()).unwrap_or(false);
+            commands
+                .entity(e)
+                .remove::<(Lerp, AnimState, AnimalNode)>()
+                .insert(Dying { t: 0.0, fall });
+        }
+    }
+}
+
+/// Render-only death throes: tip forward (units), then sink under the
+/// terrain and despawn. Sim rows are already gone; this is pure cosmetics.
+#[derive(Component)]
+pub struct Dying {
+    pub t: f32,
+    pub fall: bool,
+}
+
+/// Building health mirrored for staged damage FX: light smoke under 75%,
+/// dark smoke under 50%, flames join under 25%.
+#[derive(Component)]
+pub struct DamageState {
+    pub ratio: f32,
+    pub span: f32,
+    pub roof: f32,
+    /// spawn-accumulator phases (smoke, flame)
+    pub acc: [f32; 2],
+}
+
+/// Short-lived cosmetic particle (smoke puff / flame tongue).
+#[derive(Component)]
+pub struct Particle {
+    pub vel: Vec3,
+    pub age: f32,
+    pub life: f32,
+    pub base: f32,
+}
+
+/// Emit smoke/flame from damaged buildings at a rate scaled by missing HP.
+pub fn building_damage_fx(
+    time: Res<Time>,
+    mut commands: Commands,
+    assets: Res<RenderAssets>,
+    rmats: Res<RenderMaterials>,
+    mut q: Query<(&mut DamageState, &Transform)>,
+) {
+    let dt = time.delta_secs();
+    for (mut d, tf) in &mut q {
+        if d.ratio >= 0.75 {
+            continue;
+        }
+        let heavy = d.ratio < 0.25;
+        let smoke_rate = if heavy { 3.0 } else if d.ratio < 0.5 { 1.6 } else { 0.7 };
+        let flame_rate = if heavy { 1.6 } else if d.ratio < 0.5 { 0.5 } else { 0.0 };
+        // deterministic-ish jitter from the spawn position
+        let salt = tf.translation.x * 12.9898 + tf.translation.z * 78.233;
+        let h01 = |k: f32| ((k * 43758.5453).sin() * 0.5 + 0.5).abs();
+        for (slot, rate) in [(0usize, smoke_rate), (1usize, flame_rate)] {
+            if rate <= 0.0 {
+                continue;
+            }
+            d.acc[slot] += rate * dt;
+            while d.acc[slot] >= 1.0 {
+                d.acc[slot] -= 1.0;
+                let k = salt + time.elapsed_secs() + slot as f32 * 17.7 + d.acc[slot];
+                let off = Vec3::new(
+                    (h01(k) - 0.5) * d.span,
+                    d.roof * (0.8 + 0.4 * h01(k + 1.3)),
+                    (h01(k + 2.6) - 0.5) * d.span,
+                );
+                if slot == 0 {
+                    let mat = if d.ratio < 0.5 { rmats.smoke_dark.clone() } else { rmats.smoke_light.clone() };
+                    commands.spawn((
+                        Particle {
+                            vel: Vec3::new((h01(k + 3.1) - 0.5) * 0.3, 1.4 + h01(k + 4.7) * 0.5, (h01(k + 5.9) - 0.5) * 0.3),
+                            age: 0.0,
+                            life: 2.0 + h01(k + 6.2) * 0.8,
+                            base: 0.24 + h01(k + 7.9) * 0.18,
+                        },
+                        Mesh3d(assets.puff.clone()),
+                        MeshMaterial3d(mat),
+                        Transform::from_translation(tf.translation + off).with_scale(Vec3::splat(0.01)),
+                    ));
+                } else {
+                    commands.spawn((
+                        Particle {
+                            vel: Vec3::new(0.0, 0.25, 0.0),
+                            age: 0.0,
+                            life: 0.5 + h01(k + 8.3) * 0.3,
+                            base: 0.26 + h01(k + 9.1) * 0.18,
+                        },
+                        Mesh3d(assets.flame.clone()),
+                        MeshMaterial3d(rmats.flame.clone()),
+                        Transform::from_translation(tf.translation + off * Vec3::new(1.0, 0.5, 1.0))
+                            .with_scale(Vec3::splat(0.01)),
+                    ));
+                }
+            }
+        }
+    }
+}
+
+/// Rise, swell, shrink out, die.
+pub fn tick_particles(
+    time: Res<Time>,
+    mut commands: Commands,
+    mut q: Query<(Entity, &mut Particle, &mut Transform)>,
+) {
+    let dt = time.delta_secs();
+    for (e, mut p, mut tf) in &mut q {
+        p.age += dt;
+        if p.age >= p.life {
+            commands.entity(e).despawn();
+            continue;
+        }
+        tf.translation += p.vel * dt;
+        let k = (p.age / p.life) * std::f32::consts::PI;
+        tf.scale = Vec3::splat((p.base * k.sin()).max(0.01));
+    }
+}
+
+fn ease_out(k: f32) -> f32 {
+    let k = k.clamp(0.0, 1.0);
+    1.0 - (1.0 - k) * (1.0 - k)
+}
+
+pub fn animate_dying(
+    time: Res<Time>,
+    mut commands: Commands,
+    mut q: Query<(Entity, &mut Dying, &mut Transform)>,
+) {
+    let dt = time.delta_secs();
+    for (e, mut d, mut tf) in &mut q {
+        let prev = d.t;
+        d.t += dt;
+        if d.fall {
+            // incremental local pitch so the unit falls along its facing
+            let pitch = |t: f32| -1.5 * ease_out(t / 0.45);
+            tf.rotate_local_x(pitch(d.t) - pitch(prev));
+        }
+        if d.t > 0.7 {
+            tf.translation.y -= 0.55 * dt;
+        }
+        if d.t > 2.0 {
             commands.entity(e).despawn();
         }
     }
@@ -593,16 +775,33 @@ fn spawn_unit_tree(
             RenderRoot(id),
             Transform::from_translation(world),
             Visibility::Inherited,
-            Lerp { target: world, yaw: 0.0, bob_phase: phase, bob: true },
-            AnimState { kind, moving: false, combat: false, harvest: false, phase },
+            Lerp { target: world, yaw: 0.0, bob_phase: phase, turn: true, hop: false },
+            AnimState { kind, moving: false, combat: false, harvest: false, carrying: false, phase },
         ))
         .with_children(|p| {
             for part in rig {
                 p.spawn((
-                    UnitBody { group: part.group, pivot: part.pivot, impostor_part: false },
+                    UnitBody { group: part.group, pivot: part.pivot, impostor_part: false, sack: false },
                     Mesh3d(part.mesh),
                     MeshMaterial3d(mat.clone()),
                     Transform::from_translation(part.pivot),
+                ));
+            }
+            if kind == UnitKind::Peasant {
+                let def = unit_def(kind);
+                let h = def.height.to_num::<f32>();
+                let r = def.radius.to_num::<f32>();
+                p.spawn((
+                    UnitBody {
+                        group: crate::render::models::RigGroup::Body,
+                        pivot: Vec3::ZERO,
+                        impostor_part: false,
+                        sack: true,
+                    },
+                    Mesh3d(assets.carry_sack.clone()),
+                    MeshMaterial3d(mat.clone()),
+                    Transform::from_xyz(0.0, h * 0.72, -r * 0.85),
+                    Visibility::Hidden,
                 ));
             }
             p.spawn((
@@ -610,6 +809,7 @@ fn spawn_unit_tree(
                     group: crate::render::models::RigGroup::Body,
                     pivot: Vec3::ZERO,
                     impostor_part: true,
+                    sack: false,
                 },
                 Mesh3d(impostor_mesh),
                 MeshMaterial3d(mat),
@@ -640,7 +840,7 @@ pub fn animate_units(
     time: Res<Time>,
     cam_state: Res<CameraState>,
     q_roots: Query<(&AnimState, &Children)>,
-    mut q_parts: Query<(&UnitBody, &mut Transform)>,
+    mut q_parts: Query<(&UnitBody, &mut Transform, &mut Visibility)>,
 ) {
     use crate::render::models::RigGroup as G;
     if cam_state.view_size >= IMPOSTOR_VIEW_SIZE {
@@ -662,8 +862,15 @@ pub fn animate_units(
             if s > 0.0 { s * s } else { 0.0 }
         };
         for child in children.iter() {
-            let Ok((body, mut tf)) = q_parts.get_mut(child) else { continue };
+            let Ok((body, mut tf, mut vis)) = q_parts.get_mut(child) else { continue };
             if body.impostor_part {
+                continue;
+            }
+            if body.sack {
+                let want = if anim.carrying { Visibility::Inherited } else { Visibility::Hidden };
+                if *vis != want {
+                    *vis = want;
+                }
                 continue;
             }
             let rot = match body.group {
@@ -739,7 +946,8 @@ pub fn animate_animals(
         }
         if a.remaining < a.full {
             a.carcass = true;
-            lerp.bob = false;
+            lerp.hop = false;
+            lerp.turn = false;
             lerp.target = a.anchor;
             tf.translation = a.anchor;
             mesh.0 = a.carcass_mesh.clone();
@@ -756,13 +964,14 @@ pub fn animate_animals(
             let y = height_at(&field, next.x, next.z);
             lerp.target = Vec3::new(next.x, y, next.z);
             lerp.yaw = d.x.atan2(d.z);
-            lerp.bob = true;
+            lerp.hop = true;
+            lerp.turn = true;
             if mesh.0 != a.stand_mesh {
                 mesh.0 = a.stand_mesh.clone();
             }
         } else {
             // grazing pause, then pick the next waypoint near the anchor
-            lerp.bob = false;
+            lerp.hop = false;
             if mesh.0 != a.graze_mesh {
                 mesh.0 = a.graze_mesh.clone();
             }
@@ -789,11 +998,11 @@ pub fn interpolate(time: Res<Time>, mut q: Query<(&mut Transform, &Lerp), With<R
     let bob_t = time.elapsed_secs() * 5.0;
     for (mut tf, l) in &mut q {
         let mut target = l.target;
-        if l.bob {
+        if l.hop {
             target.y += (bob_t + l.bob_phase).sin().abs() * 0.07;
         }
         tf.translation = tf.translation.lerp(target, k);
-        if l.bob {
+        if l.turn {
             let want = Quat::from_rotation_y(l.yaw);
             tf.rotation = tf.rotation.slerp(want, k);
         }
@@ -1008,6 +1217,9 @@ pub fn build_assets(meshes: &mut Assets<Mesh>) -> RenderAssets {
         team_impostors: HashMap::new(),
         nodes,
         fish_node,
+        carry_sack: meshes.add(crate::render::models::units::carry_sack_mesh()),
+        puff: meshes.add(Sphere::new(1.0).mesh().uv(6, 5)),
+        flame: meshes.add(Cone { radius: 0.5, height: 1.0 }.mesh().resolution(5).build()),
         // flat ground quad; the dashed-ring texture does the shaping
         ring: meshes.add(Plane3d::default().mesh().size(1.0, 1.0).build()),
         bar_quad: meshes.add(Mesh::from(Rectangle::new(BAR_W, BAR_H))),

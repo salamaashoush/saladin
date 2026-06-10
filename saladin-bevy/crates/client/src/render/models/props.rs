@@ -151,8 +151,8 @@ fn tree_conifer() -> Mesh {
 
 /// Olive/scrub tree: short forked trunk, wide flat grey-green canopy.
 fn tree_olive() -> Mesh {
-    let leaf = lin(0x6e7f4a);
-    let leaf_lo = lin(0x5d6e3c);
+    let leaf = lin(0x5d7340);
+    let leaf_lo = lin(0x4c6133);
     merge(vec![
         part(
             frustum(0.07, 0.13, 0.55, 5),

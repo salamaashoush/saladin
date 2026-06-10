@@ -292,6 +292,9 @@ fn main() {
             render::sync::interpolate,
             render::sync::animate_units,
             render::sync::animate_animals,
+            render::sync::animate_dying,
+            render::sync::building_damage_fx,
+            render::sync::tick_particles,
             render::sync::update_hp_bars,
             render::sync::update_building_highlight,
             render::ghost::update_ghost,
@@ -505,8 +508,9 @@ fn auto_spawn_units(world: &mut World, mut stage: Local<u8>) {
     use saladin_protocol::{MatchId, NextEntityId, Owner, Pos, Unit};
     use saladin_sim::{GatherState, Stance, UnitKind, unit_def};
     let t = world.resource::<Time>().elapsed_secs();
-    // stage 2: at t=5 bite a chunk out of the conjured land food nodes so the
-    // carcass transition shows in screenshots
+    // stage 2: at t=5 bite a chunk out of the conjured land food nodes (shows
+    // the carcass transition), load the peasants (shows the carry sack), and
+    // kill a few soldiers (shows the fall-and-sink death) for screenshots
     if *stage == 1 {
         if t >= 5.0 {
             *stage = 2;
@@ -515,6 +519,30 @@ fn auto_spawn_units(world: &mut World, mut stage: Local<u8>) {
                 if n.res_type == saladin_sim::ResourceType::Food && n.remaining == 200 {
                     n.remaining = 150;
                 }
+            }
+            let mut q = world.query::<&mut Unit>();
+            for mut u in q.iter_mut(world) {
+                if u.kind == UnitKind::Peasant {
+                    u.carrying = 25;
+                }
+            }
+            // burn the keep so the staged damage smoke/fire shows
+            let mut q = world.query::<&mut saladin_protocol::Building>();
+            for mut b in q.iter_mut(world) {
+                if b.kind == saladin_sim::BuildingKind::Keep {
+                    b.hp = saladin_sim::building_def(b.kind).max_hp / 5;
+                }
+            }
+            let victims: Vec<Entity> = {
+                let mut q = world.query_filtered::<(Entity, &Unit), bevy::prelude::With<GameId>>();
+                q.iter(world)
+                    .filter(|(_, u)| u.kind != UnitKind::Peasant && !u.has_target)
+                    .map(|(e, _)| e)
+                    .take(3)
+                    .collect()
+            };
+            for e in victims {
+                world.despawn(e);
             }
         }
         return;
