@@ -402,7 +402,7 @@ fn main() {
         }
         Ok("sp") => {
             app.insert_resource(ui::menu::MenuScreen::Singleplayer);
-            app.add_systems(Update, auto_screenshot);
+            app.add_systems(Update, (auto_screenshot, debug_layout));
         }
         Ok("menu") => {
             app.add_systems(Update, auto_screenshot);
@@ -420,11 +420,11 @@ fn main() {
             app.insert_resource(ui::pause::PauseScreen::Menu);
             app.add_systems(Update, auto_screenshot);
         }
-        Ok("research") | Ok("market") => {
+        Ok("research") | Ok("market") | Ok("keep") => {
             // conjure + select a building so the screenshot shows its panel
             // (research on the blacksmith / trade on the market)
             app.insert_state(GameState::Playing);
-            app.add_systems(Update, (auto_screenshot, auto_select_building));
+            app.add_systems(Update, (auto_screenshot, auto_select_building, debug_layout));
         }
         Ok("layout") => {
             // in-game + computed-rect dump for HUD layout debugging
@@ -457,10 +457,10 @@ fn main() {
 fn auto_select_building(world: &mut World) {
     use saladin_protocol::{Building, MatchId, NextEntityId, Owner, Pos};
     use saladin_sim::{BuildingKind, building_def};
-    let kind = if std::env::var("SALADIN_AUTO").as_deref() == Ok("market") {
-        BuildingKind::Market
-    } else {
-        BuildingKind::Blacksmith
+    let kind = match std::env::var("SALADIN_AUTO").as_deref() {
+        Ok("market") => BuildingKind::Market,
+        Ok("keep") => BuildingKind::Keep,
+        _ => BuildingKind::Blacksmith,
     };
     let t = world.resource::<Time>().elapsed_secs();
     if t < 3.0 {
@@ -477,6 +477,10 @@ fn auto_select_building(world: &mut World) {
                 let mut q = world.query::<(&Pos, &Building)>();
                 q.iter(world).find(|(_, b)| b.kind == BuildingKind::Keep).map(|(p, _)| p.pos)
             };
+            if kind == BuildingKind::Keep {
+                // the founded keep already exists; selection block below finds it
+                return;
+            }
             let Some(kp) = keep else { return };
             let pos = saladin_sim::V2::new(kp.x + saladin_sim::fx!("4"), kp.y + saladin_sim::fx!("2"));
             let id = world.resource_mut::<NextEntityId>().alloc();
@@ -507,6 +511,8 @@ fn debug_layout(
     mut done: Local<bool>,
     q_bar: Query<(&bevy::ui::ComputedNode, &bevy::ui::UiGlobalTransform), With<ui::hud::BottomCenter>>,
     q_text: Query<(&bevy::ui::ComputedNode, &bevy::ui::UiGlobalTransform, &Text)>,
+    q_btn: Query<(&bevy::ui::ComputedNode, &bevy::ui::UiGlobalTransform, &Children), With<Button>>,
+    q_txt_of: Query<&Text>,
 ) {
     if *done || time.elapsed_secs() < 5.0 {
         return;
@@ -516,9 +522,17 @@ fn debug_layout(
         eprintln!("BAR size={:?} pos={:?} inv_scale={}", n.size(), t.translation, n.inverse_scale_factor());
     }
     for (n, t, txt) in &q_text {
-        if txt.0.contains("RESEARCH") || txt.0.contains("BLACKSMITH") || txt.0 == "Demolish" || txt.0 == "Mail Armor" {
+        if txt.0.len() < 24 {
             eprintln!("TEXT '{}' size={:?} pos={:?}", txt.0, n.size(), t.translation);
         }
+    }
+    for (n, t, children) in &q_btn {
+        let label = children
+            .iter()
+            .find_map(|c| q_txt_of.get(c).ok())
+            .map(|t| t.0.clone())
+            .unwrap_or_default();
+        eprintln!("BTN '{}' size={:?} pos={:?}", label, n.size(), t.translation);
     }
 }
 

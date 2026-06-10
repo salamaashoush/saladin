@@ -30,7 +30,7 @@ const SEA: Fx = crate::fx!("0.38");
 const RIVER_SCALE: Fx = crate::fx!("0.013");
 const RIVER_HALF_W: Fx = crate::fx!("0.017");
 // archipelago: large-scale blob mask that shatters the continent
-const ISLAND_SCALE: Fx = crate::fx!("0.02");
+const ISLAND_SCALE: Fx = crate::fx!("0.015");
 const FORD_SCALE: Fx = crate::fx!("0.05");
 const FORD_T: Fx = crate::fx!("0.58");
 // cliffs: where the height field steps too fast for a walker
@@ -110,7 +110,7 @@ fn height_at(base: u32, island_gain: Fx, x: Fx, y: Fx) -> Fx {
     if island_gain > Fx::ZERO {
         let mask = fbm(x * ISLAND_SCALE + Fx::from_num(7), y * ISLAND_SCALE + Fx::from_num(13), base ^ 0x15a7, 3);
         // blobs keep their height; the straits between them sink to sea floor
-        let blob = ((mask - crate::fx!("0.3")) * crate::fx!("2.4")).clamp(Fx::ZERO, Fx::ONE);
+        let blob = ((mask - crate::fx!("0.12")) * crate::fx!("1.9")).clamp(Fx::ZERO, Fx::ONE);
         h *= Fx::ONE - island_gain + island_gain * blob;
     }
     h * continent(base, x, y)
@@ -524,6 +524,69 @@ pub fn start_point(seed: u32, slot: usize) -> V2 {
         }
     }
     find_land_near(seed, c.x, c.y)
+}
+
+/// A safe keep site near the slot's start: every footprint tile passable,
+/// buildable, on the DOMINANT region, with open ground around it (peasants
+/// must reach the deposit edge from all sides — a keep wedged against
+/// cliffs/water strands its economy).
+pub fn find_keep_site(seed: u32, slot: usize, footprint: i32) -> V2 {
+    let start = start_point(seed, slot);
+    let main = dominant_region(seed);
+    let grid = region_grid(seed);
+    let half = crate::fx!("0.5");
+    let fp_lo = -(footprint / 2);
+    let fp_hi = footprint / 2 + footprint % 2;
+    let sx = start.x.to_num::<i32>();
+    let sy = start.y.to_num::<i32>();
+    let ok = |cx: i32, cy: i32| -> bool {
+        // footprint entirely on the mainland
+        for dy in fp_lo..fp_hi {
+            for dx in fp_lo..fp_hi {
+                let (tx, ty) = (cx + dx, cy + dy);
+                if tx < 4 || ty < 4 || tx >= WORLD_SIZE - 4 || ty >= WORLD_SIZE - 4 {
+                    return false;
+                }
+                if grid[(ty * WORLD_SIZE + tx) as usize] != main {
+                    return false;
+                }
+                let b = sample_terrain(seed, Fx::from_num(tx) + half, Fx::from_num(ty) + half).biome;
+                if !crate::biomes::biome_buildable(b) {
+                    return false;
+                }
+            }
+        }
+        // open ground: most tiles within radius 4 walkable on the mainland
+        let mut open = 0;
+        for dy in -4..=4i32 {
+            for dx in -4..=4i32 {
+                let (tx, ty) = (cx + dx, cy + dy);
+                if tx >= 0
+                    && ty >= 0
+                    && tx < WORLD_SIZE
+                    && ty < WORLD_SIZE
+                    && grid[(ty * WORLD_SIZE + tx) as usize] == main
+                {
+                    open += 1;
+                }
+            }
+        }
+        open >= 58 // ~72% of the 9x9 block
+    };
+    for r in 0..WORLD_SIZE {
+        for dy in -r..=r {
+            for dx in -r..=r {
+                if dx.abs().max(dy.abs()) != r {
+                    continue;
+                }
+                let (cx, cy) = (sx + dx, sy + dy);
+                if ok(cx, cy) {
+                    return V2::new(Fx::from_num(cx) + half, Fx::from_num(cy) + half);
+                }
+            }
+        }
+    }
+    start
 }
 
 /// Top up the scatter so EVERY spawn slot has the guaranteed minimum of wood /

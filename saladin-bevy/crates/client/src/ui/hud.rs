@@ -74,34 +74,6 @@ pub fn setup_hud(mut commands: Commands, font: Res<UiFont>, assets: Res<UiAssets
             }
         });
 
-    // top-right match buttons
-    commands
-        .spawn((
-            HudRoot,
-            Node {
-                position_type: PositionType::Absolute,
-                top: Val::Px(24.0),
-                right: Val::Px(5.0),
-                flex_direction: FlexDirection::Row,
-                column_gap: Val::Px(4.0),
-                ..default()
-            },
-        ))
-        .with_children(|p| {
-            tool_button(p, &font, &assets, UiAction::AddAi, "Add AI", None, BtnStyle::chip());
-            tool_button(p, &font, &assets, UiAction::PauseToggle, "Pause", None, BtnStyle::chip());
-            tool_button(p, &font, &assets, UiAction::SaveQuit, "Save+Quit", None, BtnStyle::chip());
-            tool_button(
-                p,
-                &font,
-                &assets,
-                UiAction::LeaveMatch,
-                "Leave",
-                None,
-                BtnStyle { tint: TINT_RED, ..BtnStyle::chip() },
-            );
-        });
-
     // bottom bar containers (left card / center build bar; right = minimap viewport)
     commands.spawn((
         HudRoot,

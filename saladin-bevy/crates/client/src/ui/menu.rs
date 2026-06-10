@@ -7,7 +7,7 @@
 use super::assets::UiAssets;
 use super::text_input::{TextInput, text_input};
 use super::theme::*;
-use super::widgets::{Disabled, label, panel_bg, screen_button, wide_button};
+use super::widgets::{Disabled, label, option_button, panel_bg, backdrop_bg, screen_button, wide_button};
 use crate::{GameState, MenuConfig, UiFont, config};
 use bevy::prelude::*;
 use saladin_protocol::JoinIntent;
@@ -90,7 +90,7 @@ pub fn setup_menu(mut commands: Commands, assets: Res<UiAssets>) {
             justify_content: JustifyContent::Center,
             ..default()
         },
-        ImageNode::new(assets.backdrop.clone()),
+        backdrop_bg(&assets),
     ));
 }
 
@@ -216,41 +216,45 @@ fn main_screen(p: &mut ChildSpawnerCommands, font: &UiFont, assets: &UiAssets) {
 
 fn sp_screen(p: &mut ChildSpawnerCommands, font: &UiFont, assets: &UiAssets, cfg: &MenuConfig, preview: Handle<Image>) {
     label(p, font, "SKIRMISH", FONT_LG, GOLD);
+    p.spawn(Node { height: Val::Px(8.0), ..default() });
 
-    label(p, font, "Faction", FONT_SM, TEXT_DIM);
-    p.spawn((Node { flex_direction: FlexDirection::Row, column_gap: Val::Px(4.0), ..default() },))
-        .with_children(|p| {
-            for (f, name) in [(Faction::Ayyubid, "Ayyubids"), (Faction::Crusader, "Crusaders")] {
-                menu_button(p, font, assets, MenuAction::Faction(f), name, cfg.faction == f, false);
-            }
-        });
+    form_row(p, font, "Faction", |p| {
+        for (f, name) in [(Faction::Ayyubid, "Ayyubids"), (Faction::Crusader, "Crusaders")] {
+            option_button(p, font, assets, MenuAction::Faction(f), name, cfg.faction == f, 110.0);
+        }
+    });
 
-    label(p, font, &format!("Opponents: {}", cfg.opponents), FONT_SM, TEXT_DIM);
-    p.spawn((Node { flex_direction: FlexDirection::Row, column_gap: Val::Px(4.0), ..default() },))
-        .with_children(|p| {
-            menu_button(p, font, assets, MenuAction::RemoveOpponent, "-", false, cfg.opponents <= 1);
-            menu_button(p, font, assets, MenuAction::AddOpponent, "+", false, cfg.opponents >= 7);
-        });
+    let opponents = format!("{}", cfg.opponents);
+    form_row(p, font, "Opponents", |p| {
+        option_button(p, font, assets, MenuAction::RemoveOpponent, "-", false, 36.0);
+        p.spawn((
+            Node {
+                width: Val::Px(34.0),
+                justify_content: JustifyContent::Center,
+                align_items: AlignItems::Center,
+                ..default()
+            },
+        ))
+        .with_children(|p| label(p, font, &opponents, FONT_MD, TEXT));
+        option_button(p, font, assets, MenuAction::AddOpponent, "+", false, 36.0);
+    });
 
-    label(p, font, "Difficulty", FONT_SM, TEXT_DIM);
-    p.spawn((Node { flex_direction: FlexDirection::Row, column_gap: Val::Px(4.0), ..default() },))
-        .with_children(|p| {
-            for (d, name) in [
-                (AiDifficulty::Easy, "Easy"),
-                (AiDifficulty::Normal, "Normal"),
-                (AiDifficulty::Hard, "Hard"),
-            ] {
-                menu_button(p, font, assets, MenuAction::Difficulty(d), name, cfg.difficulty == d, false);
-            }
-        });
+    form_row(p, font, "Difficulty", |p| {
+        for (d, name) in [
+            (AiDifficulty::Easy, "Easy"),
+            (AiDifficulty::Normal, "Normal"),
+            (AiDifficulty::Hard, "Hard"),
+        ] {
+            option_button(p, font, assets, MenuAction::Difficulty(d), name, cfg.difficulty == d, 90.0);
+        }
+    });
 
-    label(p, font, "Map", FONT_SM, TEXT_DIM);
-    p.spawn((Node { flex_direction: FlexDirection::Row, column_gap: Val::Px(4.0), ..default() },))
-        .with_children(|p| {
-            for (i, preset) in saladin_sim::MAP_PRESETS.iter().enumerate() {
-                menu_button(p, font, assets, MenuAction::Preset(i as u8), preset.label, cfg.preset == i as u8, false);
-            }
-        });
+    form_row(p, font, "Map", |p| {
+        for (i, preset) in saladin_sim::MAP_PRESETS.iter().enumerate() {
+            option_button(p, font, assets, MenuAction::Preset(i as u8), preset.label, cfg.preset == i as u8, 104.0);
+        }
+    });
+
     label(
         p,
         font,
@@ -258,10 +262,39 @@ fn sp_screen(p: &mut ChildSpawnerCommands, font: &UiFont, assets: &UiAssets, cfg
         10.0,
         TEXT_DIM,
     );
+    p.spawn(Node { height: Val::Px(4.0), ..default() });
     super::preview::preview_node(p, preview);
-    menu_button(p, font, assets, MenuAction::CycleSeed, &format!("New seed (now: {})", cfg.seed), false, false);
-    menu_button(p, font, assets, MenuAction::Start, "Begin the Campaign", false, false);
-    menu_button(p, font, assets, MenuAction::Goto(MenuScreen::Main), "Back", false, false);
+    p.spawn(Node { height: Val::Px(4.0), ..default() });
+    wide_button(p, font, assets, MenuAction::CycleSeed, &format!("New seed (now: {})", cfg.seed), false, false);
+    p.spawn(Node { height: Val::Px(8.0), ..default() });
+    wide_button(p, font, assets, MenuAction::Start, "Begin the Campaign", false, false);
+    wide_button(p, font, assets, MenuAction::Goto(MenuScreen::Main), "Back", false, false);
+}
+
+/// One aligned settings row: fixed-width dim label, controls to its right.
+fn form_row(
+    p: &mut ChildSpawnerCommands,
+    font: &UiFont,
+    title: &str,
+    controls: impl FnOnce(&mut ChildSpawnerCommands),
+) {
+    p.spawn((Node {
+        width: Val::Px(560.0),
+        flex_direction: FlexDirection::Row,
+        align_items: AlignItems::Center,
+        column_gap: Val::Px(6.0),
+        margin: UiRect::vertical(Val::Px(3.0)),
+        ..default()
+    },))
+        .with_children(|p| {
+            p.spawn((Node {
+                width: Val::Px(96.0),
+                justify_content: JustifyContent::FlexEnd,
+                ..default()
+            },))
+                .with_children(|p| label(p, font, title, FONT_SM, TEXT_DIM));
+            controls(p);
+        });
 }
 
 fn mp_screen(p: &mut ChildSpawnerCommands, font: &UiFont, assets: &UiAssets, form: &MpForm, err: &MpError) {
@@ -538,7 +571,7 @@ pub fn setup_lobby(mut commands: Commands, assets: Res<UiAssets>) {
             justify_content: JustifyContent::Center,
             ..default()
         },
-        ImageNode::new(assets.backdrop.clone()),
+        backdrop_bg(&assets),
     ));
 }
 

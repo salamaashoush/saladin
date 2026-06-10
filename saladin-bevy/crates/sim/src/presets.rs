@@ -72,7 +72,7 @@ pub const MAP_PRESETS: [MapPreset; 4] = [
         label: "Archipelago",
         description: "A sea of scattered islands - control the straits.",
         bias: MapBias {
-            sea_shift: crate::fx!("0.03"),
+            sea_shift: crate::fx!("0"),
             moist_shift: crate::fx!("0.06"),
             elev_gain: crate::fx!("1.0"),
             river_gain: crate::fx!("0.3"),

@@ -74,6 +74,13 @@ pub fn panel_bg_dark(assets: &UiAssets) -> ImageNode {
         .with_mode(NodeImageMode::Sliced(UiAssets::panel_slicer()))
 }
 
+/// Fullscreen leather backdrop. MUST be Stretch: the default Auto mode makes
+/// the image impose its 1:1 aspect on the node, squaring the "fullscreen"
+/// root and leaving bare side bars.
+pub fn backdrop_bg(assets: &UiAssets) -> ImageNode {
+    ImageNode::new(assets.backdrop.clone()).with_mode(NodeImageMode::Stretch)
+}
+
 // ── bronze buttons ───────────────────────────────────────────────────────────
 
 /// Per-state ImageNode tints (the bronze plate texture is shared).
@@ -205,6 +212,36 @@ pub fn screen_button<C: Component>(
     disabled: bool,
 ) {
     screen_button_sized(p, font, assets, action, title, active, disabled, None);
+}
+
+/// Compact fixed-width toggle (option rows: factions, difficulties, presets).
+pub fn option_button<C: Component>(
+    p: &mut ChildSpawnerCommands,
+    font: &UiFont,
+    assets: &UiAssets,
+    action: C,
+    title: &str,
+    active: bool,
+    width: f32,
+) {
+    let style = BtnStyle { active, disabled: false, ..default() };
+    let tint = resolved_tint(&style);
+    p.spawn((
+        Button,
+        action,
+        button_image(assets, tint),
+        BtnTint(tint),
+        Disabled(false),
+        Node {
+            width: Val::Px(width),
+            min_height: Val::Px(32.0),
+            padding: UiRect::axes(Val::Px(10.0), Val::Px(6.0)),
+            justify_content: JustifyContent::Center,
+            align_items: AlignItems::Center,
+            ..default()
+        },
+    ))
+    .with_children(|p| label(p, font, title, FONT_SM, TEXT));
 }
 
 /// Fixed-width variant: stacked menu lists read better when every button is

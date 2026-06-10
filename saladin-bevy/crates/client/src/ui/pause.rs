@@ -5,7 +5,7 @@
 
 use super::assets::UiAssets;
 use super::theme::*;
-use super::widgets::{Disabled, label, panel_bg, panel_bg_dark, screen_button, wide_button};
+use super::widgets::{Disabled, backdrop_bg, label, panel_bg, panel_bg_dark, screen_button, wide_button};
 use crate::{GameState, Multiplayer, PendingSave, UiFont, config};
 use bevy::prelude::*;
 
@@ -272,7 +272,7 @@ pub fn setup_loading(
                 row_gap: Val::Px(8.0),
                 ..default()
             },
-            ImageNode::new(assets.backdrop.clone()),
+            backdrop_bg(&assets),
         ))
         .with_children(|p| {
             p.spawn((

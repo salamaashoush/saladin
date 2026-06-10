@@ -4,10 +4,10 @@
 use super::widgets::Disabled;
 use crate::input::InputMode;
 use crate::selection::{SelectedBuilding, Selection};
-use crate::{GameState, LocalInput, LocalPlayer, MenuConfig, Multiplayer};
+use crate::{LocalInput, LocalPlayer};
 use bevy::prelude::*;
 use saladin_protocol::PlayerCommand;
-use saladin_sim::{BuildingKind, ResourceType, Stance, UnitKind, enemy_faction};
+use saladin_sim::{BuildingKind, ResourceType, Stance, UnitKind};
 
 pub const MARKET_LOT: i32 = 20;
 
@@ -23,10 +23,6 @@ pub enum UiAction {
     Ungarrison,
     DemolishSelected,
     Stance(Stance),
-    AddAi,
-    LeaveMatch,
-    SaveQuit,
-    PauseToggle,
 }
 
 /// Which build-bar tab is open.
@@ -37,16 +33,11 @@ pub struct BuildTab(pub usize);
 pub fn handle_actions(
     q: Query<(&Interaction, &UiAction, &Disabled), Changed<Interaction>>,
     local: Res<LocalPlayer>,
-    cfg: Res<MenuConfig>,
-    multiplayer: Res<Multiplayer>,
     selection: Res<Selection>,
     sel_building: Res<SelectedBuilding>,
     mut tab: ResMut<BuildTab>,
     mut mode: ResMut<InputMode>,
     mut input: ResMut<LocalInput>,
-    mut next: ResMut<NextState<GameState>>,
-    mut pending_save: ResMut<crate::PendingSave>,
-    mut next_ai_id: Local<u64>,
 ) {
     let me = local.0;
     for (interaction, action, disabled) in &q {
@@ -86,30 +77,6 @@ pub fn handle_actions(
                     input.0.push(PlayerCommand::SetStance { player_id: me, unit, stance });
                 }
             }
-            UiAction::AddAi => {
-                if *next_ai_id == 0 {
-                    *next_ai_id = 2000;
-                }
-                input.0.push(PlayerCommand::AddAi {
-                    player_id: *next_ai_id,
-                    host: me,
-                    difficulty: cfg.difficulty,
-                    faction: enemy_faction(cfg.faction),
-                    match_id: 1,
-                });
-                *next_ai_id += 1;
-            }
-            UiAction::LeaveMatch => {
-                if !multiplayer.0 {
-                    next.set(GameState::Menu);
-                }
-            }
-            UiAction::SaveQuit => {
-                if !multiplayer.0 {
-                    pending_save.0 = true;
-                }
-            }
-            UiAction::PauseToggle => input.0.push(PlayerCommand::Pause { player_id: me }),
         }
     }
 }

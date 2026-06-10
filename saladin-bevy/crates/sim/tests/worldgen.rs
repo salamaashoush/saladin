@@ -93,6 +93,64 @@ fn rivers_and_cliffs_leave_one_dominant_landmass() {
 }
 
 #[test]
+fn keep_sites_are_buildable_open_and_on_the_mainland() {
+    for base in 1..=25u32 {
+        for preset in 0..4u8 {
+            let seed = compose_seed(base, preset);
+            let main = dominant_region(seed);
+            for slot in 0..8 {
+                let site = find_keep_site(seed, slot, 3);
+                let (sx, sy) = (site.x.to_num::<i32>(), site.y.to_num::<i32>());
+                for dy in -1..=1 {
+                    for dx in -1..=1 {
+                        let (tx, ty) = (sx + dx, sy + dy);
+                        assert!(
+                            is_passable(seed, tx, ty),
+                            "seed {base} preset {preset} slot {slot}: keep tile ({tx},{ty}) impassable"
+                        );
+                        assert_eq!(
+                            region_at(seed, Fx::from_num(tx) + fx!("0.5"), Fx::from_num(ty) + fx!("0.5")),
+                            main,
+                            "seed {base} preset {preset} slot {slot}: keep off the mainland"
+                        );
+                        let b = sample_terrain(
+                            seed,
+                            Fx::from_num(tx) + fx!("0.5"),
+                            Fx::from_num(ty) + fx!("0.5"),
+                        )
+                        .biome;
+                        assert!(
+                            biome_buildable(b),
+                            "seed {base} preset {preset} slot {slot}: keep tile on {b:?}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn archipelago_keeps_playable_land() {
+    for base in [1u32, 5, 7, 13, 21, 34, 55, 99] {
+        let seed = compose_seed(base, 3);
+        let grid = region_grid(seed);
+        let main = dominant_region(seed);
+        let (mut pass, mut dom) = (0u32, 0u32);
+        for &r in grid {
+            if r != u16::MAX {
+                pass += 1;
+                if r == main {
+                    dom += 1;
+                }
+            }
+        }
+        assert!(pass >= 5000, "seed {base}: archipelago nearly all water ({pass} land tiles)");
+        assert!(dom >= 2500, "seed {base}: main island too small ({dom} tiles)");
+    }
+}
+
+#[test]
 fn rivers_with_fords_exist_in_river_valley() {
     let mut river_tiles = 0;
     let mut ford_tiles = 0;

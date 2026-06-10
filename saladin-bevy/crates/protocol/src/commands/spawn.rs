@@ -134,13 +134,15 @@ pub(crate) fn found_player(world: &mut World, player_id: u64, name: &str, factio
         q.iter(world).filter(|(_, m)| m.0 == match_id).map(|(p, _)| p.slot as i32).collect()
     };
     let slot = alloc_slot(&used, MAX_PLAYERS as i32).max(0);
-    // snapped to the dominant landmass — same anchor the fair-start scatter used
-    let corner = start_point(seed, slot as usize);
+    let keep_fp = building_def(BuildingKind::Keep).footprint;
+    // validated site on the dominant landmass with open ground around it (a
+    // keep against cliffs/water strands the deposit economy); the occupancy
+    // pass then only needs to dodge other players' buildings
+    let site = find_keep_site(seed, slot as usize, keep_fp);
 
     let occ = building_occupancy(world, true);
     let passable = |tx: i32, ty: i32| is_passable(seed, tx, ty) && !occ.contains(&tile_key(tx, ty));
-    let keep_fp = building_def(BuildingKind::Keep).footprint;
-    let base = find_buildable_near(corner.x, corner.y, keep_fp, passable);
+    let base = find_buildable_near(site.x, site.y, keep_fp, passable);
 
     let keep_id = spawn_building(world, player_id, BuildingKind::Keep, base, match_id);
 
