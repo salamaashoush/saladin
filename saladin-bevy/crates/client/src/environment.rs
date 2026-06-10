@@ -23,9 +23,11 @@ pub struct OceanPlane;
 pub struct SunLight;
 
 const SKY_RADIUS: f32 = 1200.0;
-// Sea sits just below the shoreline render height (render_height(SEA) == 0,
-// water tiles dip to about -0.275 at TERRAIN_SCALE 0.5).
-const OCEAN_Y: f32 = -0.05;
+// The terrain's flat sea surface sits at -0.43*TERRAIN_SCALE; the backdrop
+// disc must stay strictly BELOW it everywhere inside the map, or it covers
+// the real water and paints a flat second blue with a hard mesh-intersection
+// edge (the infamous "two blues" bug).
+const OCEAN_Y: f32 = -0.30;
 const FOG_START: f32 = 260.0;
 const FOG_END: f32 = 1100.0;
 
@@ -100,15 +102,12 @@ fn build_sky_mesh() -> Mesh {
 }
 
 fn ocean_color(d: f32) -> [f32; 4] {
-    // match the terrain mesh's water gradient so the map edge has no seam
-    let deep = lin(0x2f7494);
-    let shallow = lin(0x3a86a8);
+    // Safety floor only: the generated ocean apron covers everything the
+    // camera can reach, so this stays the flat sea hue and melts into the
+    // horizon far beyond the fog.
+    let sea = lin(0x4ea4bd);
     let haze = horizon();
-
-    // Near the centre (under the camera): lighter shallow water. Farther: deep teal.
-    let mut col = shallow.lerp(deep, smoothstep(20.0, 320.0, d));
-    // Far out, melt into the horizon haze to kill the visible plane edge.
-    col = col.lerp(haze, smoothstep(800.0, 2600.0, d));
+    let col = sea.lerp(haze, smoothstep(900.0, 2600.0, d));
     [col.x, col.y, col.z, 1.0]
 }
 

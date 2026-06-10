@@ -78,8 +78,8 @@ const BIOME_DEFS: [BiomeDef; 15] = [
     // DeepWater
     BiomeDef {
         label: "Sea",
-        color: 0x1f5673,
-        shade: 0x103a52,
+        color: 0x4093ad,
+        shade: 0x357f9a,
         passable: false,
         buildable: false,
         move_cost_mul: Fx::MAX,
@@ -90,8 +90,8 @@ const BIOME_DEFS: [BiomeDef; 15] = [
     // ShallowWater
     BiomeDef {
         label: "Shallows",
-        color: 0x3a86a8,
-        shade: 0x2a6f8f,
+        color: 0x5fb0c6,
+        shade: 0x4a9cb4,
         passable: false,
         buildable: false,
         move_cost_mul: Fx::MAX,
@@ -222,8 +222,8 @@ const BIOME_DEFS: [BiomeDef; 15] = [
     // River — carved freshwater channel; impassable except at fords
     BiomeDef {
         label: "River",
-        color: 0x3e8fb5,
-        shade: 0x2c7299,
+        color: 0x55a8c4,
+        shade: 0x4093ad,
         passable: false,
         buildable: false,
         move_cost_mul: Fx::MAX,

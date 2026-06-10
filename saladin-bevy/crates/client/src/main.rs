@@ -394,6 +394,20 @@ fn main() {
     {
         *app.world_mut().resource_mut::<input::InputMode>() = input::InputMode::Build(kind);
     }
+    // SALADIN_ZOOM=<view_size> presets the camera zoom (edge-of-world shots)
+    if let Ok(s) = std::env::var("SALADIN_ZOOM")
+        && let Ok(v) = s.parse::<f32>()
+    {
+        let v = v.clamp(10.0, 85.0);
+        let world = app.world_mut();
+        world.resource_mut::<camera::CameraState>().view_size = v;
+        let mut q = world.query_filtered::<&mut Projection, bevy::prelude::With<camera::GameCamera>>();
+        for mut proj in q.iter_mut(world) {
+            if let Projection::Orthographic(o) = &mut *proj {
+                o.scaling_mode = bevy::camera::ScalingMode::FixedVertical { viewport_height: v * 2.0 };
+            }
+        }
+    }
     // SALADIN_SEED / SALADIN_PRESET override the menu defaults (screenshot runs)
     if let Ok(s) = std::env::var("SALADIN_SEED")
         && let Ok(seed) = s.parse::<u32>()

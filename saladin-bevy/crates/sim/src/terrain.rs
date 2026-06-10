@@ -448,9 +448,13 @@ pub fn node_reachable(seed: u32, from: V2, node: V2) -> bool {
 }
 
 /// Render elevation in world units (client mesh only — never feeds the sim).
+/// Water renders as a flat SEA SURFACE (short shoreline shelf, then constant
+/// level): the sea is a body of water, not a terrain dent — and the backdrop
+/// ocean disc must never poke through inside the map.
 pub fn render_height(h: Fx, emphasis: Fx, elev_gain: Fx) -> Fx {
     if h < SEA {
-        return crate::fx!("-0.5") * ((SEA - h) / SEA) - crate::fx!("0.05");
+        let shelf = ((SEA - h) / crate::fx!("0.05")).min(Fx::ONE);
+        return crate::fx!("-0.4") * shelf - crate::fx!("0.03");
     }
     let base = (h - SEA) * Fx::from_num(9);
     let relief = base + base * base * crate::fx!("0.18");

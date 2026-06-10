@@ -1,9 +1,10 @@
 use bevy::asset::RenderAssetUsages;
 use bevy::mesh::{Indices, PrimitiveTopology};
 use bevy::prelude::*;
+use saladin_sim::noise::fbm;
 use saladin_sim::{
-    Biome, Fx, WORLD_SIZE, biome_def, biome_height_emphasis, hash2, render_height, sample_terrain,
-    seed_bias,
+    Biome, Fx, WORLD_SIZE, biome_def, biome_height_emphasis, hash2, render_height,
+    sample_terrain, seed_bias,
 };
 
 /// Precomputed per-tile render heights — sampled once at match start so the hot
@@ -79,11 +80,24 @@ fn smooth01(t: f32) -> f32 {
 /// Water shading by DISTANCE TO LAND, not seabed depth — the seabed height
 /// noise made depth-tinting blotch pale patches mid-ocean. A narrow bright
 /// band hugs every coastline; the open sea is one even blue.
-fn water_color(biome: Biome, shore_dist: f32) -> [f32; 3] {
-    let shore = hex_linear(0x7cc3d6);
-    let sea_blue = hex_linear(0x3a86a8);
-    let base = if biome == Biome::River { hex_linear(0x4a96b8) } else { sea_blue };
-    lerp3(shore, base, smooth01(shore_dist / 2.5))
+/// Open water: foam crest at the waterline, a wide turquoise shelf easing
+/// into the sea hue, then large slow SWELL bands so the open ocean reads as
+/// living water instead of a flat fill.
+fn water_color(biome: Biome, shore_dist: f32, swell: f32) -> [f32; 3] {
+    let foam = hex_linear(0xd6f0f4);
+    let shore = hex_linear(0x8fd6e2);
+    let sea_blue = hex_linear(0x4ea4bd);
+    let base = if biome == Biome::River { hex_linear(0x5cacc6) } else { sea_blue };
+    // a WIDE easing — the band must read as a gradient at gameplay zoom,
+    // never as a contour line
+    let mut c = lerp3(shore, base, smooth01(shore_dist / 9.0));
+    // foam crest hugging the land edge
+    let f = 1.0 - smooth01(shore_dist / 1.2);
+    c = lerp3(c, foam, f * 0.6);
+    // swell: +-7% brightness in long bands, fading out near the beach
+    let open = smooth01((shore_dist - 1.5) / 4.0);
+    let m = 1.0 + swell * 0.14 * open;
+    [c[0] * m, c[1] * m, c[2] * m]
 }
 
 /// Biome base blended toward its shade by elevation, plus snow-cap whitening
@@ -108,32 +122,34 @@ fn biome_color(biome: Biome, h_norm: f32, rel_y: f32, sea: f32) -> [f32; 3] {
 /// whole grid (water tiles only; land = 0). Render-side, computed per mesh
 /// build — cheap (one pass over the map).
 fn land_distance_grid(seed: u32) -> Vec<f32> {
-    use std::collections::VecDeque;
-    let n = WORLD_SIZE;
+    // two-pass chamfer transform (3-4 metric): near-Euclidean iso-lines, so
+    // the coast glow is round instead of a Manhattan diamond staircase
+    let n = WORLD_SIZE as usize;
     let pass = saladin_sim::passable_grid(seed);
-    let mut dist = vec![f32::MAX; (n * n) as usize];
-    let mut q = VecDeque::new();
-    for ty in 0..n {
-        for tx in 0..n {
-            let i = (ty * n + tx) as usize;
-            if pass[i] {
-                dist[i] = 0.0;
-                q.push_back((tx, ty));
-            }
+    let big = 1.0e9f32;
+    let mut dist: Vec<f32> =
+        (0..n * n).map(|i| if pass[i] { 0.0 } else { big }).collect();
+    let (ortho, diag) = (1.0f32, 1.4f32);
+    for y in 0..n {
+        for x in 0..n {
+            let i = y * n + x;
+            let mut d = dist[i];
+            if x > 0 { d = d.min(dist[i - 1] + ortho); }
+            if y > 0 { d = d.min(dist[i - n] + ortho); }
+            if x > 0 && y > 0 { d = d.min(dist[i - n - 1] + diag); }
+            if x + 1 < n && y > 0 { d = d.min(dist[i - n + 1] + diag); }
+            dist[i] = d;
         }
     }
-    while let Some((tx, ty)) = q.pop_front() {
-        let d = dist[(ty * n + tx) as usize];
-        for (dx, dy) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
-            let (nx, ny) = (tx + dx, ty + dy);
-            if nx < 0 || ny < 0 || nx >= n || ny >= n {
-                continue;
-            }
-            let i = (ny * n + nx) as usize;
-            if dist[i] > d + 1.0 {
-                dist[i] = d + 1.0;
-                q.push_back((nx, ny));
-            }
+    for y in (0..n).rev() {
+        for x in (0..n).rev() {
+            let i = y * n + x;
+            let mut d = dist[i];
+            if x + 1 < n { d = d.min(dist[i + 1] + ortho); }
+            if y + 1 < n { d = d.min(dist[i + n] + ortho); }
+            if x + 1 < n && y + 1 < n { d = d.min(dist[i + n + 1] + diag); }
+            if x > 0 && y + 1 < n { d = d.min(dist[i + n - 1] + diag); }
+            dist[i] = d;
         }
     }
     dist
@@ -142,17 +158,44 @@ fn land_distance_grid(seed: u32) -> Vec<f32> {
 /// Continuous vertex-colored terrain heightmap: one shared vertex per tile corner
 /// (so there are NO gaps between height steps), colored by biome. Built once from
 /// the seed — the same worldgen the sim uses for passability/resources.
+/// Vertices extend APRON tiles past the playable map: the worldgen samples
+/// fine out there and the continent mask guarantees open ocean, so the whole
+/// visible frame is GENERATED sea — the backdrop disc only survives in the
+/// far haze, never as a flat "second blue" next to real water.
+const APRON: i32 = 224;
+
 pub fn build_terrain_mesh(seed: u32) -> Mesh {
     let n = WORLD_SIZE;
-    let stride = (n + 1) as usize;
+    let lo = -APRON;
+    let hi = n + APRON;
+    let stride = (hi - lo + 1) as usize;
     let mut positions: Vec<[f32; 3]> = Vec::with_capacity(stride * stride);
     let mut colors: Vec<[f32; 4]> = Vec::with_capacity(stride * stride);
     let sun = SUN.normalize();
 
     let sea = SEA_LEVEL + seed_bias(seed).sea_shift.to_num::<f32>();
     let shore_dist = land_distance_grid(seed);
-    for vy in 0..=n {
-        for vx in 0..=n {
+    // two octaves of very low-frequency swell, render-only
+    let swell = |vx: i32, vy: i32| -> f32 {
+        fbm(Fx::from_num(vx) * Fx::lit("0.035"), Fx::from_num(vy) * Fx::lit("0.035"), seed ^ 0x0cea, 2)
+            .to_num::<f32>()
+            + fbm(Fx::from_num(vx) * Fx::lit("0.011"), Fx::from_num(vy) * Fx::lit("0.011"), seed ^ 0x5ea1, 2)
+                .to_num::<f32>()
+            - 1.0 // centre the sum of two 0..1 fields
+    };
+    let water_y = render_height(Fx::ZERO, Fx::ONE, Fx::ONE).to_num::<f32>() * TERRAIN_SCALE;
+    for vy in lo..=hi {
+        for vx in lo..=hi {
+            // Far outside the playable map the continent mask guarantees open
+            // ocean — skip the full terrain stack, it IS sea.
+            if vx < -2 || vy < -2 || vx > n + 2 || vy > n + 2 {
+                positions.push([vx as f32, water_y, vy as f32]);
+                let c = water_color(Biome::DeepWater, 999.0, swell(vx, vy));
+                let dither = (hash2(vx, vy, seed ^ 0x5eed).to_num::<f32>() - 0.5) * 0.07;
+                let m = 0.95 + dither;
+                colors.push([c[0] * m, c[1] * m, c[2] * m, 1.0]);
+                continue;
+            }
             let s = sample_terrain(seed, Fx::from_num(vx), Fx::from_num(vy));
             let h_raw =
                 render_height(s.height, biome_height_emphasis(s.biome), seed_bias(seed).elev_gain).to_num::<f32>();
@@ -160,9 +203,20 @@ pub fn build_terrain_mesh(seed: u32) -> Mesh {
 
             let water = matches!(s.biome, Biome::DeepWater | Biome::ShallowWater | Biome::River);
             let c = if water {
-                let gx = vx.clamp(0, n - 1);
-                let gy = vy.clamp(0, n - 1);
-                water_color(s.biome, shore_dist[(gy * n + gx) as usize])
+                // vertex = corner of up to 4 tiles; average their shore
+                // distances for a smooth field (open sea outside the grid)
+                let (mut acc, mut cnt) = (0.0f32, 0.0f32);
+                for (ox, oy) in [(-1i32, -1i32), (0, -1), (-1, 0), (0, 0)] {
+                    let (gx, gy) = (vx + ox, vy + oy);
+                    if gx >= 0 && gy >= 0 && gx < n && gy < n {
+                        acc += shore_dist[(gy * n + gx) as usize];
+                        cnt += 1.0;
+                    } else {
+                        acc += 64.0;
+                        cnt += 1.0;
+                    }
+                }
+                water_color(s.biome, acc / cnt.max(1.0), swell(vx, vy))
             } else {
                 biome_color(s.biome, s.height.to_num::<f32>(), h_raw, sea)
             };
@@ -184,10 +238,10 @@ pub fn build_terrain_mesh(seed: u32) -> Mesh {
         }
     }
 
-    let idx = |x: i32, y: i32| (y as usize * stride + x as usize) as u32;
-    let mut indices: Vec<u32> = Vec::with_capacity((n * n * 6) as usize);
-    for ty in 0..n {
-        for tx in 0..n {
+    let idx = |x: i32, y: i32| ((y - lo) as usize * stride + (x - lo) as usize) as u32;
+    let mut indices: Vec<u32> = Vec::with_capacity(((hi - lo) * (hi - lo) * 6) as usize);
+    for ty in lo..hi {
+        for tx in lo..hi {
             let (a, b, c, d) = (idx(tx, ty), idx(tx + 1, ty), idx(tx + 1, ty + 1), idx(tx, ty + 1));
             indices.extend_from_slice(&[a, c, b, a, d, c]);
         }
