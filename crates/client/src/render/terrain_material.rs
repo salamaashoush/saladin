@@ -38,7 +38,9 @@ impl Default for TerrainExtension {
 
 impl MaterialExtension for TerrainExtension {
     fn fragment_shader() -> ShaderRef {
-        "shaders/terrain.wgsl".into()
+        // embedded: release binaries ship without an assets directory, and a
+        // missing material shader doesn't degrade — the terrain vanishes
+        "embedded://saladin_client/render/terrain.wgsl".into()
     }
 }
 
@@ -46,6 +48,7 @@ pub struct TerrainMaterialPlugin;
 
 impl Plugin for TerrainMaterialPlugin {
     fn build(&self, app: &mut App) {
+        bevy::asset::embedded_asset!(app, "terrain.wgsl");
         app.add_plugins(MaterialPlugin::<TerrainMaterial>::default());
     }
 }
