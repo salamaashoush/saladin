@@ -124,9 +124,9 @@ struct ClientReport {
 
 fn run_client(addr: &str, is_host: bool, want_clients: usize, units: usize, ticks: u64) -> ClientReport {
     let mut t = TcpTransport::connect(addr, "bench", JoinIntent::Direct).expect("connect");
-    if !is_host {
-        t.set_ready(true);
-    }
+    // everyone readies up — since the wait-for-everyone lobby, all_ready()
+    // includes the host
+    t.set_ready(true);
     // lobby: host waits for the full ready roster then starts
     let deadline = Instant::now() + Duration::from_secs(30);
     while !t.lobby().started {
