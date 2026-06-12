@@ -8,3 +8,4 @@ dist/
 .claude/scheduled_tasks.lock
 spacetime.local.json
 node_modules
+__pycache__/
