@@ -176,6 +176,7 @@ fn main() {
             ,
     )
     .add_plugins(FrameTimeDiagnosticsPlugin::default())
+    .add_plugins(render::terrain_material::TerrainMaterialPlugin)
     .add_plugins(SimPlugin)
     .init_state::<GameState>()
     .insert_resource(net)
@@ -300,6 +301,7 @@ fn main() {
             render::sync::update_wall_arms,
             render::sync::interpolate,
             render::sync::animate_units,
+            render::sync::update_tool_visibility,
             render::sync::animate_animals,
             render::sync::animate_fish,
             render::sync::animate_dying,
@@ -367,7 +369,7 @@ fn main() {
     {
         let data = include_bytes!("../assets/fonts/ui.ttf").to_vec();
         let handle =
-            app.world_mut().resource_mut::<Assets<Font>>().add(Font::from_bytes(data, "ui"));
+            app.world_mut().resource_mut::<Assets<Font>>().add(Font::from_bytes(data));
         app.insert_resource(UiFont(handle));
     }
     // Same timing constraint for the procedurally baked UI art.
@@ -537,23 +539,28 @@ fn setup_visuals(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
+    mut terrain_materials: ResMut<Assets<render::terrain_material::TerrainMaterial>>,
     mut images: ResMut<Assets<Image>>,
     cfg: Res<WorldConfig>,
     ui_assets: Res<ui::assets::UiAssets>,
 ) {
     // low-poly terrain from the same worldgen the sim uses
     let terrain_mesh = meshes.add(terrain::build_terrain_mesh(cfg.seed));
-    let terrain_mat = materials.add(StandardMaterial {
-        base_color: Color::WHITE, // vertex colors carry the biome palette
-        perceptual_roughness: 0.95,
-        ..default()
+    let terrain_mat = terrain_materials.add(render::terrain_material::TerrainMaterial {
+        base: StandardMaterial {
+            base_color: Color::WHITE, // vertex colors carry the biome palette
+            perceptual_roughness: 0.95,
+            ..default()
+        },
+        // slope-aware rock + grain fragment (assets/shaders/terrain.wgsl)
+        extension: render::terrain_material::TerrainExtension::default(),
     });
     commands.spawn((Mesh3d(terrain_mesh), MeshMaterial3d(terrain_mat), Transform::IDENTITY, MatchScoped));
     let field = terrain::build_height_field(cfg.seed);
 
     // vegetation: shared prop meshes, one entity per placement (auto-instanced)
     let props: Vec<Handle<Mesh>> =
-        render::models::props::prop_meshes().into_iter().map(|m| meshes.add(m)).collect();
+        render::models::baked::prop_meshes().into_iter().map(|m| meshes.add(m)).collect();
     let prop_mat = materials.add(StandardMaterial {
         base_color: Color::WHITE,
         perceptual_roughness: 0.95,
@@ -561,14 +568,47 @@ fn setup_visuals(
     });
     for p in vegetation::vegetation_placements(cfg.seed) {
         let y = terrain::height_at(&field, p.x, p.z);
+        // rocks settle into the slope; plants stay upright on it
+        let rocky = p.mesh == render::models::props::PROP_ROCK
+            || p.mesh == render::models::props::PROP_BOULDER;
+        let rot = if rocky {
+            let n = terrain::normal_at(&field, p.x, p.z);
+            Quat::from_rotation_arc(Vec3::Y, Vec3::Y.lerp(n, 0.8).normalize())
+                * Quat::from_rotation_y(p.rot)
+        } else {
+            Quat::from_rotation_y(p.rot)
+        };
+        let sink = if rocky { 0.04 } else { 0.01 };
         commands.spawn((
             Mesh3d(props[p.mesh].clone()),
             MeshMaterial3d(prop_mat.clone()),
-            Transform::from_xyz(p.x, y, p.z)
-                .with_rotation(Quat::from_rotation_y(p.rot))
+            Transform::from_xyz(p.x, y - sink, p.z)
+                .with_rotation(rot)
                 .with_scale(Vec3::splat(p.scale)),
             MatchScoped,
         ));
+    }
+
+    // ruin landmarks: rare deterministic monuments rewarding exploration
+    let landmarks: Vec<Handle<Mesh>> = render::models::baked::landmark_meshes()
+        .into_iter()
+        .map(|m| meshes.add(m))
+        .collect();
+    if !landmarks.is_empty() {
+        for p in vegetation::landmark_placements(cfg.seed, landmarks.len()) {
+            let y = terrain::height_at(&field, p.x, p.z);
+            let n = terrain::normal_at(&field, p.x, p.z);
+            let rot = Quat::from_rotation_arc(Vec3::Y, Vec3::Y.lerp(n, 0.6).normalize())
+                * Quat::from_rotation_y(p.rot);
+            commands.spawn((
+                Mesh3d(landmarks[p.mesh].clone()),
+                MeshMaterial3d(prop_mat.clone()),
+                Transform::from_xyz(p.x, y - 0.05, p.z)
+                    .with_rotation(rot)
+                    .with_scale(Vec3::splat(p.scale)),
+                MatchScoped,
+            ));
+        }
     }
 
     environment::spawn_environment(&mut commands, &mut meshes, &mut materials);

@@ -36,11 +36,29 @@ pub fn build_height_field(seed: u32) -> HeightField {
     HeightField { h, n }
 }
 
-/// O(1) render height at world (x, z) — nearest tile.
+/// O(1) render height at world (x, z) — bilinear between the four nearest
+/// tile-center samples, so props/units track the sloped surface instead of
+/// stepping per tile (nearest-tile left rocks hovering on every hillside).
 pub fn height_at(field: &HeightField, x: f32, z: f32) -> f32 {
-    let tx = (x as i32).clamp(0, field.n - 1);
-    let tz = (z as i32).clamp(0, field.n - 1);
-    field.h[(tz * field.n + tx) as usize]
+    let n = field.n;
+    let fx = (x - 0.5).clamp(0.0, (n - 1) as f32);
+    let fz = (z - 0.5).clamp(0.0, (n - 1) as f32);
+    let (x0, z0) = (fx.floor() as i32, fz.floor() as i32);
+    let (x1, z1) = ((x0 + 1).min(n - 1), (z0 + 1).min(n - 1));
+    let (tx, tz) = (fx - x0 as f32, fz - z0 as f32);
+    let s = |gx: i32, gz: i32| field.h[(gz * n + gx) as usize];
+    let a = s(x0, z0) * (1.0 - tx) + s(x1, z0) * tx;
+    let b = s(x0, z1) * (1.0 - tx) + s(x1, z1) * tx;
+    a * (1.0 - tz) + b * tz
+}
+
+/// Surface normal at (x, z) from finite differences of the height field —
+/// rocks and landmarks tilt onto the slope they sit on.
+pub fn normal_at(field: &HeightField, x: f32, z: f32) -> Vec3 {
+    let e = 0.6;
+    let hx = height_at(field, x + e, z) - height_at(field, x - e, z);
+    let hz = height_at(field, x, z + e) - height_at(field, x, z - e);
+    Vec3::new(-hx, 2.0 * e, -hz).normalize()
 }
 
 fn hex_linear(hex: u32) -> [f32; 3] {
@@ -325,6 +343,7 @@ pub fn build_terrain_mesh(seed: u32) -> Mesh {
         let b = d(x0, y1) * (1.0 - tx) + d(x1, y1) * tx;
         a * (1.0 - ty) + b * ty
     };
+    let is_water = |b: Biome| matches!(b, Biome::DeepWater | Biome::ShallowWater | Biome::River);
     for iy in 0..m {
         for ix in 0..m {
             let i = iy * m + ix;
@@ -333,7 +352,7 @@ pub fn build_terrain_mesh(seed: u32) -> Mesh {
             positions.push([x, h_raw * TERRAIN_SCALE, y]);
 
             let biome = biomes[i];
-            let water = matches!(biome, Biome::DeepWater | Biome::ShallowWater | Biome::River);
+            let water = is_water(biome);
             let sw = swell(x.floor() as i32, y.floor() as i32);
             let c = if water {
                 water_color(biome, shore_at(x, y), sw)
@@ -345,7 +364,51 @@ pub fn build_terrain_mesh(seed: u32) -> Mesh {
                     2,
                 )
                 .to_num::<f32>();
-                biome_color(biome, hnorm[i], h_raw, sea, patch)
+                // cross-blend with the 4 land neighbours so biome borders
+                // read as painted transitions, not vector-hard contours
+                let own = biome_color(biome, hnorm[i], h_raw, sea, patch);
+                let mut acc = [own[0] * 2.0, own[1] * 2.0, own[2] * 2.0];
+                let mut w = 2.0_f32;
+                for (dx, dy) in [(-1i32, 0i32), (1, 0), (0, -1), (0, 1)] {
+                    let (jx, jy) = (ix as i32 + dx, iy as i32 + dy);
+                    if jx < 0 || jy < 0 || jx >= m as i32 || jy >= m as i32 {
+                        continue;
+                    }
+                    let j = jy as usize * m + jx as usize;
+                    if is_water(biomes[j]) || biomes[j] == biome {
+                        continue;
+                    }
+                    let nc = biome_color(biomes[j], hnorm[j], hgrid[j], sea, patch);
+                    acc[0] += nc[0];
+                    acc[1] += nc[1];
+                    acc[2] += nc[2];
+                    w += 1.0;
+                }
+                let mut c = [acc[0] / w, acc[1] / w, acc[2] / w];
+                // steep faces shear through topsoil — blend toward bare rock
+                // so cliffs/ramps read as stone even mid-grassland
+                let gx = (hgrid[i + if ix + 1 < m { 1 } else { 0 }]
+                    - hgrid[i - if ix > 0 { 1 } else { 0 }])
+                    * TERRAIN_SCALE;
+                let gz = (hgrid[i + if iy + 1 < m { m } else { 0 }]
+                    - hgrid[i - if iy > 0 { m } else { 0 }])
+                    * TERRAIN_SCALE;
+                let slope = (gx * gx + gz * gz).sqrt();
+                let rocky = smooth01((slope - 0.55) / 0.7);
+                if rocky > 0.0 && biome != Biome::Snow {
+                    c = lerp3(c, hex_linear(0x867d6e), rocky * 0.75);
+                }
+                // fine grain octave: close-zoom texture the half-tile patch
+                // field is too slow to carry
+                let micro = fbm(
+                    Fx::from_num(x) * Fx::lit("0.43"),
+                    Fx::from_num(y) * Fx::lit("0.43"),
+                    seed ^ 0x317a,
+                    2,
+                )
+                .to_num::<f32>();
+                let g = 1.0 + (micro - 0.5) * 0.09;
+                [c[0] * g, c[1] * g, c[2] * g]
             };
 
             // slope tint from grid neighbours (0.5-step gradient, scaled to

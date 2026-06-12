@@ -1,7 +1,7 @@
 use crate::math::Fx;
 
 /// World is a square of `WORLD_SIZE` tiles (TILE == 1 world unit).
-pub const WORLD_SIZE: i32 = 288;
+pub const WORLD_SIZE: i32 = 384;
 pub const TILE: Fx = crate::fx!("1");
 
 // Scheduled-system rates (ms) and their derived dt in seconds.

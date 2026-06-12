@@ -21,28 +21,19 @@ pub struct TerrainSample {
 }
 
 const H_SCALE: Fx = crate::fx!("0.042");
-const M_SCALE: Fx = crate::fx!("0.03");
 const WARP_SCALE: Fx = crate::fx!("0.02");
 const WARP_AMP: Fx = crate::fx!("9");
-const SEA: Fx = crate::fx!("0.38");
+pub(crate) const SEA: Fx = crate::fx!("0.38");
 
-// rivers: a winding fbm channel carved through the lowlands
-const RIVER_SCALE: Fx = crate::fx!("0.013");
-const RIVER_HALF_W: Fx = crate::fx!("0.017");
 // archipelago: large-scale blob mask that shatters the continent
 const ISLAND_SCALE: Fx = crate::fx!("0.015");
-const FORD_SCALE: Fx = crate::fx!("0.05");
-const FORD_T: Fx = crate::fx!("0.58");
-// cliffs: where the height field steps too fast for a walker
-const CLIFF_STEP: Fx = crate::fx!("0.05");
-const RAMP_SCALE: Fx = crate::fx!("0.06");
-const RAMP_T: Fx = crate::fx!("0.64");
-// mountain passes keep ranges crossable
-const PASS_SCALE: Fx = crate::fx!("0.045");
-const PASS_T: Fx = crate::fx!("0.66");
-// fertile pockets in the dry belt
-const OASIS_SCALE: Fx = crate::fx!("0.06");
-const OASIS_T: Fx = crate::fx!("0.74");
+// ridged-multifractal mountain ranges: fold the noise about its midline so
+// crests chain into ranges instead of fbm blobs
+const RIDGE_SCALE: Fx = crate::fx!("0.022");
+const RIDGE_GAIN: Fx = crate::fx!("0.2");
+// terraced hill flanks (low-poly plateau stylization)
+const TERRACE_LEVELS: Fx = crate::fx!("9");
+const TERRACE_MIX: Fx = crate::fx!("0.55");
 
 const BASE_MASK: u32 = 0x1FFF_FFFF;
 
@@ -80,24 +71,64 @@ fn continent(base: u32, x: Fx, y: Fx) -> Fx {
         3,
     );
     // remap: below the basin threshold sinks to ocean, above plateaus to land
-    let plate = ((c - crate::fx!("0.26")) * crate::fx!("2.4")).clamp(Fx::ZERO, crate::fx!("1.1"));
-    let plates = crate::fx!("0.32") + plate * crate::fx!("0.8");
+    let plate = ((c - crate::fx!("0.36")) * crate::fx!("2.0")).clamp(Fx::ZERO, crate::fx!("1.05"));
+    let plates = crate::fx!("0.24") + plate * crate::fx!("0.74");
     // a weak central dome anchors a mainland so no seed rolls all-ocean; the
     // plates carve bays, peninsulas and side continents around/through it
     let cc = Fx::from_num(WORLD_SIZE) / Fx::from_num(2);
     let dx = x - cc;
     let dy = y - cc;
     let d2 = (dx * dx + dy * dy) / (cc * cc);
-    let dome = (crate::fx!("1.02") - d2 * crate::fx!("1.15")).max(Fx::ZERO) * crate::fx!("0.8");
+    let dome = (crate::fx!("1.02") - d2 * crate::fx!("1.15")).max(Fx::ZERO) * crate::fx!("0.72");
     let m = Fx::from_num(WORLD_SIZE);
-    let edge = (x.min(y).min(m - x).min(m - y) / crate::fx!("16")).clamp(Fx::ZERO, Fx::ONE);
+    let edge = (x.min(y).min(m - x).min(m - y) / crate::fx!("26")).clamp(Fx::ZERO, Fx::ONE);
     plates.max(dome) * edge
 }
 
-/// The raw height field (warp + fbm + island mask + radial falloff) — shared
-/// by the full sample and the cliff gradient probe, which must read the SAME
-/// surface.
-fn height_at(base: u32, island_gain: Fx, x: Fx, y: Fx) -> Fx {
+/// Piecewise-linear control spline (sorted x), exact in fixed point.
+fn spline(pts: &[(Fx, Fx)], x: Fx) -> Fx {
+    if x <= pts[0].0 {
+        return pts[0].1;
+    }
+    for w in pts.windows(2) {
+        let (x0, y0) = w[0];
+        let (x1, y1) = w[1];
+        if x <= x1 {
+            return y0 + (y1 - y0) * ((x - x0) / (x1 - x0));
+        }
+    }
+    pts[pts.len() - 1].1
+}
+
+// continentalness -> base elevation: ocean floor, shelf, a STEEP coast
+// segment (fjords/cliff coasts under the domain warp), then gently rising
+// interior. The 0.44..0.52 jump is where the waterline (SEA 0.38) crosses.
+const SPL_CONT: &[(Fx, Fx)] = &[
+    (crate::fx!("0"), crate::fx!("0.05")),
+    (crate::fx!("0.34"), crate::fx!("0.16")),
+    (crate::fx!("0.48"), crate::fx!("0.3")),
+    (crate::fx!("0.58"), crate::fx!("0.43")),
+    (crate::fx!("0.72"), crate::fx!("0.47")),
+    (crate::fx!("0.92"), crate::fx!("0.52")),
+    (crate::fx!("1.2"), crate::fx!("0.6")),
+];
+// erosion -> relief amplitude: ancient eroded shields are FLAT, young
+// terrain is mountainous (Minecraft 1.18's diversity lever — flat plains
+// seeds and alpine seeds from the same algorithm)
+const SPL_ERO: &[(Fx, Fx)] = &[
+    (crate::fx!("0"), crate::fx!("0.5")),
+    (crate::fx!("0.35"), crate::fx!("0.34")),
+    (crate::fx!("0.6"), crate::fx!("0.16")),
+    (crate::fx!("1"), crate::fx!("0.06")),
+];
+const ERO_SCALE: Fx = crate::fx!("0.012");
+
+/// The raw height field — spline-stacked Minecraft-style: continentalness
+/// picks the base elevation, erosion picks how much relief sits on it, and
+/// peaks-and-valleys (ridged fold) + detail fbm supply that relief. Domain
+/// warp distorts everything organically; terraces stylize the hill flanks.
+/// The worldgrid pipeline then erodes, floods and carves this shape.
+pub(crate) fn height_at(base: u32, island_gain: Fx, x: Fx, y: Fx) -> Fx {
     let half = crate::fx!("0.5");
     let two = crate::fx!("2");
     let wx = (fbm(x * WARP_SCALE, y * WARP_SCALE, base ^ 0x1b56, 3) - half) * two * WARP_AMP;
@@ -105,124 +136,55 @@ fn height_at(base: u32, island_gain: Fx, x: Fx, y: Fx) -> Fx {
         - half)
         * two
         * WARP_AMP;
-    let mut h = fbm((x + wx) * H_SCALE, (y + wy) * H_SCALE, base, 5);
-    h = h * crate::fx!("0.78") + crate::fx!("0.18");
+
+    let c = continent(base, x, y);
+    let ero = fbm((x + wx) * ERO_SCALE + Fx::from_num(211), (y + wy) * ERO_SCALE + Fx::from_num(97), base ^ 0xe705, 3);
+    let detail = fbm((x + wx) * H_SCALE, (y + wy) * H_SCALE, base, 5) - half;
+    let rn = fbm((x + wx) * RIDGE_SCALE, (y + wy) * RIDGE_SCALE, base ^ 0x71d6, 4);
+    let folded = Fx::ONE - (rn * two - Fx::ONE).abs();
+    let pv = folded * folded;
+
+    let base_h = spline(SPL_CONT, c);
+    let amp = spline(SPL_ERO, ero);
+    // land carries the full relief budget; the sea floor stays calm so the
+    // coast contour comes from continentalness, not detail noise
+    let landness = ((base_h - crate::fx!("0.3")) * crate::fx!("7")).clamp(crate::fx!("0.25"), Fx::ONE);
+    let mut h = base_h + (detail * crate::fx!("0.8") + pv * RIDGE_GAIN * crate::fx!("4")) * amp * landness;
+
+    // terraced flanks through the hill band — plateaus read as deliberate
+    // low-poly stylization and feed the cliff detector clean step edges
+    let band = ((h - crate::fx!("0.52")) * crate::fx!("8"))
+        .clamp(Fx::ZERO, Fx::ONE)
+        .min(((crate::fx!("0.86") - h) * crate::fx!("8")).clamp(Fx::ZERO, Fx::ONE));
+    if band > Fx::ZERO {
+        let t = h * TERRACE_LEVELS;
+        let fl = t.floor();
+        let fr = t - fl;
+        let s = fr * fr * (crate::fx!("3") - crate::fx!("2") * fr);
+        let stepped = (fl + s * s) / TERRACE_LEVELS;
+        h += (stepped - h) * TERRACE_MIX * band;
+    }
+    h = h.clamp(Fx::ZERO, crate::fx!("1.0"));
+
     if island_gain > Fx::ZERO {
         let mask = fbm(x * ISLAND_SCALE + Fx::from_num(7), y * ISLAND_SCALE + Fx::from_num(13), base ^ 0x15a7, 3);
         // blobs keep their height; the straits between them sink to sea floor
         let blob = ((mask - crate::fx!("0.12")) * crate::fx!("1.9")).clamp(Fx::ZERO, Fx::ONE);
         h *= Fx::ONE - island_gain + island_gain * blob;
     }
-    h * continent(base, x, y)
+    h
 }
 
+/// One tile/point sample of the generated world. Heights interpolate
+/// bilinearly between the worldgrid's eroded + river-carved corner field;
+/// biome and moisture are per-tile lookups. All the heavy lifting
+/// (erosion, depression filling, drainage rivers, moisture BFS, Whittaker
+/// classification) happened once in `worldgrid::build` — this is O(1).
 pub fn sample_terrain(seed: u32, x: Fx, y: Fx) -> TerrainSample {
-    let bias = seed_bias(seed);
-    let base = seed_base(seed);
-    let half = crate::fx!("0.5");
-    let two = crate::fx!("2");
-    let sea = SEA + bias.sea_shift;
-
-    let wx = (fbm(x * WARP_SCALE, y * WARP_SCALE, base ^ 0x1b56, 3) - half) * two * WARP_AMP;
-    let wy = (fbm(x * WARP_SCALE + Fx::from_num(31), y * WARP_SCALE + Fx::from_num(17), base ^ 0x77c1, 3)
-        - half)
-        * two
-        * WARP_AMP;
-
-    let h = height_at(base, bias.island_gain, x, y);
-
-    let moisture = fbm(
-        (x + wx) * M_SCALE + Fx::from_num(100),
-        (y + wy) * M_SCALE + Fx::from_num(50),
-        base ^ 0x9e37,
-        4,
-    ) + bias.moist_shift;
-
-    let mut biome = classify(h, moisture, sea, base, x, y);
-
-    // rivers carve the lowlands between the coast and the high country; a
-    // low-frequency ford channel periodically interrupts them with crossings
-    if bias.river_gain > Fx::ZERO
-        && biome_passable(biome)
-        && h >= sea
-        && h < crate::fx!("0.66")
-    {
-        let rv = fbm(x * RIVER_SCALE, y * RIVER_SCALE, base ^ 0x52e5, 4);
-        // taper: rivers narrow as the land climbs (they "start" in the hills)
-        let altitude = ((crate::fx!("0.66") - h) / (crate::fx!("0.66") - sea)).clamp(Fx::ZERO, Fx::ONE);
-        let w = RIVER_HALF_W * bias.river_gain * (crate::fx!("0.35") + altitude * crate::fx!("0.65"));
-        if (rv - half).abs() < w {
-            let ford = fbm(x * FORD_SCALE + Fx::from_num(7), y * FORD_SCALE + Fx::from_num(3), base ^ 0xf00d, 3);
-            biome = if ford > FORD_T { Biome::Ford } else { Biome::River };
-        }
-    }
-
-    // cliffs: a too-steep height step becomes a wall, except where the ramp
-    // channel cuts an opening
-    if bias.cliff_gain > Fx::ZERO
-        && biome_passable(biome)
-        && biome != Biome::Ford
-        && h > crate::fx!("0.5")
-    {
-        let step = CLIFF_STEP / bias.cliff_gain;
-        let one = Fx::ONE;
-        let ig = bias.island_gain;
-        let grad = (height_at(base, ig, x + one, y) - h)
-            .abs()
-            .max((height_at(base, ig, x - one, y) - h).abs())
-            .max((height_at(base, ig, x, y + one) - h).abs())
-            .max((height_at(base, ig, x, y - one) - h).abs());
-        if grad > step {
-            let ramp = fbm(x * RAMP_SCALE + Fx::from_num(13), y * RAMP_SCALE + Fx::from_num(29), base ^ 0xc11f, 3);
-            if ramp <= RAMP_T {
-                biome = Biome::Cliff;
-            }
-        }
-    }
-
-    TerrainSample { height: h, moisture, biome }
-}
-
-fn classify(h: Fx, m: Fx, sea: Fx, base: u32, x: Fx, y: Fx) -> Biome {
-    if h < sea - crate::fx!("0.06") {
-        return Biome::DeepWater;
-    }
-    if h < sea {
-        return Biome::ShallowWater;
-    }
-    if h < sea + crate::fx!("0.04") {
-        return Biome::Sand;
-    }
-    if h > crate::fx!("0.82") {
-        return Biome::Snow;
-    }
-    if h > crate::fx!("0.72") {
-        // mountain passes: a noise channel cuts walkable saddles through the
-        // ranges so high country never splits the mainland in two
-        let pv = fbm(x * PASS_SCALE + Fx::from_num(17), y * PASS_SCALE + Fx::from_num(23), base ^ 0x9a55, 3);
-        return if pv > PASS_T { Biome::Hills } else { Biome::Mountain };
-    }
-    if h > crate::fx!("0.6") {
-        return Biome::Hills;
-    }
-    if m < crate::fx!("0.26") {
-        if h < sea + crate::fx!("0.12") {
-            return Biome::Oasis;
-        }
-        // fertile pockets deep in the dry belt — palms around hidden water
-        let ov = fbm(x * OASIS_SCALE + Fx::from_num(41), y * OASIS_SCALE + Fx::from_num(59), base ^ 0x0a51, 3);
-        return if ov > OASIS_T { Biome::Oasis } else { Biome::Desert };
-    }
-    if m < crate::fx!("0.4") {
-        return Biome::Dunes;
-    }
-    if m < crate::fx!("0.52") {
-        return Biome::Steppe;
-    }
-    if m < crate::fx!("0.72") {
-        return Biome::Grassland;
-    }
-    Biome::Forest
+    let grid = crate::worldgrid::world_grid(seed);
+    let height = crate::worldgrid::height_bilinear(grid, x, y);
+    let (biome, moisture) = crate::worldgrid::tile_lookup(grid, x, y);
+    TerrainSample { height, moisture, biome }
 }
 
 pub fn is_land(seed: u32, x: Fx, y: Fx) -> bool {
@@ -470,7 +432,9 @@ pub struct ScatteredNode {
 
 /// One scatter rule: count, yield, per-biome accept-probability, coastal-only.
 /// `clustered` modulates acceptance with a grove-mask noise so the kind lands
-/// in clumps (forests as woods, not uniform confetti).
+/// in clumps (forests as woods, not uniform confetti). `patch` places each
+/// accepted site as a tight cluster of min..=max nodes (AoE-style mines —
+/// gold/stone read as one deposit, not strewn singles).
 #[derive(Clone, Copy)]
 pub struct ScatterRule {
     pub res_type: ResourceType,
@@ -479,6 +443,7 @@ pub struct ScatterRule {
     pub density: fn(Biome) -> Fx,
     pub coastal_only: bool,
     pub clustered: bool,
+    pub patch: (i32, i32),
 }
 
 const GROVE_SCALE: Fx = crate::fx!("0.07");
@@ -518,8 +483,44 @@ pub fn scatter_nodes(seed: u32, rules: &[ScatterRule]) -> Vec<ScatteredNode> {
                 density *= if gv > GROVE_T { GROVE_BOOST } else { GROVE_CUT };
             }
             if roll < density {
+                let (pmin, pmax) = rule.patch;
+                let want = if pmax > pmin {
+                    pmin + (rand.next_fx() * Fx::from_num(pmax - pmin + 1))
+                        .floor()
+                        .to_num::<i32>()
+                        .min(pmax - pmin)
+                } else {
+                    pmin
+                };
+                // first node on the accepted tile, the rest packed around it
                 out.push(ScatteredNode { pos: V2::new(x, y), res_type: rule.res_type, yield_: rule.yield_ });
                 placed += 1;
+                let mut added = 1;
+                let mut tries = 0;
+                while added < want && placed < rule.count && tries < want * 6 {
+                    tries += 1;
+                    let ox = (rand.next_fx() - crate::fx!("0.5")) * crate::fx!("2.4");
+                    let oy = (rand.next_fx() - crate::fx!("0.5")) * crate::fx!("2.4");
+                    let (px, py) = (x + ox, y + oy);
+                    if !is_land(seed, px, py) {
+                        continue;
+                    }
+                    // one node per tile inside the patch
+                    let (ptx, pty) = (px.floor().to_num::<i32>(), py.floor().to_num::<i32>());
+                    let dup = out.iter().rev().take(want as usize).any(|n| {
+                        n.pos.x.floor().to_num::<i32>() == ptx && n.pos.y.floor().to_num::<i32>() == pty
+                    });
+                    if dup {
+                        continue;
+                    }
+                    out.push(ScatteredNode {
+                        pos: V2::new(px, py),
+                        res_type: rule.res_type,
+                        yield_: rule.yield_,
+                    });
+                    placed += 1;
+                    added += 1;
+                }
             }
         }
     }
@@ -700,16 +701,44 @@ pub fn fair_start_nodes(
             if left == 0 {
                 continue;
             }
-            // deterministic ring scan outward from the start; hash picks the
-            // tile order apart so different kinds spread to different sides
+            // AoE-style ring bands: each resource class starts its scan at
+            // its own distance (food close, wood mid, stone farther), so a
+            // start never spawns with everything piled at one distance; the
+            // scan widens toward FAIR_RADIUS when the near rings come up dry
+            let band_lo = match res_type {
+                ResourceType::Food => 3,
+                ResourceType::Wood => 4,
+                ResourceType::Stone => 6,
+                ResourceType::Gold => 8,
+            };
             let sx = start.x.to_num::<i32>();
             let sy = start.y.to_num::<i32>();
-            'ring: for r in 4..(FAIR_RADIUS.to_num::<i32>()) {
-                for dy in -r..=r {
+            'ring: for r in band_lo..(FAIR_RADIUS.to_num::<i32>()) {
+                // walk the ring perimeter starting at a per-(slot, resource)
+                // hashed corner so different kinds land on different sides
+                let perimeter: Vec<(i32, i32)> = {
+                    let mut cells = Vec::with_capacity((8 * r) as usize);
                     for dx in -r..=r {
-                        if dx.abs().max(dy.abs()) != r {
-                            continue;
-                        }
+                        cells.push((dx, -r));
+                    }
+                    for dy in (-r + 1)..=r {
+                        cells.push((r, dy));
+                    }
+                    for dx in (-r..r).rev() {
+                        cells.push((dx, r));
+                    }
+                    for dy in ((-r + 1)..r).rev() {
+                        cells.push((-r, dy));
+                    }
+                    let spin = (hash2(slot as i32 * 31 + 7, res_type as i32 * 17 + 3, seed)
+                        * Fx::from_num(cells.len() as i32))
+                    .to_num::<usize>()
+                        % cells.len().max(1);
+                    cells.rotate_left(spin);
+                    cells
+                };
+                for (dx, dy) in perimeter {
+                    {
                         let (tx, ty) = (sx + dx, sy + dy);
                         if tx < 3 || ty < 3 || tx >= WORLD_SIZE - 3 || ty >= WORLD_SIZE - 3 {
                             continue;
@@ -811,6 +840,7 @@ mod tests {
             density: crate::biomes::tree_density,
             coastal_only: false,
             clustered: true,
+            patch: (1, 1),
         }];
         let a = scatter_nodes(3, &rules);
         let b = scatter_nodes(3, &rules);

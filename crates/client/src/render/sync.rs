@@ -32,18 +32,24 @@ pub struct RigHandle {
 
 #[derive(Resource)]
 pub struct RenderAssets {
-    /// Base unit rigs (team parts white); per-team copies bake lazily into
-    /// `team_rigs`/`team_impostors` so detail colors render true.
+    /// Base unit rigs (team parts white), indexed `kind * 2 + faction`;
+    /// per-team copies bake lazily into `team_rigs`/`team_impostors` so
+    /// detail colors render true.
     pub unit_rigs: Vec<Vec<RigHandle>>,
     pub impostors: Vec<Handle<Mesh>>,
     pub team_rigs: HashMap<(usize, u32), Vec<RigHandle>>,
     pub team_impostors: HashMap<(usize, u32), Handle<Mesh>>,
+    /// Indexed `kind as usize * 2 + faction as usize` — Ayyubid and Crusader
+    /// settlements use distinct baked architecture.
     pub buildings: Vec<Handle<Mesh>>,
-    /// Half-tile wall run (+X), yawed per connected neighbor by `update_wall_arms`.
-    pub wall_arm: Handle<Mesh>,
+    /// Half-tile wall run (+X) per faction, yawed per connected neighbor by
+    /// `update_wall_arms`.
+    pub wall_arm: [Handle<Mesh>; 2],
     pub nodes: HashMap<ResourceType, Vec<Handle<Mesh>>>,
     pub fish_node: Handle<Mesh>,
     pub carry_sack: Handle<Mesh>,
+    /// [axe, pick, sickle] — peasant hand tools (empty if not baked)
+    pub tools: Vec<Handle<Mesh>>,
     pub puff: Handle<Mesh>,
     pub flame: Handle<Mesh>,
     pub ripple: Handle<Mesh>,
@@ -233,6 +239,21 @@ pub struct UnitBody {
     pub sack: bool,
 }
 
+/// What a harvesting peasant is actually doing — picks the tool in hand and
+/// the swing cycle (chop high, mine low, forage bent over).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Activity {
+    None,
+    Chop,
+    Mine,
+    Forage,
+}
+
+/// One swappable hand tool on a peasant's right hand; visible only while the
+/// matching activity runs (same ownership pattern as the carry sack).
+#[derive(Component)]
+pub struct ToolSlot(pub Activity);
+
 /// Per-unit animation inputs mirrored from the sim each sync — the animator
 /// is pure render math driven by these flags + wall time.
 #[derive(Component)]
@@ -241,6 +262,11 @@ pub struct AnimState {
     pub moving: bool,
     pub combat: bool,
     pub harvest: bool,
+    /// Debounce: the sim flaps Harvesting<->ToResource every few ticks at
+    /// node edges (separation shoves workers out of range); the work pose
+    /// holds until this wall-clock time so the swing never stutters.
+    pub work_until: f32,
+    pub activity: Activity,
     pub carrying: bool,
     pub phase: f32,
     /// sim walk speed — leg swing cadence scales with it so cavalry gallops
@@ -324,14 +350,17 @@ pub fn update_wall_arms(
     mut commands: Commands,
     map: Res<RenderMap>,
     assets: Res<RenderAssets>,
-    q_sim: Query<(&GameId, &Pos, &Building)>,
+    q_sim: Query<(&GameId, &Pos, &Building, Option<&Owner>)>,
+    q_players: Query<&Player>,
     q_mat: Query<(Option<&WallArms>, &MeshMaterial3d<StandardMaterial>), With<RenderRoot>>,
     q_arms: Query<(Entity, &ChildOf), With<WallArm>>,
 ) {
+    let owner_faction: HashMap<u64, saladin_sim::Faction> =
+        q_players.iter().map(|p| (p.player_id, p.faction)).collect();
     // a wall connects to walls, gates, towers and the keep
     let linkable: HashSet<i32> = q_sim
         .iter()
-        .filter(|(_, _, b)| {
+        .filter(|(_, _, b, _)| {
             matches!(
                 b.kind,
                 BuildingKind::Wall
@@ -341,17 +370,20 @@ pub fn update_wall_arms(
                     | BuildingKind::Keep
             )
         })
-        .flat_map(|(_, p, b)| {
+        .flat_map(|(_, p, b, _)| {
             footprint_tiles(building_def(b.kind).footprint, p.pos.x, p.pos.y)
                 .into_iter()
                 .map(|t| tile_key(t.tx, t.ty))
         })
         .collect();
 
-    for (gid, pos, b) in &q_sim {
+    for (gid, pos, b, owner) in &q_sim {
         if b.kind != BuildingKind::Wall {
             continue;
         }
+        let faction = owner
+            .and_then(|o| owner_faction.get(&o.0).copied())
+            .unwrap_or(saladin_sim::Faction::Ayyubid);
         let Some(&root) = map.0.get(&gid.0) else { continue };
         let tx = pos.pos.x.to_num::<f32>().floor() as i32;
         let ty = pos.pos.y.to_num::<f32>().floor() as i32;
@@ -376,7 +408,7 @@ pub fn update_wall_arms(
                 if mask & (1 << i) != 0 {
                     p.spawn((
                         WallArm,
-                        Mesh3d(assets.wall_arm.clone()),
+                        Mesh3d(assets.wall_arm[faction as usize].clone()),
                         MeshMaterial3d(mat_handle.clone()),
                         Transform::from_rotation(Quat::from_rotation_y(ARM_YAWS[i])),
                     ));
@@ -411,13 +443,15 @@ impl RenderAssets {
         &mut self,
         meshes: &mut Assets<Mesh>,
         kind: UnitKind,
+        faction: saladin_sim::Faction,
         color: u32,
     ) -> Vec<RigHandle> {
         use crate::render::models::bake_team;
+        let slot = kind as usize * 2 + faction as usize;
         self.team_rigs
-            .entry((kind as usize, color))
+            .entry((slot, color))
             .or_insert_with(|| {
-                self.unit_rigs[kind as usize]
+                self.unit_rigs[slot]
                     .iter()
                     .map(|p| RigHandle {
                         group: p.group,
@@ -485,6 +519,7 @@ pub fn sync_render(
     field: Res<HeightField>,
     selection: Res<Selection>,
     cam_state: Res<CameraState>,
+    time: Res<Time>,
     world_cfg: Res<WorldConfig>,
     q_sim: Query<(&GameId, &Pos, Option<&Unit>, Option<&Building>, Option<&ResourceNode>, Option<&Owner>)>,
     q_players: Query<&Player>,
@@ -506,7 +541,10 @@ pub fn sync_render(
         .iter()
         .map(|p| (p.player_id, PLAYER_COLORS[p.color as usize % PLAYER_COLORS.len()]))
         .collect();
+    let owner_faction: HashMap<u64, saladin_sim::Faction> =
+        q_players.iter().map(|p| (p.player_id, p.faction)).collect();
     let impostor = cam_state.view_size >= IMPOSTOR_VIEW_SIZE;
+    let now = time.elapsed_secs();
 
     let mut seen: HashSet<u64> = HashSet::new();
     // per-root info gathered for the child passes
@@ -522,6 +560,9 @@ pub fn sync_render(
             seen.insert(gid.0);
             let selected = selection.units.contains(&gid.0);
             let color = team.unwrap_or(0xdddddd);
+            let faction = owner
+                .and_then(|o| owner_faction.get(&o.0).copied())
+                .unwrap_or(saladin_sim::Faction::Ayyubid);
             let yaw = if u.has_target {
                 let dx = u.target.x.to_num::<f32>() - x;
                 let dz = u.target.y.to_num::<f32>() - z;
@@ -539,6 +580,7 @@ pub fn sync_render(
                     &mut mats,
                     gid.0,
                     u.kind,
+                    faction,
                     color,
                     world,
                 )
@@ -554,6 +596,25 @@ pub fn sync_render(
                     anim.moving = u.has_target;
                     anim.combat = u.attack_target != 0;
                     anim.harvest = u.gather_state == saladin_sim::GatherState::Harvesting;
+                    // carry_type identifies the node being worked while
+                    // harvesting — picks the tool + swing cycle. STICKY: the
+                    // sim flaps Harvesting<->ToResource at node edges, so the
+                    // last activity is kept between bursts (the tool stays in
+                    // hand on the dropoff walk instead of blinking)
+                    if anim.harvest {
+                        anim.activity = match u.carry_type {
+                            ResourceType::Wood => Activity::Chop,
+                            ResourceType::Stone | ResourceType::Gold => Activity::Mine,
+                            ResourceType::Food => Activity::Forage,
+                        };
+                        anim.work_until = now + 0.35;
+                    } else if u.gather_state == saladin_sim::GatherState::Idle {
+                        anim.activity = Activity::None;
+                        anim.work_until = 0.0;
+                    }
+                    // sack rule is the sim's own: loaded or not. The sim
+                    // holds carrying at 0 for the whole harvest and sets it
+                    // once for the dropoff walk — no strobing possible.
                     anim.carrying = u.carrying > 0;
                 }
             }
@@ -561,13 +622,16 @@ pub fn sync_render(
         } else if let Some(b) = bld {
             seen.insert(gid.0);
             let world = Vec3::new(x, ground, z);
+            let faction = owner
+                .and_then(|o| owner_faction.get(&o.0).copied())
+                .unwrap_or(saladin_sim::Faction::Ayyubid);
             let root = *map.0.entry(gid.0).or_insert_with(|| {
                 let mat = rmats.tint_mat(&mut mats, team.unwrap_or(0x9c958a));
                 let def = building_def(b.kind);
                 commands
                     .spawn((
                         RenderRoot(gid.0),
-                        Mesh3d(assets.buildings[b.kind as usize].clone()),
+                        Mesh3d(assets.buildings[b.kind as usize * 2 + faction as usize].clone()),
                         MeshMaterial3d(mat),
                         Transform::from_translation(world),
                         Lerp { target: world, yaw: 0.0, bob_phase: 0.0, turn: false, hop: false },
@@ -610,12 +674,23 @@ pub fn sync_render(
                 let mesh = if fishy { assets.fish_node.clone() } else { variants[idx].clone() };
                 // Deterministic per-node yaw so herds/groves don't all face north.
                 let yaw = ((gid.0 >> 5) % 628) as f32 * 0.01;
+                // mineral outcrops settle INTO the slope: slightly embedded,
+                // tilted most of the way onto the surface normal — never
+                // perched flat on a hillside
+                let mineral = matches!(n.res_type, ResourceType::Stone | ResourceType::Gold);
+                let (pos, rot) = if mineral {
+                    let nrm = crate::terrain::normal_at(&field, x, z);
+                    let lean = Quat::from_rotation_arc(Vec3::Y, Vec3::Y.lerp(nrm, 0.75).normalize());
+                    (world - Vec3::Y * 0.04, lean * Quat::from_rotation_y(yaw))
+                } else {
+                    (world - Vec3::Y * 0.01, Quat::from_rotation_y(yaw))
+                };
                 let mut e = commands.spawn((
                     RenderRoot(gid.0),
                     Mesh3d(mesh),
                     MeshMaterial3d(rmats.node[&n.res_type].clone()),
-                    Transform::from_translation(world).with_rotation(Quat::from_rotation_y(yaw)),
-                    Lerp { target: world, yaw, bob_phase: 0.0, turn: false, hop: false },
+                    Transform::from_translation(pos).with_rotation(rot),
+                    Lerp { target: pos, yaw, bob_phase: 0.0, turn: false, hop: false },
                 ));
                 if fishy {
                     e.insert(FishNode { base_y: ground, phase: (gid.0 % 628) as f32 * 0.01 });
@@ -648,8 +723,15 @@ pub fn sync_render(
             if let Ok(mut animal) = q_animals.get_mut(root) {
                 animal.remaining = n.remaining;
             } else if let Ok((_, _, mut tf, _, _)) = q_roots.get_mut(root) {
-                // static nodes snap to the sim position; animals own their pose
-                tf.translation = world;
+                // static nodes snap to the sim position (same embed the spawn
+                // used — snapping to raw `world` would pop minerals back out
+                // of the slope); animals own their pose
+                let embed = if matches!(n.res_type, ResourceType::Stone | ResourceType::Gold) {
+                    0.04
+                } else {
+                    0.01
+                };
+                tf.translation = world - Vec3::Y * embed;
             }
         }
     }
@@ -904,6 +986,7 @@ fn spawn_unit_tree(
     mats: &mut Assets<StandardMaterial>,
     id: u64,
     kind: UnitKind,
+    faction: saladin_sim::Faction,
     color: u32,
     world: Vec3,
 ) -> Entity {
@@ -911,7 +994,7 @@ fn spawn_unit_tree(
     let h = def.height.to_num::<f32>();
     let r = def.radius.to_num::<f32>();
     let mat = rmats.unit_mat(mats, color, false);
-    let rig = assets.team_rig(meshes, kind, color);
+    let rig = assets.team_rig(meshes, kind, faction, color);
     let impostor_mesh = assets.team_impostor(meshes, kind, color);
     let phase = (id % 1000) as f32 / 1000.0 * std::f32::consts::TAU;
     commands
@@ -925,6 +1008,8 @@ fn spawn_unit_tree(
                 moving: false,
                 combat: false,
                 harvest: false,
+                work_until: 0.0,
+                activity: Activity::None,
                 carrying: false,
                 phase,
                 stride: unit_def(kind).speed.to_num::<f32>(),
@@ -932,12 +1017,35 @@ fn spawn_unit_tree(
         ))
         .with_children(|p| {
             for part in rig {
-                p.spawn((
+                let mut e = p.spawn((
                     UnitBody { group: part.group, pivot: part.pivot, impostor_part: false, sack: false },
                     Mesh3d(part.mesh),
                     MeshMaterial3d(mat.clone()),
                     Transform::from_translation(part.pivot),
                 ));
+                // peasant right hand carries the activity tools — children of
+                // the arm so they swing with it; visibility owned by
+                // update_tool_visibility (matching activity only)
+                if kind == UnitKind::Peasant
+                    && part.group == crate::render::models::RigGroup::ArmR
+                    && assets.tools.len() == 3
+                {
+                    let hand = Vec3::new(0.0, -unit_def(kind).height.to_num::<f32>() * 0.38, 0.0);
+                    e.with_children(|arm| {
+                        for (i, act) in
+                            [Activity::Chop, Activity::Mine, Activity::Forage].into_iter().enumerate()
+                        {
+                            arm.spawn((
+                                ToolSlot(act),
+                                Mesh3d(assets.tools[i].clone()),
+                                MeshMaterial3d(mat.clone()),
+                                Transform::from_translation(hand)
+                                    .with_rotation(Quat::from_rotation_x(0.5)),
+                                Visibility::Hidden,
+                            ));
+                        }
+                    });
+                }
             }
             if kind == UnitKind::Peasant {
                 let def = unit_def(kind);
@@ -999,6 +1107,9 @@ pub fn animate_units(
         return;
     }
     let t = time.elapsed_secs();
+    // pose targets ease in — sim state flips (walk<->chop<->idle) otherwise
+    // snap limbs to a new pose in one frame and read as flicker
+    let ease = (16.0 * time.delta_secs()).min(1.0);
     for (anim, children) in &q_roots {
         let tp = t + anim.phase;
         let mounted = matches!(anim.kind, UnitKind::Knight | UnitKind::HorseArcher | UnitKind::Mamluk);
@@ -1020,14 +1131,24 @@ pub fn animate_units(
                 continue;
             }
             if body.sack {
+                // visible exactly while loaded (sim: the whole dropoff walk)
                 let want = if anim.carrying { Visibility::Inherited } else { Visibility::Hidden };
                 if *vis != want {
                     *vis = want;
                 }
                 continue;
             }
+            // debounced "working" — survives the sim's Harvesting<->ToResource
+            // flapping at node edges
+            let working = anim.harvest || t < anim.work_until;
+            let foraging = anim.kind == UnitKind::Peasant
+                && working
+                && anim.activity == Activity::Forage;
+            // foragers bow at the hips; arms must FOLLOW the bow (they're rig
+            // siblings of the body, not children) or shoulders detach
+            let bow = if foraging { Quat::from_rotation_x(0.3) } else { Quat::IDENTITY };
             let rot = match body.group {
-                G::Body => Quat::IDENTITY,
+                G::Body => bow,
                 G::LegL => Quat::from_rotation_x(walk * swing_amp),
                 G::LegR => Quat::from_rotation_x(-walk * swing_amp),
                 G::ArmR => match anim.kind {
@@ -1042,7 +1163,16 @@ pub fn animate_units(
                     _ if anim.combat && !ranged => {
                         Quat::from_rotation_x(0.35 - strike * 1.15)
                     }
-                    _ if anim.harvest => Quat::from_rotation_x(0.3 - strike * 0.9),
+                    // distinct work cycles per activity: woodcutting is a
+                    // high overhead chop, mining a heavy low pick swing,
+                    // foraging a slow reach toward the ground
+                    _ if working && anim.activity != Activity::None => match anim.activity {
+                        Activity::Mine => Quat::from_rotation_x(0.8 - strike * 1.5),
+                        Activity::Forage => {
+                            Quat::from_rotation_x(0.65 + (tp * 2.1).sin() * 0.3)
+                        }
+                        _ => Quat::from_rotation_x(0.3 - strike * 0.9),
+                    },
                     _ if anim.moving => Quat::from_rotation_x(-walk * 0.25),
                     _ => Quat::from_rotation_x((tp * 1.6).sin() * 0.06),
                 },
@@ -1073,12 +1203,61 @@ pub fn animate_units(
                 }
                 _ => Quat::IDENTITY,
             };
-            tf.rotation = rot;
+            if body.group == G::ArmR
+                && anim.kind == UnitKind::Peasant
+                && std::env::var("SALADIN_ANIM_DEBUG").is_ok()
+            {
+                let (axis, angle) = rot.to_axis_angle();
+                eprintln!(
+                    "t={t:.3} target={:.3} cur={:.3} axis_x={:.2} harvest={} act={:?} moving={} combat={}",
+                    angle,
+                    tf.rotation.to_axis_angle().1,
+                    axis.x,
+                    anim.harvest,
+                    anim.activity,
+                    anim.moving,
+                    anim.combat
+                );
+            }
+            // arms ride the forage bow: their pivots rotate with the torso
+            let rot = if foraging && matches!(body.group, G::ArmL | G::ArmR) { bow * rot } else { rot };
+            tf.rotation = tf.rotation.slerp(rot, ease);
+            if matches!(body.group, G::ArmL | G::ArmR) && anim.kind == UnitKind::Peasant {
+                let target = if foraging { bow * body.pivot } else { body.pivot };
+                tf.translation = tf.translation.lerp(target, ease);
+            }
             // Ram: the slung beam jabs forward (+Z after the rig yaw) on attack.
             if anim.kind == UnitKind::Ram && body.group == G::ArmR {
                 let jab = if anim.combat { strike * 0.45 } else { 0.0 };
                 tf.translation = body.pivot + Vec3::new(0.0, 0.0, jab);
             }
+        }
+    }
+}
+
+/// Show the tool matching the peasant's current activity; hide the rest.
+/// Tools are grandchildren of the rig root (children of the right arm), so
+/// climb two parent hops to the AnimState.
+pub fn update_tool_visibility(
+    time: Res<Time>,
+    q_roots: Query<&AnimState>,
+    q_arms: Query<&ChildOf, With<UnitBody>>,
+    mut q_tools: Query<(&ToolSlot, &ChildOf, &mut Visibility), Without<UnitBody>>,
+) {
+    let t = time.elapsed_secs();
+    for (slot, child_of, mut vis) in &mut q_tools {
+        let Ok(arm_parent) = q_arms.get(child_of.parent()) else { continue };
+        let Ok(anim) = q_roots.get(arm_parent.parent()) else { continue };
+        // shown while working AND on the carry walk, on the same debounced
+        // clocks the animator uses — never blinks between swing bursts
+        let working = anim.harvest || t < anim.work_until || anim.carrying;
+        let want = if working && anim.activity == slot.0 {
+            Visibility::Inherited
+        } else {
+            Visibility::Hidden
+        };
+        if *vis != want {
+            *vis = want;
         }
     }
 }
@@ -1384,7 +1563,7 @@ pub fn update_building_highlight(
 
 /// Build the shared mesh handles at match start.
 pub fn build_assets(meshes: &mut Assets<Mesh>) -> RenderAssets {
-    use crate::render::models::props::{fish_node_mesh, resource_node_meshes};
+    use crate::render::models::baked::{fish_node_mesh, resource_node_meshes};
     let mut nodes = HashMap::new();
     for r in [ResourceType::Wood, ResourceType::Stone, ResourceType::Food, ResourceType::Gold] {
         nodes.insert(r, resource_node_meshes(r).into_iter().map(|m| meshes.add(m)).collect());
@@ -1393,11 +1572,13 @@ pub fn build_assets(meshes: &mut Assets<Mesh>) -> RenderAssets {
     RenderAssets {
         unit_rigs: UnitKind::ALL
             .iter()
-            .map(|k| {
-                crate::render::models::unit_rig(*k)
-                    .into_iter()
-                    .map(|p| RigHandle { group: p.group, pivot: p.pivot, mesh: meshes.add(p.mesh) })
-                    .collect()
+            .flat_map(|k| {
+                [saladin_sim::Faction::Ayyubid, saladin_sim::Faction::Crusader].map(|f| {
+                    crate::render::models::unit_rig(*k, f)
+                        .into_iter()
+                        .map(|p| RigHandle { group: p.group, pivot: p.pivot, mesh: meshes.add(p.mesh) })
+                        .collect()
+                })
             })
             .collect(),
         impostors: UnitKind::ALL
@@ -1406,14 +1587,19 @@ pub fn build_assets(meshes: &mut Assets<Mesh>) -> RenderAssets {
             .collect(),
         buildings: BuildingKind::ALL
             .iter()
-            .map(|k| meshes.add(crate::render::models::building_mesh(*k)))
+            .flat_map(|k| {
+                [saladin_sim::Faction::Ayyubid, saladin_sim::Faction::Crusader]
+                    .map(|f| meshes.add(crate::render::models::building_mesh(*k, f)))
+            })
             .collect(),
-        wall_arm: meshes.add(crate::render::models::buildings::build_wall_arm()),
+        wall_arm: [saladin_sim::Faction::Ayyubid, saladin_sim::Faction::Crusader]
+            .map(|f| meshes.add(crate::render::models::baked::wall_arm_mesh(f))),
         team_rigs: HashMap::new(),
         team_impostors: HashMap::new(),
         nodes,
         fish_node,
         carry_sack: meshes.add(crate::render::models::units::carry_sack_mesh()),
+        tools: crate::render::models::baked::tool_meshes().into_iter().map(|m| meshes.add(m)).collect(),
         puff: meshes.add(Sphere::new(1.0).mesh().uv(6, 5)),
         flame: meshes.add(Cone { radius: 0.5, height: 1.0 }.mesh().resolution(5).build()),
         aura_ring: meshes.add(

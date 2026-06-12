@@ -26,6 +26,7 @@ pub mod spatial;
 pub mod tech;
 pub mod terrain;
 pub mod units;
+pub mod worldgrid;
 
 pub use ai::{
     AiPhase, AssaultIntel, BuildDecision, Census, FIELD_UNITS, PlannerState, PlannerTuning,

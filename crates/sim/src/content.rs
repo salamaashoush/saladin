@@ -1,5 +1,5 @@
 use crate::ai::{PlannerTuning, TacticalTuning};
-use crate::biomes::{fish_density, game_density, gold_density, rock_density, tree_density};
+use crate::biomes::{fish_density, game_density, gold_density, motherlode_density, rock_density, tree_density};
 use crate::constants::{
     FOOD_NODES, FOOD_YIELD, GOLD_NODES, GOLD_YIELD, SPAWN_MARGIN, STONE_NODES, STONE_YIELD,
     TREE_COUNT, TREE_WOOD, WORLD_SIZE,
@@ -34,12 +34,18 @@ pub fn resource_def(r: ResourceType) -> &'static ResourceDef {
 pub fn node_kinds() -> Vec<ScatterRule> {
     let food_fish = (FOOD_NODES as f64 * 0.4).round() as i32;
     let food_game = FOOD_NODES - food_fish;
+    // stone/gold land as tight AoE-style deposits (4-5 / 5-7 nodes per
+    // patch); trees clump via the grove mask; animals roam as singles
     vec![
-        ScatterRule { res_type: ResourceType::Wood, count: TREE_COUNT, yield_: TREE_WOOD, density: tree_density, coastal_only: false, clustered: true },
-        ScatterRule { res_type: ResourceType::Stone, count: STONE_NODES, yield_: STONE_YIELD, density: rock_density, coastal_only: false, clustered: false },
-        ScatterRule { res_type: ResourceType::Food, count: food_game, yield_: FOOD_YIELD, density: game_density, coastal_only: false, clustered: false },
-        ScatterRule { res_type: ResourceType::Food, count: food_fish, yield_: FOOD_YIELD, density: fish_density, coastal_only: true, clustered: false },
-        ScatterRule { res_type: ResourceType::Gold, count: GOLD_NODES, yield_: GOLD_YIELD, density: gold_density, coastal_only: false, clustered: false },
+        ScatterRule { res_type: ResourceType::Wood, count: TREE_COUNT, yield_: TREE_WOOD, density: tree_density, coastal_only: false, clustered: true, patch: (1, 1) },
+        ScatterRule { res_type: ResourceType::Stone, count: STONE_NODES, yield_: STONE_YIELD, density: rock_density, coastal_only: false, clustered: false, patch: (4, 5) },
+        ScatterRule { res_type: ResourceType::Food, count: food_game, yield_: FOOD_YIELD, density: game_density, coastal_only: false, clustered: false, patch: (1, 1) },
+        ScatterRule { res_type: ResourceType::Food, count: food_fish, yield_: FOOD_YIELD, density: fish_density, coastal_only: true, clustered: false, patch: (1, 1) },
+        ScatterRule { res_type: ResourceType::Gold, count: GOLD_NODES, yield_: GOLD_YIELD, density: gold_density, coastal_only: false, clustered: false, patch: (5, 7) },
+        // motherlodes: double-yield deposits hidden in the high country —
+        // the exploration prize (hill-belt only, far from comfortable land)
+        ScatterRule { res_type: ResourceType::Gold, count: 24, yield_: GOLD_YIELD * 2, density: motherlode_density, coastal_only: false, clustered: false, patch: (6, 8) },
+        ScatterRule { res_type: ResourceType::Stone, count: 20, yield_: STONE_YIELD * 2, density: motherlode_density, coastal_only: false, clustered: false, patch: (5, 7) },
     ]
 }
 
@@ -385,7 +391,7 @@ mod tests {
     #[test]
     fn node_kinds_split_food() {
         let n = node_kinds();
-        assert_eq!(n.len(), 5);
+        assert_eq!(n.len(), 7); // 5 staples + gold/stone motherlodes
         let food_total: i32 = n.iter().filter(|r| r.res_type == ResourceType::Food).map(|r| r.count).sum();
         assert_eq!(food_total, FOOD_NODES);
     }

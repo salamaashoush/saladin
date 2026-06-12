@@ -8,7 +8,7 @@ use crate::render::sync::{RenderAssets, RenderMaterials};
 use crate::terrain::{HeightField, height_at};
 use crate::LocalPlayer;
 use bevy::prelude::*;
-use saladin_protocol::{Building, GameId, Owner, Pos, ResourceNode, WorldConfig};
+use saladin_protocol::{Building, GameId, Owner, Player, Pos, ResourceNode, WorldConfig};
 use saladin_sim::{BuildingKind, Occupant, building_def, occupancy_set};
 
 /// One ghost cell (the root holds nothing; each cell is its own mesh entity).
@@ -34,6 +34,7 @@ pub fn update_ghost(
     q_buildings: Query<(&Pos, &Building, &Owner)>,
     q_nodes: Query<&Pos, With<ResourceNode>>,
     local: Res<LocalPlayer>,
+    q_players: Query<&Player>,
     q_cells: Query<Entity, With<GhostCell>>,
     ghost_rot: Res<GhostRot>,
 ) {
@@ -74,12 +75,17 @@ pub fn update_ghost(
     } else {
         ghost_rot.0 as f32 * std::f32::consts::FRAC_PI_2
     };
+    let faction = q_players
+        .iter()
+        .find(|p| p.player_id == local.0)
+        .map(|p| p.faction)
+        .unwrap_or(saladin_sim::Faction::Ayyubid);
     for (cx, cy) in build_cells(kind, g.x, g.z, wall_drag.0) {
         let valid = place_valid(kind, cx, cy, cfg.seed, &occ, &own);
         let y = field_ref.map(|f| height_at(f, cx, cy)).unwrap_or(0.0);
         commands.spawn((
             GhostCell,
-            Mesh3d(assets.buildings[kind as usize].clone()),
+            Mesh3d(assets.buildings[kind as usize * 2 + faction as usize].clone()),
             MeshMaterial3d(if valid { rmats.ghost_ok.clone() } else { rmats.ghost_bad.clone() }),
             Transform::from_xyz(cx, y, cy).with_rotation(Quat::from_rotation_y(yaw)),
         ));

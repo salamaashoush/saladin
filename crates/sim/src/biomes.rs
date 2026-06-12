@@ -294,6 +294,17 @@ pub fn gold_density(b: Biome) -> Fx {
     biome_def(b).density.gold
 }
 
+/// Motherlode accept-probability: rich deposits live ONLY in the high
+/// country (hill belts at the mountain fringe) — remote, contested, worth
+/// the trek. Zero everywhere comfortable.
+pub fn motherlode_density(b: Biome) -> Fx {
+    match b {
+        Biome::Hills => crate::fx!("0.5"),
+        Biome::Snow => crate::fx!("0.2"),
+        _ => crate::fx!("0"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

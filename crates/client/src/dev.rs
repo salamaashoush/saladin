@@ -75,6 +75,13 @@ pub fn setup(app: &mut App) {
     {
         app.world_mut().resource_mut::<MenuConfig>().preset = preset;
     }
+    // SALADIN_FACTION=1 plays Crusader (faction-variant architecture shots)
+    if let Ok(s) = std::env::var("SALADIN_FACTION")
+        && let Ok(f) = s.parse::<u8>()
+    {
+        app.world_mut().resource_mut::<MenuConfig>().faction =
+            saladin_sim::Faction::from_u8(f).unwrap_or(saladin_sim::Faction::Ayyubid);
+    }
     match std::env::var("SALADIN_AUTO").as_deref() {
         Ok("1") => {
             app.insert_state(GameState::Playing);
@@ -513,6 +520,27 @@ pub fn auto_spawn_units(world: &mut World, mut stage: Local<u8>) {
         }
         return;
     }
+    if *stage == 2 {
+        // SALADIN_WORK=1: re-pose every peasant in the three work cycles each
+        // frame (the gather brain would idle them — their forced state has no
+        // real target node), so one shot shows chop + mine + forage tools
+        if std::env::var("SALADIN_WORK").is_ok() {
+            use saladin_sim::ResourceType;
+            let mut q = world.query::<&mut Unit>();
+            let mut i = 0;
+            for mut u in q.iter_mut(world) {
+                if u.kind == UnitKind::Peasant {
+                    u.gather_state = GatherState::Harvesting;
+                    u.carry_type =
+                        [ResourceType::Wood, ResourceType::Stone, ResourceType::Food][i % 3];
+                    u.carrying = 0;
+                    u.has_target = false;
+                    i += 1;
+                }
+            }
+        }
+        return;
+    }
     if *stage != 0 {
         return;
     }
@@ -527,6 +555,23 @@ pub fn auto_spawn_units(world: &mut World, mut stage: Local<u8>) {
     };
     let Some(kp) = keep else { return };
     *stage = 1;
+    // SALADIN_LOOK=<dx>,<dz> pans the camera that far from the keep so shots
+    // can frame the building/unit showcases instead of the keep itself
+    if let Ok(s) = std::env::var("SALADIN_LOOK")
+        && let Some((dx, dz)) = s.split_once(',')
+        && let (Ok(dx), Ok(dz)) = (dx.trim().parse::<f32>(), dz.trim().parse::<f32>())
+    {
+        let center = bevy::prelude::Vec3::new(
+            kp.x.to_num::<f32>() + dx,
+            0.0,
+            kp.y.to_num::<f32>() + dz,
+        );
+        let mut st = world.resource_mut::<crate::camera::CameraState>();
+        // target only: the glide system re-aims the camera transform when
+        // center != target_center (setting both leaves the transform stale)
+        st.target_center = center;
+        st.framed = true; // beat frame_keep to the punch — it would re-center
+    }
     // One node of each kind beside the lineup, plus a food node pushed onto
     // the nearest water tile so the fish-school variant shows too.
     {
@@ -583,6 +628,33 @@ pub fn auto_spawn_units(world: &mut World, mut stage: Local<u8>) {
             }
         }
         conjure_wall_demo(world, me, kp);
+        // one of every other building kind in a grid west of the keep so
+        // SALADIN_AUTO=units verifies all building models in one shot
+        use saladin_sim::BuildingKind;
+        let showcase: Vec<BuildingKind> = BuildingKind::ALL
+            .iter()
+            .copied()
+            .filter(|k| !matches!(k, BuildingKind::Keep | BuildingKind::Wall))
+            .collect();
+        for (i, kind) in showcase.into_iter().enumerate() {
+            let pos = saladin_sim::V2::new(
+                kp.x - saladin_sim::Fx::from_num(6 + (i as i32 % 3) * 4),
+                kp.y - saladin_sim::Fx::from_num(2 + (i as i32 / 3) * 4),
+            );
+            let id = world.resource_mut::<NextEntityId>().alloc();
+            world.spawn((
+                GameId(id),
+                Owner(me),
+                MatchId(1),
+                Pos { pos, facing: saladin_sim::Fx::ZERO },
+                saladin_protocol::Building {
+                    kind,
+                    hp: saladin_sim::building_def(kind).max_hp,
+                    cooldown: saladin_sim::Fx::ZERO,
+                    rally: pos,
+                },
+            ));
+        }
     }
     for (i, &kind) in UnitKind::ALL.iter().enumerate() {
         let def = unit_def(kind);

@@ -6,7 +6,7 @@ use bevy_app::prelude::*;
 use saladin_protocol::*;
 use saladin_sim::{
     BuildingKind, Faction, Fx, GatherState, ResourceType, Stance, Stockpile,
-    UnitKind, V2, ZERO, building_def, dist2, is_passable, region_at, unit_def,
+    UnitKind, V2, ZERO, building_def, dist2, is_passable, node_reachable, region_at, unit_def,
 };
 
 fn build(seed: u32) -> App {
@@ -176,7 +176,11 @@ fn unreachable_nodes_idle_not_pingpong() {
                 let r = region_at(seed, p.x, p.y);
                 match first {
                     None => first = Some((r, p)),
-                    Some((r0, p0)) if r != r0 => {
+                    // distinct region id is not enough: a node on the far
+                    // rim of a 1-tile lake is still harvestable from this
+                    // side (node_reachable's 3x3 ring) — demand a pair the
+                    // gather brain itself calls unreachable
+                    Some((r0, p0)) if r != r0 && !node_reachable(seed, p0, p) => {
                         found = Some((seed, p0, p));
                         break 'seeds;
                     }
@@ -223,7 +227,11 @@ fn deposit_with_no_route_goes_idle() {
                 let r = region_at(seed, p.x, p.y);
                 match first {
                     None => first = Some((r, p)),
-                    Some((r0, p0)) if r != r0 => {
+                    // distinct region id is not enough: a node on the far
+                    // rim of a 1-tile lake is still harvestable from this
+                    // side (node_reachable's 3x3 ring) — demand a pair the
+                    // gather brain itself calls unreachable
+                    Some((r0, p0)) if r != r0 && !node_reachable(seed, p0, p) => {
                         found = Some((seed, p0, p));
                         break 'seeds;
                     }

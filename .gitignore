@@ -1,5 +1,6 @@
 /target
 /assets/voices/
+/assets/models/
 *.log
 dist/
 .DS_Store

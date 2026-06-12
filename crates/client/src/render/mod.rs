@@ -4,3 +4,4 @@
 pub mod ghost;
 pub mod models;
 pub mod sync;
+pub mod terrain_material;
