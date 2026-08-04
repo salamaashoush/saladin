@@ -27,6 +27,8 @@ fn mesh_index(kind: Decoration) -> Option<usize> {
         Decoration::Reeds => Some(crate::render::models::props::PROP_REEDS),
         Decoration::Palm => Some(crate::render::models::props::PROP_PALM),
         Decoration::PineCluster => Some(crate::render::models::props::PROP_PINE),
+        Decoration::Acacia => Some(crate::render::models::props::PROP_ACACIA),
+        Decoration::Olive => Some(crate::render::models::props::PROP_OLIVE),
         Decoration::None => None,
     }
 }

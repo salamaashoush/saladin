@@ -237,3 +237,143 @@ fn ford_passable_river_cliff_not() {
     assert!(!biome_passable(Biome::Cliff));
     assert!(!biome_buildable(Biome::Ford), "no towers plugging the crossing");
 }
+
+// ── climate + biome diversity (worldgen v3) ─────────────────────────────────
+
+fn land_biome_counts(seed: u32) -> std::collections::HashMap<Biome, u32> {
+    let g = worldgrid::world_grid(seed);
+    let mut counts = std::collections::HashMap::new();
+    for &b in &g.biome {
+        if biome_passable(b) {
+            *counts.entry(b).or_insert(0) += 1;
+        }
+    }
+    counts
+}
+
+#[test]
+fn no_map_is_a_single_biome() {
+    // The failure this guards against is the one the old one-axis moisture ramp
+    // had: every seed reading as the same green blob. A map must hold at least
+    // four land biomes with real presence, and none may swallow the continent.
+    for base in [3u32, 40, 91, 212, 777, 1500, 4096, 31337] {
+        for preset in 0..4u8 {
+            let seed = compose_seed(base, preset);
+            let counts = land_biome_counts(seed);
+            let land: u32 = counts.values().sum();
+            assert!(land > 1000, "seed {base}/{preset} has almost no land ({land})");
+            let significant = counts.values().filter(|&&c| c * 100 / land >= 3).count();
+            assert!(significant >= 4, "seed {base}/{preset} has only {significant} land biomes");
+            let top = *counts.values().max().unwrap();
+            assert!(
+                top * 100 / land <= 72,
+                "seed {base}/{preset}: one biome covers {}% of the land",
+                top * 100 / land
+            );
+        }
+    }
+}
+
+#[test]
+fn climate_archetypes_actually_change_the_world() {
+    // Two seeds that roll different regimes must differ in kind, not just in
+    // noise: the wet ones grow forest, the dry ones grow desert.
+    let mut wettest = (Fx::ZERO, 0u32);
+    let mut driest = (Fx::ONE, 0u32);
+    for base in 1..40u32 {
+        let seed = compose_seed(base, 0);
+        let c = climate::climate_archetype(seed);
+        if c.target_precip > wettest.0 {
+            wettest = (c.target_precip, seed);
+        }
+        if c.target_precip < driest.0 {
+            driest = (c.target_precip, seed);
+        }
+    }
+    let wet = land_biome_counts(wettest.1);
+    let dry = land_biome_counts(driest.1);
+    let tree = |m: &std::collections::HashMap<Biome, u32>| {
+        m.get(&Biome::Forest).copied().unwrap_or(0) + m.get(&Biome::Pine).copied().unwrap_or(0)
+    };
+    let sand = |m: &std::collections::HashMap<Biome, u32>| {
+        m.get(&Biome::Desert).copied().unwrap_or(0) + m.get(&Biome::Dunes).copied().unwrap_or(0)
+    };
+    assert!(tree(&wet) > tree(&dry), "the wet regime grew no more forest than the dry one");
+    assert!(sand(&dry) > sand(&wet), "the dry regime grew no more desert than the wet one");
+}
+
+#[test]
+fn highlands_preset_actually_reaches_the_high_country() {
+    // "Highlands" promised mountains and used to deliver 0.3% of them.
+    let mut high = 0u32;
+    let mut total = 0u32;
+    for base in 1..=8u32 {
+        let counts = land_biome_counts(compose_seed(base, 2));
+        let g = worldgrid::world_grid(compose_seed(base, 2));
+        for &b in &g.biome {
+            if matches!(b, Biome::Mountain | Biome::Snow | Biome::Alpine | Biome::Cliff) {
+                high += 1;
+            }
+        }
+        total += counts.values().sum::<u32>();
+    }
+    assert!(high * 100 / total >= 12, "highlands are only {}% high country", high * 100 / total);
+}
+
+#[test]
+fn soil_is_richest_where_the_water_runs() {
+    // Farms have to care about terrain: floodplain and delta soil must beat
+    // the dry interior, or the fertility layer is decoration.
+    let seed = compose_seed(11, 1);
+    let g = worldgrid::world_grid(seed);
+    let n = WORLD_SIZE as usize;
+    let (mut near, mut near_n, mut far, mut far_n) = (Fx::ZERO, 0i32, Fx::ZERO, 0i32);
+    for ty in 2..n - 2 {
+        for tx in 2..n - 2 {
+            let i = ty * n + tx;
+            if !biome_passable(g.biome[i]) {
+                continue;
+            }
+            let mut wet = false;
+            for (dx, dy) in [(1i32, 0i32), (-1, 0), (0, 1), (0, -1), (2, 0), (-2, 0), (0, 2), (0, -2)] {
+                let j = (ty as i32 + dy) as usize * n + (tx as i32 + dx) as usize;
+                wet |= biome_is_fresh_water(g.biome[j]);
+            }
+            if wet {
+                near += g.fertility[i];
+                near_n += 1;
+            } else {
+                far += g.fertility[i];
+                far_n += 1;
+            }
+        }
+    }
+    assert!(near_n > 50 && far_n > 50, "not enough samples ({near_n}/{far_n})");
+    let (a, b) = (near / Fx::from_num(near_n), far / Fx::from_num(far_n));
+    assert!(a > b, "riverside soil ({a}) is no richer than dry ground ({b})");
+}
+
+#[test]
+fn ore_follows_the_orogenic_belts_not_the_lowlands() {
+    let seed = compose_seed(23, 2);
+    let g = worldgrid::world_grid(seed);
+    let (mut high_ore, mut low_ore) = (Fx::ZERO, Fx::ZERO);
+    let (mut hn, mut ln) = (0i32, 0i32);
+    for i in 0..g.biome.len() {
+        if !biome_passable(g.biome[i]) {
+            continue;
+        }
+        if matches!(g.biome[i], Biome::Hills | Biome::Alpine | Biome::Hammada) {
+            high_ore += g.ore[i];
+            hn += 1;
+        } else {
+            low_ore += g.ore[i];
+            ln += 1;
+        }
+    }
+    assert!(hn > 20 && ln > 20);
+    assert!(
+        high_ore / Fx::from_num(hn) > low_ore / Fx::from_num(ln),
+        "the high country is no more mineralized than the plains"
+    );
+}

@@ -22,6 +22,26 @@ pub enum Biome {
     River = 12,
     Ford = 13,
     Cliff = 14,
+    /// Fresh standing water in a closed basin — fishable, never crossable.
+    Lake = 15,
+    /// Reed swamp on a floodplain or delta: wadeable but slow, unbuildable.
+    Marsh = 16,
+    /// A dry channel an arid climate leaves behind — a fast lane between banks.
+    Wadi = 17,
+    /// Evaporite pan at the bottom of an endorheic basin. Flat, dead, fast.
+    SaltFlat = 18,
+    /// Stone desert: scoured rock pavement, no sand, plenty of quarry.
+    Hammada = 19,
+    /// Hot dry grassland with acacia stands — the great herds live here.
+    Savanna = 20,
+    /// Mediterranean maquis: thorn scrub, berries and firewood.
+    Scrub = 21,
+    /// Highland conifer and cedar — the best timber on the map.
+    Pine = 22,
+    /// Terraced olive groves: food and wood off the same slope.
+    OliveGrove = 23,
+    /// Above the tree line: meadow, moss and bare stone.
+    Alpine = 24,
 }
 
 /// Cosmetic prop kinds the client scatters per biome (client-only dressing).
@@ -36,6 +56,8 @@ pub enum Decoration {
     PineCluster = 5,
     Boulder = 6,
     Reeds = 7,
+    Acacia = 8,
+    Olive = 9,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -74,7 +96,7 @@ const fn d(tree: Fx, rock: Fx, game: Fx, fish: Fx, gold: Fx) -> Density {
 }
 const NONE_DENS: Density = d(Z, Z, Z, Z, Z);
 
-const BIOME_DEFS: [BiomeDef; 15] = [
+const BIOME_DEFS: [BiomeDef; 25] = [
     // DeepWater
     BiomeDef {
         label: "Sea",
@@ -256,6 +278,126 @@ const BIOME_DEFS: [BiomeDef; 15] = [
         decoration: DecoSpec { kind: Decoration::Boulder, density: crate::fx!("0.2") },
         density: d(Z, crate::fx!("0.3"), Z, Z, crate::fx!("0.2")),
     },
+    // Lake — fresh water in a closed basin: the inland fishery
+    BiomeDef {
+        label: "Lake",
+        color: 0x3f86b8,
+        shade: 0x336f9c,
+        passable: false,
+        buildable: false,
+        move_cost_mul: Fx::MAX,
+        height_emphasis: crate::fx!("1"),
+        decoration: DecoSpec { kind: Decoration::Reeds, density: crate::fx!("0.06") },
+        density: d(Z, Z, Z, crate::fx!("0.9"), Z),
+    },
+    // Marsh — wadeable but ruinous ground: no foundations hold here
+    BiomeDef {
+        label: "Marsh",
+        color: 0x5d7a4a,
+        shade: 0x475e39,
+        passable: true,
+        buildable: false,
+        move_cost_mul: crate::fx!("2.0"),
+        height_emphasis: crate::fx!("0.5"),
+        decoration: DecoSpec { kind: Decoration::Reeds, density: crate::fx!("0.35") },
+        density: d(crate::fx!("0.05"), Z, crate::fx!("0.2"), crate::fx!("0.35"), Z),
+    },
+    // Wadi — a dry channel: the desert's road, and where placer gold settles
+    BiomeDef {
+        label: "Wadi",
+        color: 0xc4a877,
+        shade: 0xa88a5c,
+        passable: true,
+        buildable: false,
+        move_cost_mul: crate::fx!("0.9"),
+        height_emphasis: crate::fx!("0.45"),
+        decoration: DecoSpec { kind: Decoration::DuneGrass, density: crate::fx!("0.08") },
+        density: d(Z, crate::fx!("0.1"), crate::fx!("0.08"), Z, crate::fx!("0.3")),
+    },
+    // SaltFlat — evaporite pan: dead flat, dead empty, quick to cross
+    BiomeDef {
+        label: "Salt Flat",
+        color: 0xe8e4d6,
+        shade: 0xcdc7b4,
+        passable: true,
+        buildable: true,
+        move_cost_mul: crate::fx!("0.85"),
+        height_emphasis: crate::fx!("0.3"),
+        decoration: DecoSpec { kind: Decoration::None, density: Z },
+        density: NONE_DENS,
+    },
+    // Hammada — stone desert: the quarry belt of an arid map
+    BiomeDef {
+        label: "Hammada",
+        color: 0xa8906c,
+        shade: 0x8a7454,
+        passable: true,
+        buildable: true,
+        move_cost_mul: crate::fx!("1.35"),
+        height_emphasis: crate::fx!("1.1"),
+        decoration: DecoSpec { kind: Decoration::Rock, density: crate::fx!("0.28") },
+        density: d(Z, crate::fx!("0.7"), Z, Z, crate::fx!("0.12")),
+    },
+    // Savanna — hot grass and acacia: herds graze here in numbers
+    BiomeDef {
+        label: "Savanna",
+        color: 0xbfae5f,
+        shade: 0x9c8d45,
+        passable: true,
+        buildable: true,
+        move_cost_mul: crate::fx!("1.0"),
+        height_emphasis: crate::fx!("0.85"),
+        decoration: DecoSpec { kind: Decoration::Acacia, density: crate::fx!("0.09") },
+        density: d(crate::fx!("0.12"), crate::fx!("0.05"), crate::fx!("0.55"), Z, Z),
+    },
+    // Scrub — maquis: thorn, berries and firewood on a dry hillside
+    BiomeDef {
+        label: "Scrub",
+        color: 0x8f9b55,
+        shade: 0x6f7a3e,
+        passable: true,
+        buildable: true,
+        move_cost_mul: crate::fx!("1.15"),
+        height_emphasis: crate::fx!("0.95"),
+        decoration: DecoSpec { kind: Decoration::Shrub, density: crate::fx!("0.3") },
+        density: d(crate::fx!("0.18"), crate::fx!("0.08"), crate::fx!("0.3"), Z, Z),
+    },
+    // Pine — cedar and fir on the high slopes: the timber prize
+    BiomeDef {
+        label: "Cedar Forest",
+        color: 0x2f6146,
+        shade: 0x1e4530,
+        passable: true,
+        buildable: true,
+        move_cost_mul: crate::fx!("1.35"),
+        height_emphasis: crate::fx!("1.2"),
+        decoration: DecoSpec { kind: Decoration::PineCluster, density: crate::fx!("0.32") },
+        density: d(crate::fx!("1.0"), crate::fx!("0.05"), crate::fx!("0.1"), Z, Z),
+    },
+    // OliveGrove — terraced groves: wood and food off one slope
+    BiomeDef {
+        label: "Olive Grove",
+        color: 0x87a35e,
+        shade: 0x687f45,
+        passable: true,
+        buildable: true,
+        move_cost_mul: crate::fx!("1.05"),
+        height_emphasis: crate::fx!("0.9"),
+        decoration: DecoSpec { kind: Decoration::Olive, density: crate::fx!("0.28") },
+        density: d(crate::fx!("0.45"), Z, crate::fx!("0.25"), Z, Z),
+    },
+    // Alpine — above the tree line: thin meadow over exposed ore-bearing rock
+    BiomeDef {
+        label: "Alpine",
+        color: 0x9aa38c,
+        shade: 0x7b8470,
+        passable: true,
+        buildable: true,
+        move_cost_mul: crate::fx!("1.5"),
+        height_emphasis: crate::fx!("1.8"),
+        decoration: DecoSpec { kind: Decoration::Rock, density: crate::fx!("0.2") },
+        density: d(Z, crate::fx!("0.5"), Z, Z, crate::fx!("0.25")),
+    },
 ];
 
 pub fn biome_def(b: Biome) -> &'static BiomeDef {
@@ -300,9 +442,21 @@ pub fn gold_density(b: Biome) -> Fx {
 pub fn motherlode_density(b: Biome) -> Fx {
     match b {
         Biome::Hills => crate::fx!("0.5"),
+        Biome::Alpine => crate::fx!("0.6"),
+        Biome::Hammada => crate::fx!("0.35"),
         Biome::Snow => crate::fx!("0.2"),
         _ => crate::fx!("0"),
     }
+}
+
+/// Any water surface — sea, lake or river. Fords are crossings, not water.
+pub fn biome_is_water(b: Biome) -> bool {
+    matches!(b, Biome::DeepWater | Biome::ShallowWater | Biome::River | Biome::Lake)
+}
+
+/// Fresh water: what a fishing hut can work inland and a farm can irrigate from.
+pub fn biome_is_fresh_water(b: Biome) -> bool {
+    matches!(b, Biome::River | Biome::Lake)
 }
 
 #[cfg(test)]

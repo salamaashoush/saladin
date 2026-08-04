@@ -1,8 +1,9 @@
 use crate::biomes::{Biome, biome_passable};
 use crate::constants::WORLD_SIZE;
 use crate::enums::ResourceType;
-use crate::math::{Fx, V2};
+use crate::math::{Fx, V2, spline};
 use crate::noise::fbm;
+use crate::plates::{PlateSample, Plates};
 use crate::presets::{MapBias, map_preset_by_index};
 use crate::rng::{Rng, hash2, mix_seed};
 
@@ -57,47 +58,37 @@ pub fn seed_bias(seed: u32) -> MapBias {
     map_preset_by_index(seed_preset(seed) as i32).bias
 }
 
-/// Seeded continental mask: low-frequency plate noise instead of the old
-/// centered disc, so different seeds get genuinely different geography —
-/// off-center continents, inland seas, peninsulas, island chains — with a
-/// guaranteed ocean ring at the map border (the camera/ocean disc expect it).
+/// Continentalness at a point: the tectonic crust elevation (the plate field is
+/// the authority on where land is at all) plus a low-frequency noise warp that
+/// keeps coastlines organic, faded to ocean at the map border so the camera's
+/// backdrop disc always meets open sea.
 const CONT_SCALE: Fx = crate::fx!("0.006");
 
-fn continent(base: u32, x: Fx, y: Fx) -> Fx {
-    let c = fbm(
+fn continent(plates: &Plates, base: u32, x: Fx, y: Fx) -> (Fx, PlateSample) {
+    let p = plates.sample(x, y);
+    let n = fbm(
         x * CONT_SCALE + Fx::from_num(53),
         y * CONT_SCALE + Fx::from_num(71),
         base ^ 0xc047,
         3,
     );
-    // remap: below the basin threshold sinks to ocean, above plateaus to land
-    let plate = ((c - crate::fx!("0.36")) * crate::fx!("2.0")).clamp(Fx::ZERO, crate::fx!("1.05"));
-    let plates = crate::fx!("0.24") + plate * crate::fx!("0.74");
-    // a weak central dome anchors a mainland so no seed rolls all-ocean; the
-    // plates carve bays, peninsulas and side continents around/through it
+    // crust rides the plate, noise decides the shoreline's fingers and bays
+    let c = p.base + (n - crate::fx!("0.5")) * crate::fx!("0.30");
     let cc = Fx::from_num(WORLD_SIZE) / Fx::from_num(2);
     let dx = x - cc;
     let dy = y - cc;
     let d2 = (dx * dx + dy * dy) / (cc * cc);
-    let dome = (crate::fx!("1.02") - d2 * crate::fx!("1.15")).max(Fx::ZERO) * crate::fx!("0.72");
+    // a weak central dome anchors a mainland so no seed rolls all-ocean
+    let dome = (crate::fx!("0.9") - d2 * crate::fx!("1.3")).max(Fx::ZERO) * crate::fx!("0.30");
     let m = Fx::from_num(WORLD_SIZE);
-    let edge = (x.min(y).min(m - x).min(m - y) / crate::fx!("26")).clamp(Fx::ZERO, Fx::ONE);
-    plates.max(dome) * edge
-}
-
-/// Piecewise-linear control spline (sorted x), exact in fixed point.
-fn spline(pts: &[(Fx, Fx)], x: Fx) -> Fx {
-    if x <= pts[0].0 {
-        return pts[0].1;
-    }
-    for w in pts.windows(2) {
-        let (x0, y0) = w[0];
-        let (x1, y1) = w[1];
-        if x <= x1 {
-            return y0 + (y1 - y0) * ((x - x0) / (x1 - x0));
-        }
-    }
-    pts[pts.len() - 1].1
+    // the border fade is a min() of four ramps, which clips corner land into
+    // rectangles; a noise offset and a smoothstep hide the frame
+    let jag = (fbm(x * crate::fx!("0.05"), y * crate::fx!("0.05"), base ^ 0x3f19, 2) - crate::fx!("0.5"))
+        * crate::fx!("18");
+    let e = ((x.min(y).min(m - x).min(m - y) + jag) / crate::fx!("34")).clamp(Fx::ZERO, Fx::ONE);
+    let edge = e * e * (crate::fx!("3") - crate::fx!("2") * e);
+    let c = (c.max(dome) + crate::fx!("0.335")) * edge;
+    (c.clamp(Fx::ZERO, crate::fx!("1.2")), p)
 }
 
 // continentalness -> base elevation: ocean floor, shelf, a STEEP coast
@@ -123,12 +114,14 @@ const SPL_ERO: &[(Fx, Fx)] = &[
 ];
 const ERO_SCALE: Fx = crate::fx!("0.012");
 
-/// The raw height field — spline-stacked Minecraft-style: continentalness
-/// picks the base elevation, erosion picks how much relief sits on it, and
-/// peaks-and-valleys (ridged fold) + detail fbm supply that relief. Domain
-/// warp distorts everything organically; terraces stylize the hill flanks.
+/// The raw height field. Continentalness (crust + noise) picks the base
+/// elevation, erosion picks how much relief sits on it, and the ridged fold
+/// supplies that relief — but only where the plates are actually building
+/// mountains, so ranges chain along their seam instead of speckling the map.
+/// Domain warp distorts everything organically; terraces stylize hill flanks.
 /// The worldgrid pipeline then erodes, floods and carves this shape.
-pub(crate) fn height_at(base: u32, island_gain: Fx, x: Fx, y: Fx) -> Fx {
+pub(crate) fn height_at(plates: &Plates, base: u32, bias: MapBias, x: Fx, y: Fx) -> Fx {
+    let island_gain = bias.island_gain;
     let half = crate::fx!("0.5");
     let two = crate::fx!("2");
     let wx = (fbm(x * WARP_SCALE, y * WARP_SCALE, base ^ 0x1b56, 3) - half) * two * WARP_AMP;
@@ -137,7 +130,7 @@ pub(crate) fn height_at(base: u32, island_gain: Fx, x: Fx, y: Fx) -> Fx {
         * two
         * WARP_AMP;
 
-    let c = continent(base, x, y);
+    let (c, plate) = continent(plates, base, x + wx * crate::fx!("0.4"), y + wy * crate::fx!("0.4"));
     let ero = fbm((x + wx) * ERO_SCALE + Fx::from_num(211), (y + wy) * ERO_SCALE + Fx::from_num(97), base ^ 0xe705, 3);
     let detail = fbm((x + wx) * H_SCALE, (y + wy) * H_SCALE, base, 5) - half;
     let rn = fbm((x + wx) * RIDGE_SCALE, (y + wy) * RIDGE_SCALE, base ^ 0x71d6, 4);
@@ -145,11 +138,15 @@ pub(crate) fn height_at(base: u32, island_gain: Fx, x: Fx, y: Fx) -> Fx {
     let pv = folded * folded;
 
     let base_h = spline(SPL_CONT, c);
-    let amp = spline(SPL_ERO, ero);
+    // young crust carries alpine relief, shield interiors are worn flat
+    let amp = (spline(SPL_ERO, ero) + plate.belt * crate::fx!("0.55")) * bias.relief_gain;
     // land carries the full relief budget; the sea floor stays calm so the
     // coast contour comes from continentalness, not detail noise
     let landness = ((base_h - crate::fx!("0.3")) * crate::fx!("7")).clamp(crate::fx!("0.25"), Fx::ONE);
-    let mut h = base_h + (detail * crate::fx!("0.8") + pv * RIDGE_GAIN * crate::fx!("4")) * amp * landness;
+    // ridges belong to the orogenic seam; away from it they fade to gentle swell
+    let ridge_w = crate::fx!("0.35") + plate.belt * crate::fx!("1.6");
+    let mut h = base_h
+        + (detail * crate::fx!("0.8") + pv * RIDGE_GAIN * crate::fx!("4") * ridge_w) * amp * landness;
 
     // terraced flanks through the hill band — plateaus read as deliberate
     // low-poly stylization and feed the cliff detector clean step edges

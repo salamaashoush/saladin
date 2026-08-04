@@ -19,10 +19,40 @@ pub const PROP_REEDS: usize = 4;
 pub const PROP_PALM: usize = 5;
 pub const PROP_PINE: usize = 6;
 pub const PROP_FLOWERS: usize = 7;
+pub const PROP_ACACIA: usize = 8;
+pub const PROP_OLIVE: usize = 9;
 
 /// Mesh templates for the vegetation/prop instancer, indexed by placement.
 pub fn prop_meshes() -> Vec<Mesh> {
-    vec![shrub(), dune_grass(), rock(), boulder(), reeds(), palm(), pine(), flowers()]
+    vec![shrub(), dune_grass(), rock(), boulder(), reeds(), palm(), pine(), flowers(), acacia(), olive_prop()]
+}
+
+/// Savanna acacia: bare trunk under a wide flat canopy — the silhouette that
+/// tells you a map row is hot and dry from three screens away.
+fn acacia() -> Mesh {
+    let canopy = lin(0x6d7a3c);
+    let canopy_lo = lin(0x57632f);
+    let mut parts = vec![
+        part(frustum(0.05, 0.11, 1.05, 5), lin(0x6b5334), xyz(0.0, 0.52, 0.0)),
+        part(frustum(0.04, 0.06, 0.5, 4), lin(0x6b5334), at_rot(0.16, 0.95, 0.0, Quat::from_rotation_z(-0.5))),
+        part(frustum(0.04, 0.06, 0.5, 4), lin(0x6b5334), at_rot(-0.16, 0.95, 0.05, Quat::from_rotation_z(0.5))),
+    ];
+    for (dx, dz, r, y, c) in
+        [(0.0f32, 0.0f32, 0.62f32, 1.28f32, canopy), (0.34, 0.1, 0.34, 1.2, canopy_lo), (-0.3, -0.12, 0.3, 1.22, canopy_lo)]
+    {
+        parts.push(part(squashed(icosahedron(r), 0.26), c, xyz(dx, y, dz)));
+    }
+    merge(parts)
+}
+
+/// Cosmetic olive: the harvestable grove tree at scrub scale.
+fn olive_prop() -> Mesh {
+    let leaf = lin(0x6a7b46);
+    merge(vec![
+        part(frustum(0.05, 0.09, 0.34, 5), lin(TRUNK), at_rot(0.03, 0.17, 0.0, Quat::from_rotation_z(0.2))),
+        part(squashed(icosahedron(0.3), 0.66), leaf, xyz(0.0, 0.5, 0.0)),
+        part(squashed(icosahedron(0.19), 0.62), lin(0x55663a), xyz(0.2, 0.44, 0.08)),
+    ])
 }
 
 // A little meadow patch: thin stems with white/red/gold heads.

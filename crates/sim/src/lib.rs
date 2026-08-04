@@ -7,6 +7,7 @@ pub mod ai;
 pub mod biomes;
 pub mod buildings;
 pub mod buildings_defs;
+pub mod climate;
 pub mod combat;
 pub mod constants;
 pub mod content;
@@ -19,6 +20,7 @@ pub mod math;
 pub mod morale;
 pub mod noise;
 pub mod pathfinding;
+pub mod plates;
 pub mod presets;
 pub mod research;
 pub mod rng;
@@ -44,9 +46,11 @@ pub use content::{
 pub use match_state::{MatchStatus, match_simulates};
 pub use biomes::{
     Biome, BiomeDef, DecoSpec, Decoration, biome_buildable, biome_decoration, biome_def,
-    biome_height_emphasis, biome_passable, fish_density, game_density, gold_density, move_cost_mul,
-    rock_density, tree_density,
+    biome_height_emphasis, biome_is_fresh_water, biome_is_water, biome_passable, fish_density,
+    game_density, gold_density, motherlode_density, move_cost_mul, rock_density, tree_density,
 };
+pub use climate::{CLIMATES, ClimateArchetype, climate_archetype, highland, whittaker};
+pub use plates::{PlateSample, Plates};
 pub use pathfinding::{
     AStar, MAX_EXPANSIONS, find_path_grid, line_of_sight, nearest_passable_grid,
     nearest_reachable_passable_grid,

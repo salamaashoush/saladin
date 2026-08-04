@@ -121,6 +121,23 @@ pub fn nearest_within(p: V2, candidates: &[Located], range: Fx) -> Option<Locate
     best
 }
 
+/// Piecewise-linear control spline over ascending `x` — exact in fixed point.
+/// Worldgen shapes every transfer curve (continentalness to elevation,
+/// latitude to temperature) with these instead of magic polynomials.
+pub fn spline(pts: &[(Fx, Fx)], x: Fx) -> Fx {
+    if x <= pts[0].0 {
+        return pts[0].1;
+    }
+    for w in pts.windows(2) {
+        let (x0, y0) = w[0];
+        let (x1, y1) = w[1];
+        if x <= x1 {
+            return y0 + (y1 - y0) * ((x - x0) / (x1 - x0));
+        }
+    }
+    pts[pts.len() - 1].1
+}
+
 /// Index of the nearest point to `p`, or None. Squared distance, deterministic
 /// tie-break by lowest index (strict `<`).
 pub fn nearest_index(p: V2, pts: &[V2]) -> Option<usize> {

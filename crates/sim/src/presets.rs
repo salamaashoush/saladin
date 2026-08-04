@@ -12,6 +12,10 @@ pub struct MapBias {
     pub elev_gain: Fx,
     pub river_gain: Fx,
     pub cliff_gain: Fx,
+    /// Multiplies the relief budget in the height field — how much vertical
+    /// range the land actually spans, which is what decides whether a map has
+    /// real mountains or only rolling ground.
+    pub relief_gain: Fx,
     /// >0 multiplies the height field by a large-scale blob mask, shattering
     /// the single continent into islands (archipelago).
     pub island_gain: Fx,
@@ -31,6 +35,7 @@ pub const NEUTRAL_BIAS: MapBias = MapBias {
     elev_gain: crate::fx!("1"),
     river_gain: crate::fx!("1"),
     cliff_gain: crate::fx!("1"),
+    relief_gain: crate::fx!("1"),
     island_gain: crate::fx!("0"),
 };
 
@@ -51,6 +56,7 @@ pub const MAP_PRESETS: [MapPreset; 4] = [
             elev_gain: crate::fx!("0.9"),
             river_gain: crate::fx!("1.9"),
             cliff_gain: crate::fx!("0.6"),
+            relief_gain: crate::fx!("0.72"),
             island_gain: crate::fx!("0"),
         },
     },
@@ -64,6 +70,7 @@ pub const MAP_PRESETS: [MapPreset; 4] = [
             elev_gain: crate::fx!("1.45"),
             river_gain: crate::fx!("0.7"),
             cliff_gain: crate::fx!("1.7"),
+            relief_gain: crate::fx!("1.75"),
             island_gain: crate::fx!("0"),
         },
     },
@@ -77,6 +84,7 @@ pub const MAP_PRESETS: [MapPreset; 4] = [
             elev_gain: crate::fx!("1.0"),
             river_gain: crate::fx!("0.3"),
             cliff_gain: crate::fx!("0.8"),
+            relief_gain: crate::fx!("1.05"),
             island_gain: crate::fx!("1"),
         },
     },
