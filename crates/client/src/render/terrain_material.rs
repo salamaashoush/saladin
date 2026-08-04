@@ -20,6 +20,8 @@ pub struct TerrainUniform {
     /// the ground itself has to answer "where will anything grow", so the
     /// fertility the worldgen computed is painted straight onto the terrain.
     pub overlay: Vec4,
+    /// x: elapsed seconds, yz: cloud drift direction, w: cloud shadow depth.
+    pub sky: Vec4,
 }
 
 #[derive(Asset, AsBindGroup, Reflect, Debug, Clone)]
@@ -34,8 +36,9 @@ impl Default for TerrainExtension {
         TerrainExtension {
             settings: TerrainUniform {
                 rock_color: Color::srgb_u8(0x84, 0x7a, 0x68).to_linear(),
-                params: Vec4::new(0.22, 0.5, 0.3, 0.2),
+                params: Vec4::new(0.22, 0.5, 0.3, 0.34),
                 overlay: Vec4::ZERO,
+                sky: Vec4::new(0.0, 0.62, 0.78, 0.16),
             },
         }
     }
@@ -52,6 +55,14 @@ impl MaterialExtension for TerrainExtension {
 /// Fade the soil overlay in while the player is siting a field and out again
 /// when they are not — an instant switch reads as a glitch, a quarter-second
 /// wash reads as the ground answering the question.
+/// Advance the shader clock the water and cloud shadows run on.
+pub fn drive_sky_clock(time: Res<Time>, mut materials: ResMut<Assets<TerrainMaterial>>) {
+    let t = time.elapsed_secs_wrapped();
+    for (_, mat) in materials.iter_mut() {
+        mat.extension.settings.sky.x = t;
+    }
+}
+
 pub fn drive_soil_overlay(
     mode: Res<crate::input::InputMode>,
     time: Res<Time>,
@@ -83,6 +94,6 @@ impl Plugin for TerrainMaterialPlugin {
     fn build(&self, app: &mut App) {
         bevy::asset::embedded_asset!(app, "terrain.wgsl");
         app.add_plugins(MaterialPlugin::<TerrainMaterial>::default());
-        app.add_systems(Update, drive_soil_overlay);
+        app.add_systems(Update, (drive_soil_overlay, drive_sky_clock));
     }
 }

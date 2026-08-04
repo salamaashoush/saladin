@@ -6,6 +6,8 @@ use crate::terrain::{HeightField, height_at};
 use bevy::input::mouse::{MouseScrollUnit, MouseWheel};
 use bevy::prelude::*;
 use bevy::camera::ScalingMode;
+use bevy::camera::Hdr;
+use bevy::post_process::bloom::Bloom;
 use crate::LocalPlayer;
 use saladin_protocol::{Building, Owner, Pos};
 use saladin_sim::{BuildingKind, WORLD_SIZE};
@@ -120,6 +122,10 @@ pub fn spawn_camera(world: &mut World) {
     let tf = Transform::from_translation(state.center + state.rig_offset()).looking_at(state.center, Vec3::Y);
     world.spawn((
         Camera3d::default(),
+        // HDR + a restrained bloom: the sun glints off water and armour
+        // instead of the whole frame blooming into soup
+        Hdr,
+        Bloom { intensity: 0.09, ..Bloom::OLD_SCHOOL },
         Projection::Orthographic(OrthographicProjection {
             scaling_mode: ScalingMode::FixedVertical { viewport_height: state.view_size * 2.0 },
             // near stays at 0: a negative near pulls geometry BEHIND the camera

@@ -493,13 +493,25 @@ fn node_variant(res: ResourceType, seed: u32, x: f32, z: f32, roll: usize, len: 
     let idx = match res {
         ResourceType::Wood => match biome {
             Biome::Oasis => TREE_PALM,
-            Biome::Forest => [TREE_CONIFER, TREE_BROADLEAF_TALL, TREE_CONIFER, TREE_BROADLEAF][roll % 4],
-            Biome::Steppe | Biome::Desert | Biome::Dunes | Biome::Sand | Biome::Hills => TREE_OLIVE,
+            // cedar country: conifer with the odd tall broadleaf in the gullies
+            Biome::Pine | Biome::Alpine => [TREE_CONIFER, TREE_CONIFER, TREE_BROADLEAF_TALL, TREE_CONIFER][roll % 4],
+            // broadleaf woodland is BROADLEAF; it used to render as pine, which
+            // is why every temperate map looked like the same conifer plantation
+            Biome::Forest => [TREE_BROADLEAF, TREE_BROADLEAF_TALL, TREE_BROADLEAF, TREE_CONIFER][roll % 4],
+            Biome::OliveGrove | Biome::Scrub => [TREE_OLIVE, TREE_OLIVE, TREE_BROADLEAF][roll % 3],
+            Biome::Savanna => [TREE_OLIVE, TREE_BROADLEAF, TREE_OLIVE][roll % 3],
+            Biome::Marsh => [TREE_BROADLEAF, TREE_BROADLEAF_TALL][roll % 2],
+            Biome::Steppe | Biome::Desert | Biome::Dunes | Biome::Sand | Biome::Hills
+            | Biome::Hammada | Biome::Wadi => TREE_OLIVE,
             _ => [TREE_BROADLEAF, TREE_BROADLEAF_TALL, TREE_BROADLEAF, TREE_CONIFER][roll % 4],
         },
         ResourceType::Food => match biome {
-            Biome::Forest => [FOOD_BOAR, FOOD_BERRY, FOOD_BOAR, FOOD_DEER][roll % 4],
+            Biome::Forest | Biome::Pine => [FOOD_BOAR, FOOD_BERRY, FOOD_BOAR, FOOD_DEER][roll % 4],
             Biome::Oasis => [FOOD_BERRY, FOOD_DEER_GRAZING][roll % 2],
+            Biome::Scrub => [FOOD_BERRY, FOOD_BERRY, FOOD_DEER][roll % 3],
+            Biome::Marsh => [FOOD_BOAR, FOOD_BERRY][roll % 2],
+            // the great herds of the dry grass
+            Biome::Savanna => [FOOD_DEER, FOOD_DEER_GRAZING, FOOD_DEER, FOOD_BOAR][roll % 4],
             _ => [FOOD_DEER, FOOD_DEER_GRAZING, FOOD_BOAR, FOOD_BERRY][roll % 4],
         },
         _ => roll % len,
@@ -685,11 +697,21 @@ pub fn sync_render(
                 } else {
                     (world - Vec3::Y * 0.01, Quat::from_rotation_y(yaw))
                 };
+                // Every tree the same height reads as a plantation. A
+                // deterministic per-node scale gives a wood saplings and
+                // veterans; herds and outcrops vary far less.
+                let spread = match n.res_type {
+                    ResourceType::Wood => 0.34,
+                    ResourceType::Food => 0.12,
+                    _ => 0.18,
+                };
+                let jitter = ((gid.0 >> 11) % 1000) as f32 / 1000.0 - 0.5;
+                let scale = 1.0 + jitter * spread * 2.0;
                 let mut e = commands.spawn((
                     RenderRoot(gid.0),
                     Mesh3d(mesh),
                     MeshMaterial3d(rmats.node[&n.res_type].clone()),
-                    Transform::from_translation(pos).with_rotation(rot),
+                    Transform::from_translation(pos).with_rotation(rot).with_scale(Vec3::splat(scale)),
                     Lerp { target: pos, yaw, bob_phase: 0.0, turn: false, hop: false },
                 ));
                 if fishy {

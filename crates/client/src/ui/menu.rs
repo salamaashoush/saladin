@@ -281,6 +281,15 @@ fn sp_screen(p: &mut ChildSpawnerCommands, font: &UiFont, assets: &UiAssets, cfg
         10.0,
         TEXT_DIM,
     );
+    // The preset picks the geography; the seed picks the CLIMATE, and that is
+    // most of why one seed is a cedar upland and the next a sand sea. Naming
+    // it turns "New seed" from a dice roll into a choice.
+    let climate = saladin_sim::climate_archetype(
+        saladin_sim::compose_seed(cfg.seed, cfg.preset),
+    );
+    p.spawn(Node { height: Val::Px(2.0), ..default() });
+    label(p, font, climate.label, 12.0, GOLD);
+    label(p, font, climate.blurb, 10.0, TEXT_DIM);
     p.spawn(Node { height: Val::Px(4.0), ..default() });
     super::preview::preview_node(p, preview);
     p.spawn(Node { height: Val::Px(4.0), ..default() });

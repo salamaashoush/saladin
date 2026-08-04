@@ -29,6 +29,8 @@ struct TerrainExtension {
     params: vec4<f32>,
     // x: soil-overlay strength; the mesh carries per-vertex fertility in uv.x
     overlay: vec4<f32>,
+    // x: elapsed seconds, yz: cloud drift direction, w: cloud shadow depth
+    sky: vec4<f32>,
 }
 
 @group(#{MATERIAL_BIND_GROUP}) @binding(100)
@@ -76,6 +78,30 @@ fn fragment(
         let strata = 0.82 + 0.18 * vnoise(vec2<f32>(wp.y * 6.0, (wp.x + wp.z) * 0.35));
         let rock = terrain.rock_color.rgb * strata * (0.8 + 0.4 * g);
         base = vec4<f32>(mix(base.rgb, rock, rocky * 0.9), base.a);
+    }
+
+    // Live water: the mesh bakes the swell into vertex colour, which is static
+    // and reads as painted. Two crossing wave trains and a sun glint make the
+    // same surface move.
+    let wet = 1.0 - clamp(in.uv.y, 0.0, 1.0);
+    if wet > 0.0 {
+        let t = terrain.sky.x;
+        let w1 = vnoise(wp.xz * 0.11 + vec2<f32>(t * 0.35, t * 0.12));
+        let w2 = vnoise(wp.xz * 0.31 - vec2<f32>(t * 0.19, t * 0.44));
+        let wave = (w1 * 0.6 + w2 * 0.4 - 0.5);
+        // narrow crests catch the sun; troughs deepen toward the sea colour
+        let glint = smoothstep(0.24, 0.42, wave);
+        base = vec4<f32>(base.rgb * (1.0 + wave * 0.16 * wet) + vec3<f32>(0.10, 0.13, 0.14) * glint * wet, base.a);
+    }
+
+    // Cloud shadows: slow soft-edged patches drifting across the map. Nothing
+    // sells scale on a static heightfield like weather crossing it.
+    if terrain.sky.w > 0.0 {
+        let drift = terrain.sky.yz * terrain.sky.x;
+        let c1 = vnoise(wp.xz * 0.013 + drift * 0.013);
+        let c2 = vnoise(wp.xz * 0.031 + drift * 0.031);
+        let cover = smoothstep(0.46, 0.78, c1 * 0.68 + c2 * 0.32);
+        base = vec4<f32>(base.rgb * (1.0 - cover * terrain.sky.w), base.a);
     }
 
     // grain + macro tint on everything else

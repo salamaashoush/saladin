@@ -190,7 +190,7 @@ const BIOME_DEFS: [BiomeDef; 25] = [
         buildable: true,
         move_cost_mul: crate::fx!("1.3"),
         height_emphasis: crate::fx!("1.0"),
-        decoration: DecoSpec { kind: Decoration::PineCluster, density: crate::fx!("0.22") },
+        decoration: DecoSpec { kind: Decoration::Shrub, density: crate::fx!("0.24") },
         density: d(crate::fx!("0.85"), Z, crate::fx!("0.12"), Z, Z),
     },
     // Hills
