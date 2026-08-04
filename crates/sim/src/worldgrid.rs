@@ -78,7 +78,7 @@ const FORD_HASH_T: Fx = crate::fx!("0.74");
 const CARVE_MAX: Fx = crate::fx!("0.05");
 
 // classification bands
-const BEACH_BAND: Fx = crate::fx!("0.035");
+const BEACH_BAND: Fx = crate::fx!("0.020");
 const HILL_T: Fx = crate::fx!("0.62");
 const MOUNTAIN_T: Fx = crate::fx!("0.78");
 const CLIFF_STEP: Fx = crate::fx!("0.055");

@@ -117,6 +117,19 @@ pub fn vegetation_placements(seed: u32) -> Vec<Placement> {
             if dec.density <= Fx::ZERO {
                 continue;
             }
+            // Reeds root in the shallows they can reach the bottom of. A wide
+            // continental shelf is still shallow water, and left ungated the
+            // whole bay grows a reed bed a mile from shore.
+            if dec.kind == Decoration::Reeds
+                && !saladin_sim::biome_passable(s.biome)
+                && !(-2..=2).any(|dx| {
+                    (-2..=2).any(|dy| {
+                        saladin_sim::is_passable(seed, tx + dx, ty + dy)
+                    })
+                })
+            {
+                continue;
+            }
             let Some(mesh) = mesh_index(dec.kind) else { continue };
             let kind = dec.kind as u32;
             // Independent hash stream per decoration so kinds don't correlate.
