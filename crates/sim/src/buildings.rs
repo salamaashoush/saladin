@@ -2,7 +2,7 @@ use crate::buildings_defs::building_def;
 use crate::constants::{TOWN_RADIUS, WORLD_SIZE};
 use crate::enums::BuildingKind;
 use crate::math::{Fx, V2, dist2};
-use crate::terrain::{is_buildable_tile, is_passable, is_water_tile};
+use crate::terrain::{fertility_at, is_buildable_tile, is_passable, is_water_tile};
 use std::collections::HashSet;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -145,6 +145,22 @@ pub enum PlaceError {
     /// Fully sealed footprint: no walkable tile borders it (peasants could
     /// never reach it to deposit or repair).
     NoApproach,
+    /// Ground too poor to farm — nothing grows on rock, sand or salt.
+    PoorSoil,
+}
+
+/// Mean soil fertility under a footprint — a field is only as good as the
+/// worst of the ground it covers, so this averages rather than samples.
+pub fn soil_quality(seed: u32, footprint: i32, x: Fx, y: Fx) -> Fx {
+    let tiles = footprint_tiles(footprint, x, y);
+    if tiles.is_empty() {
+        return Fx::ZERO;
+    }
+    let half = crate::fx!("0.5");
+    let sum = tiles.iter().fold(Fx::ZERO, |acc, t| {
+        acc + fertility_at(seed, Fx::from_num(t.tx) + half, Fx::from_num(t.ty) + half)
+    });
+    sum / Fx::from_num(tiles.len() as i32)
 }
 
 /// The COMPLETE placement rule set, shared by the build command, the wall
@@ -166,6 +182,9 @@ pub fn check_place<O: Fn(i32, i32) -> bool>(
         if occupied(t.tx, t.ty) {
             return Err(PlaceError::Occupied);
         }
+    }
+    if def.min_fertility > Fx::ZERO && soil_quality(seed, def.footprint, x, y) < def.min_fertility {
+        return Err(PlaceError::PoorSoil);
     }
     if def.requires_water {
         let waterside = {

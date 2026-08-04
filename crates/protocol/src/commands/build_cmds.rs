@@ -174,6 +174,13 @@ pub(crate) fn build(world: &mut World, owner: u64, kind: BuildingKind, pos: V2, 
 
     let center = footprint_center(def.footprint, pos.x, pos.y);
     let id = spawn::spawn_building(world, owner, kind, center, match_id);
+    // A farm IS its field: sowing it plants a food node the peasants work, and
+    // how fast that node regrows is the soil's business, not the player's.
+    if def.min_fertility > Fx::ZERO {
+        let soil = saladin_sim::soil_quality(seed, def.footprint, pos.x, pos.y);
+        let regen = Fx::ONE + soil * Fx::from_num(saladin_sim::FARM_REGEN_MAX);
+        spawn::spawn_field(world, owner, id, center, regen.to_num::<i32>().max(1), match_id);
+    }
     // a gate in a clear X- or Z-run turns its passage across the run; the
     // player's chosen facing wins when the neighborhood is ambiguous
     let facing = if kind == BuildingKind::Gatehouse {

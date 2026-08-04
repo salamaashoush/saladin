@@ -1,13 +1,14 @@
 use crate::ai::{PlannerTuning, TacticalTuning};
-use crate::biomes::{fish_density, game_density, gold_density, motherlode_density, rock_density, tree_density};
+use crate::biomes::{game_density, gold_density, motherlode_density, rock_density, tree_density};
 use crate::constants::{
     FOOD_NODES, FOOD_YIELD, GOLD_NODES, GOLD_YIELD, SPAWN_MARGIN, STONE_NODES, STONE_YIELD,
     TREE_COUNT, TREE_WOOD, WORLD_SIZE,
 };
+use crate::biomes::Biome;
 use crate::enums::{Faction, ResourceType};
 use crate::math::{Fx, V2};
 use crate::research::Tech;
-use crate::terrain::ScatterRule;
+use crate::terrain::{NodeSite, ScatterRule};
 use serde::{Deserialize, Serialize};
 
 // ── resources ────────────────────────────────────────────────────────────────
@@ -30,22 +31,77 @@ pub fn resource_def(r: ResourceType) -> &'static ResourceDef {
     &RESOURCE_DEFS[r as usize]
 }
 
-/// Scatter rules for all node kinds. Food splits 40% fish (coastal) / 60% game.
+// ── where resources actually come from ───────────────────────────────────────
+// A biome label alone puts gold wherever the ground is rocky. These rules read
+// the geology and climate layers instead, so a deposit sits where its formation
+// process would have put it.
+
+/// Timber: the biome sets the stand, the rain sets how thick it grows.
+fn timber(s: &NodeSite) -> Fx {
+    tree_density(s.biome) * (crate::fx!("0.55") + s.precip * crate::fx!("0.8"))
+}
+
+/// Building stone: exposed rock. Steep, dry, high ground quarries best.
+fn quarry(s: &NodeSite) -> Fx {
+    rock_density(s.biome) * (crate::fx!("0.75") + s.height * crate::fx!("0.5"))
+}
+
+/// Game herds follow the grazing, so fertile open country carries more of them.
+fn herds(s: &NodeSite) -> Fx {
+    game_density(s.biome) * (crate::fx!("0.5") + s.fertility * crate::fx!("1.3"))
+}
+
+/// A shore's fishery depends on the water it faces: a lake teems, a river runs
+/// thin, the open sea sits in between.
+fn fishery(s: &NodeSite) -> Fx {
+    let Some(water) = s.adjacent_water else { return Fx::ZERO };
+    match water {
+        Biome::Lake => crate::fx!("0.85"),
+        Biome::River => crate::fx!("0.45"),
+        Biome::ShallowWater => crate::fx!("0.62"),
+        Biome::DeepWater => crate::fx!("0.3"),
+        _ => Fx::ZERO,
+    }
+}
+
+/// Gold veins live in mineralized rock — the orogenic belts and volcanic arcs
+/// the plate field marks out, not any old hillside.
+fn vein(s: &NodeSite) -> Fx {
+    gold_density(s.biome) * (crate::fx!("0.25") + s.ore * crate::fx!("1.8"))
+}
+
+/// Placer gold: grains weathered out of the highlands and dropped in the gravel
+/// of a channel below them. Cheap, safe, early - and it runs out.
+fn placer(s: &NodeSite) -> Fx {
+    if !matches!(s.biome, Biome::Wadi | Biome::Sand | Biome::Marsh | Biome::Oasis)
+        && !s.adjacent_water.is_some_and(crate::biomes::biome_is_fresh_water)
+    {
+        return Fx::ZERO;
+    }
+    (s.ore * crate::fx!("1.1")).min(crate::fx!("0.7"))
+}
+
+/// The exploration prize: rich deposits in the remote high country, and only
+/// where the rock is mineralized enough to hold them.
+fn motherlode(s: &NodeSite) -> Fx {
+    motherlode_density(s.biome) * (crate::fx!("0.15") + s.ore * crate::fx!("1.6"))
+}
+
+/// Scatter rules for all node kinds. Food splits between fisheries and herds.
 pub fn node_kinds() -> Vec<ScatterRule> {
     let food_fish = (FOOD_NODES as f64 * 0.4).round() as i32;
     let food_game = FOOD_NODES - food_fish;
     // stone/gold land as tight AoE-style deposits (4-5 / 5-7 nodes per
     // patch); trees clump via the grove mask; animals roam as singles
     vec![
-        ScatterRule { res_type: ResourceType::Wood, count: TREE_COUNT, yield_: TREE_WOOD, density: tree_density, coastal_only: false, clustered: true, patch: (1, 1) },
-        ScatterRule { res_type: ResourceType::Stone, count: STONE_NODES, yield_: STONE_YIELD, density: rock_density, coastal_only: false, clustered: false, patch: (4, 5) },
-        ScatterRule { res_type: ResourceType::Food, count: food_game, yield_: FOOD_YIELD, density: game_density, coastal_only: false, clustered: false, patch: (1, 1) },
-        ScatterRule { res_type: ResourceType::Food, count: food_fish, yield_: FOOD_YIELD, density: fish_density, coastal_only: true, clustered: false, patch: (1, 1) },
-        ScatterRule { res_type: ResourceType::Gold, count: GOLD_NODES, yield_: GOLD_YIELD, density: gold_density, coastal_only: false, clustered: false, patch: (5, 7) },
-        // motherlodes: double-yield deposits hidden in the high country —
-        // the exploration prize (hill-belt only, far from comfortable land)
-        ScatterRule { res_type: ResourceType::Gold, count: 24, yield_: GOLD_YIELD * 2, density: motherlode_density, coastal_only: false, clustered: false, patch: (6, 8) },
-        ScatterRule { res_type: ResourceType::Stone, count: 20, yield_: STONE_YIELD * 2, density: motherlode_density, coastal_only: false, clustered: false, patch: (5, 7) },
+        ScatterRule { res_type: ResourceType::Wood, count: TREE_COUNT, yield_: TREE_WOOD, density: timber, coastal_only: false, clustered: true, patch: (1, 1) },
+        ScatterRule { res_type: ResourceType::Stone, count: STONE_NODES, yield_: STONE_YIELD, density: quarry, coastal_only: false, clustered: false, patch: (4, 5) },
+        ScatterRule { res_type: ResourceType::Food, count: food_game, yield_: FOOD_YIELD, density: herds, coastal_only: false, clustered: false, patch: (1, 1) },
+        ScatterRule { res_type: ResourceType::Food, count: food_fish, yield_: FOOD_YIELD, density: fishery, coastal_only: true, clustered: false, patch: (1, 1) },
+        ScatterRule { res_type: ResourceType::Gold, count: GOLD_NODES, yield_: GOLD_YIELD, density: vein, coastal_only: false, clustered: false, patch: (5, 7) },
+        ScatterRule { res_type: ResourceType::Gold, count: 60, yield_: GOLD_YIELD / 2, density: placer, coastal_only: false, clustered: false, patch: (2, 3) },
+        ScatterRule { res_type: ResourceType::Gold, count: 24, yield_: GOLD_YIELD * 2, density: motherlode, coastal_only: false, clustered: false, patch: (6, 8) },
+        ScatterRule { res_type: ResourceType::Stone, count: 20, yield_: STONE_YIELD * 2, density: motherlode, coastal_only: false, clustered: false, patch: (5, 7) },
     ]
 }
 
@@ -120,6 +176,7 @@ pub struct AiProfile {
     pub mix_size: i32,
     pub wants_market: bool,
     pub wants_fishing: bool,
+    pub farm_target: i32,
     pub gold_floor: i32,
     pub sell_threshold: i32,
     // tactical
@@ -162,6 +219,7 @@ const AI_PROFILES: [AiProfile; 3] = [
         mix_size: 1,
         wants_market: false,
         wants_fishing: false,
+        farm_target: 2,
         gold_floor: 0,
         sell_threshold: 999_999,
         recall_margin: 2,
@@ -201,6 +259,7 @@ const AI_PROFILES: [AiProfile; 3] = [
         mix_size: 2,
         wants_market: true,
         wants_fishing: true,
+        farm_target: 4,
         gold_floor: 60,
         sell_threshold: 250,
         recall_margin: 1,
@@ -240,6 +299,7 @@ const AI_PROFILES: [AiProfile; 3] = [
         mix_size: 3,
         wants_market: true,
         wants_fishing: true,
+        farm_target: 7,
         gold_floor: 100,
         sell_threshold: 200,
         recall_margin: 0,
@@ -287,6 +347,7 @@ pub fn planner_tuning(p: &AiProfile) -> PlannerTuning {
         mix_size: p.mix_size,
         wants_market: p.wants_market,
         wants_fishing: p.wants_fishing,
+        farm_target: p.farm_target,
         gold_floor: p.gold_floor,
         sell_threshold: p.sell_threshold,
     }
@@ -391,7 +452,7 @@ mod tests {
     #[test]
     fn node_kinds_split_food() {
         let n = node_kinds();
-        assert_eq!(n.len(), 7); // 5 staples + gold/stone motherlodes
+        assert_eq!(n.len(), 8); // 5 staples + placer gold + gold/stone motherlodes
         let food_total: i32 = n.iter().filter(|r| r.res_type == ResourceType::Food).map(|r| r.count).sum();
         assert_eq!(food_total, FOOD_NODES);
     }

@@ -19,6 +19,8 @@ struct SaveRow {
     unit: Option<Unit>,
     building: Option<Building>,
     node: Option<ResourceNode>,
+    #[serde(default)]
+    field: Option<FieldOf>,
     player: Option<Player>,
     bot: Option<Bot>,
     research: Option<Research>,
@@ -46,11 +48,12 @@ pub fn snapshot(world: &mut World) -> SaveGame {
             Option<&Unit>,
             Option<&Building>,
             Option<&ResourceNode>,
+            Option<&FieldOf>,
             Option<&Player>,
             Option<&Bot>,
             Option<&Research>,
         )>();
-        for (g, m, owner, pos, unit, building, node, player, bot, research) in q.iter(world) {
+        for (g, m, owner, pos, unit, building, node, field, player, bot, research) in q.iter(world) {
             rows.push(SaveRow {
                 id: g.0,
                 match_id: m.0,
@@ -59,6 +62,7 @@ pub fn snapshot(world: &mut World) -> SaveGame {
                 unit: unit.cloned(),
                 building: building.copied(),
                 node: node.copied(),
+                field: field.copied(),
                 player: player.cloned(),
                 bot: bot.copied(),
                 research: research.copied(),

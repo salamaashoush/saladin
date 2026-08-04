@@ -231,6 +231,27 @@ pub fn ai_brain(world: &mut World) {
             found
         };
 
+        // soil worth sowing within building reach of the keep, and the fields
+        // already standing on it
+        let farms = buildings
+            .iter()
+            .filter(|(_, _, o, k, m)| *o == owner && *m == bot.match_id && *k == BuildingKind::Farm)
+            .count() as i32;
+        let farmland_near = {
+            let seed = world.resource::<crate::WorldConfig>().seed;
+            let mut found = false;
+            'soil: for dy in -SHORE_SCAN..=SHORE_SCAN {
+                for dx in -SHORE_SCAN..=SHORE_SCAN {
+                    let p = V2::new(keep_pos.x + Fx::from_num(dx), keep_pos.y + Fx::from_num(dy));
+                    if saladin_sim::fertility_at(seed, p.x, p.y) >= saladin_sim::FARM_MIN_FERTILITY {
+                        found = true;
+                        break 'soil;
+                    }
+                }
+            }
+            found
+        };
+
         let state = PlannerState {
             peasants,
             pop,
@@ -249,6 +270,8 @@ pub fn ai_brain(world: &mut World) {
             enemy_has_walls,
             threat_near_home: threat,
             shore_near,
+            farmland_near,
+            farms,
             enemy_towers,
         };
 
@@ -628,7 +651,9 @@ fn place_near(world: &mut World, owner: u64, kind: BuildingKind, keep: V2) -> bo
     if build(world, owner, kind, keep, 0) {
         return true;
     }
-    if building_def(kind).requires_water {
+    // A field needs soil and a hut needs a shore; both are scarce enough that
+    // the eight-spoke scan below walks straight past them.
+    if building_def(kind).requires_water || building_def(kind).min_fertility > Fx::ZERO {
         for r in 2..=SHORE_SCAN {
             for (dx, dy) in ring_perimeter(r) {
                 let pos = V2::new(keep.x + Fx::from_num(dx), keep.y + Fx::from_num(dy));

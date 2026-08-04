@@ -29,6 +29,8 @@ pub struct BuildingDef {
     pub requires_water: bool,
     pub garrison_cap: i32,
     pub garrison_survives_death: bool,
+    /// Soil this structure needs under it (0 = anywhere). Farms only.
+    pub min_fertility: Fx,
 }
 
 /// Defaults mirroring the TS `B()` helper; entries override fields after spread.
@@ -55,9 +57,10 @@ const DEFAULT: BuildingDef = BuildingDef {
     requires_water: false,
     garrison_cap: 0,
     garrison_survives_death: false,
+    min_fertility: crate::fx!("0"),
 };
 
-const BUILDING_DEFS: [BuildingDef; 13] = [
+const BUILDING_DEFS: [BuildingDef; 14] = [
     // 0 Keep
     BuildingDef {
         label: "Keep",
@@ -244,6 +247,20 @@ const BUILDING_DEFS: [BuildingDef; 13] = [
         requires: Some(BuildingKind::Tower),
         ..DEFAULT
     },
+    // 13 Farm
+    BuildingDef {
+        label: "Farm",
+        blurb: "Sown field: peasants harvest it forever, and the richer the soil the faster it regrows.",
+        icon: "🌾",
+        footprint: 2,
+        height: crate::fx!("0.35"),
+        cost: ResourceCost::new(45, 0, 0, 0),
+        max_hp: 220,
+        armor_class: ArmorClass::Unarmored,
+        food_dropoff: true,
+        min_fertility: crate::FARM_MIN_FERTILITY,
+        ..DEFAULT
+    },
 ];
 
 pub fn building_def(kind: BuildingKind) -> &'static BuildingDef {
@@ -272,6 +289,7 @@ pub const BUILD_CATEGORIES: [BuildCategory; 6] = [
         icon: "🏠",
         kinds: &[
             BuildingKind::House,
+            BuildingKind::Farm,
             BuildingKind::Market,
             BuildingKind::Granary,
             BuildingKind::FishingHut,

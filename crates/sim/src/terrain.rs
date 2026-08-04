@@ -427,6 +427,70 @@ pub struct ScatteredNode {
     pub yield_: i32,
 }
 
+/// Soil fertility (0..1) at a world position — what a farm yields there.
+pub fn fertility_at(seed: u32, x: Fx, y: Fx) -> Fx {
+    let g = crate::worldgrid::world_grid(seed);
+    g.fertility[crate::worldgrid::tile_index(x, y)]
+}
+
+/// Ore potential (0..1) — how mineralized the rock under a position is.
+pub fn ore_at(seed: u32, x: Fx, y: Fx) -> Fx {
+    let g = crate::worldgrid::world_grid(seed);
+    g.ore[crate::worldgrid::tile_index(x, y)]
+}
+
+/// Mean annual temperature (0 cold .. 1 hot) at a world position.
+pub fn temp_at(seed: u32, x: Fx, y: Fx) -> Fx {
+    let g = crate::worldgrid::world_grid(seed);
+    g.temp[crate::worldgrid::tile_index(x, y)]
+}
+
+/// The climate regime this seed's world belongs to.
+pub fn world_climate(seed: u32) -> &'static crate::climate::ClimateArchetype {
+    crate::worldgrid::world_grid(seed).climate
+}
+
+/// Everything a scatter rule is allowed to know about a candidate tile. Node
+/// placement reads GEOLOGY and CLIMATE, not just the biome label: gold follows
+/// the mineralized belts, herds follow the grazing, timber follows the rain.
+#[derive(Clone, Copy, Debug)]
+pub struct NodeSite {
+    pub biome: Biome,
+    pub ore: Fx,
+    pub fertility: Fx,
+    pub precip: Fx,
+    pub temp: Fx,
+    pub height: Fx,
+    /// The water body this tile borders, if any — a shore's fishery depends on
+    /// whether it faces the open sea, a lake or a river.
+    pub adjacent_water: Option<Biome>,
+}
+
+pub fn node_site(seed: u32, x: Fx, y: Fx) -> NodeSite {
+    let s = sample_terrain(seed, x, y);
+    let mut adjacent_water = None;
+    for (dx, dy) in ADJ4 {
+        let b = sample_terrain(seed, x + Fx::from_num(dx), y + Fx::from_num(dy)).biome;
+        if crate::biomes::biome_is_water(b) {
+            // a lake or river beside the tile beats the open sea behind it
+            adjacent_water = match adjacent_water {
+                Some(Biome::Lake) => Some(Biome::Lake),
+                Some(prev) if crate::biomes::biome_is_fresh_water(prev) && !crate::biomes::biome_is_fresh_water(b) => Some(prev),
+                _ => Some(b),
+            };
+        }
+    }
+    NodeSite {
+        biome: s.biome,
+        ore: ore_at(seed, x, y),
+        fertility: fertility_at(seed, x, y),
+        precip: s.moisture,
+        temp: temp_at(seed, x, y),
+        height: s.height,
+        adjacent_water,
+    }
+}
+
 /// One scatter rule: count, yield, per-biome accept-probability, coastal-only.
 /// `clustered` modulates acceptance with a grove-mask noise so the kind lands
 /// in clumps (forests as woods, not uniform confetti). `patch` places each
@@ -437,7 +501,7 @@ pub struct ScatterRule {
     pub res_type: ResourceType,
     pub count: i32,
     pub yield_: i32,
-    pub density: fn(Biome) -> Fx,
+    pub density: fn(&NodeSite) -> Fx,
     pub coastal_only: bool,
     pub clustered: bool,
     pub patch: (i32, i32),
@@ -473,8 +537,7 @@ pub fn scatter_nodes(seed: u32, rules: &[ScatterRule]) -> Vec<ScatteredNode> {
                 continue;
             }
             let roll = hash2(x.floor().to_num::<i32>(), y.floor().to_num::<i32>(), roll_seed);
-            let biome = sample_terrain(seed, x, y).biome;
-            let mut density = (rule.density)(biome);
+            let mut density = (rule.density)(&node_site(seed, x, y));
             if rule.clustered {
                 let gv = fbm(x * GROVE_SCALE, y * GROVE_SCALE, base ^ 0x6701, 3);
                 density *= if gv > GROVE_T { GROVE_BOOST } else { GROVE_CUT };
@@ -834,7 +897,7 @@ mod tests {
             res_type: ResourceType::Wood,
             count: 50,
             yield_: 120,
-            density: crate::biomes::tree_density,
+            density: |s| crate::biomes::tree_density(s.biome),
             coastal_only: false,
             clustered: true,
             patch: (1, 1),

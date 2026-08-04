@@ -31,6 +31,7 @@ pub fn register(app: &mut App) {
             separation::separation.in_set(SimSet::Movement).run_if(every(2)),
             gather::gather.in_set(SimSet::Gather).run_if(every(4)),
             combat::combat.in_set(SimSet::Combat).run_if(every(4)),
+            reap_orphan_fields.in_set(SimSet::Combat).run_if(every(4)),
             economy::economy.in_set(SimSet::Economy).run_if(every(40)),
             research::research.in_set(SimSet::Research).run_if(every(20)),
             ai_brain::ai_brain.in_set(SimSet::Brain).run_if(every(20)),
@@ -42,6 +43,25 @@ pub fn register(app: &mut App) {
 
 fn advance_tick(mut tick: ResMut<Tick>) {
     tick.0 += 1;
+}
+
+/// A farm's standing crop belongs to the farm. Razing one takes its field with
+/// it, whether the building was demolished, burned down or wiped with its
+/// owner — one reaper covers every route instead of three call sites.
+fn reap_orphan_fields(
+    mut commands: Commands,
+    fields: Query<(Entity, &FieldOf)>,
+    buildings: Query<&GameId, With<Building>>,
+) {
+    if fields.is_empty() {
+        return;
+    }
+    let alive: bevy_platform::collections::HashSet<u64> = buildings.iter().map(|g| g.0).collect();
+    for (e, f) in &fields {
+        if !alive.contains(&f.0) {
+            commands.entity(e).despawn();
+        }
+    }
 }
 
 /// Rebuild the `GameId → Entity` index each tick. O(N) but deterministic and

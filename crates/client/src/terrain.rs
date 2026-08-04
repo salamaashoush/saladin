@@ -3,7 +3,7 @@ use bevy::mesh::{Indices, PrimitiveTopology};
 use bevy::prelude::*;
 use saladin_sim::noise::fbm;
 use saladin_sim::{
-    Biome, Fx, WORLD_SIZE, biome_def, biome_height_emphasis, hash2, render_height,
+    Biome, Fx, WORLD_SIZE, biome_def, biome_height_emphasis, fertility_at, hash2, render_height,
     sample_terrain, seed_bias,
 };
 
@@ -434,9 +434,26 @@ pub fn build_terrain_mesh(seed: u32) -> Mesh {
         }
     }
 
+    // Soil fertility rides in UV.x so the terrain shader can paint the farm
+    // overlay without a second mesh or a texture upload.
+    // uv.y flags dry land, so the overlay never paints the sea (fertility is
+    // zero out there, which would otherwise read as "barren ground")
+    let soil: Vec<[f32; 2]> = positions
+        .iter()
+        .map(|p| {
+            let (x, z) = (Fx::from_num(p[0]), Fx::from_num(p[2]));
+            let land = f32::from(
+                p[0] >= 0.0 && p[2] >= 0.0 && p[0] <= n as f32 && p[2] <= n as f32
+                    && !saladin_sim::biome_is_water(sample_terrain(seed, x, z).biome),
+            );
+            [fertility_at(seed, x, z).to_num::<f32>(), land]
+        })
+        .collect();
+
     let mut mesh = Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::RENDER_WORLD);
     mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
     mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, colors);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, soil);
     mesh.insert_indices(Indices::U32(indices));
     mesh.compute_smooth_normals();
     mesh

@@ -141,7 +141,36 @@ pub fn building_mesh(kind: BuildingKind) -> Mesh {
         BuildingKind::Granary => build_granary(),
         BuildingKind::FishingHut => build_fishing_hut(),
         BuildingKind::SiegeWorkshop => build_siege_workshop(),
+        BuildingKind::Farm => build_farm(),
     }
+}
+
+// A sown field: tilled furrows under standing grain, fenced at the corners.
+// It has to read as WORKED GROUND from the iso camera, so the furrows run in
+// visible ridges and the crop rows sit between them rather than on top.
+fn build_farm() -> Mesh {
+    const SOIL: u32 = 0x6b4a2e;
+    const SOIL_LIT: u32 = 0x86603c;
+    const GRAIN: u32 = 0xc9a94e;
+    const GRAIN_DARK: u32 = 0xa88a38;
+    let mut parts = vec![part(cuboid(1.9, 0.07, 1.9), srgb(SOIL), xyz(0.0, 0.035, 0.0))];
+    for i in 0..6 {
+        let z = -0.79 + i as f32 * 0.316;
+        parts.push(part(cuboid(1.82, 0.05, 0.14), srgb(SOIL_LIT), xyz(0.0, 0.09, z)));
+        let shade = if i % 2 == 0 { GRAIN } else { GRAIN_DARK };
+        for j in 0..7 {
+            let x = -0.72 + j as f32 * 0.24;
+            parts.push(part(cuboid(0.1, 0.26, 0.08), srgb(shade), xyz(x, 0.22, z + 0.14)));
+        }
+    }
+    // corner posts and two rails: the silhouette that says "enclosure"
+    for (px, pz) in [(-0.93f32, -0.93f32), (0.93, -0.93), (-0.93, 0.93), (0.93, 0.93)] {
+        parts.push(part(cuboid(0.08, 0.42, 0.08), srgb(TIMBER_DARK), xyz(px, 0.21, pz)));
+    }
+    for z in [-0.93f32, 0.93] {
+        parts.push(part(cuboid(1.86, 0.05, 0.05), srgb(TIMBER), xyz(0.0, 0.33, z)));
+    }
+    merge(parts)
 }
 
 // Walls are CONNECTIVITY-BASED: every segment is a square pillar on its tile

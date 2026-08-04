@@ -53,6 +53,10 @@ pub struct PlannerState {
     pub threat_near_home: i32,
     /// Open water within building reach of the keep — enables a Fishing Hut.
     pub shore_near: bool,
+    /// Soil good enough to sow within building reach of the keep.
+    pub farmland_near: bool,
+    /// Fields already sown.
+    pub farms: i32,
     /// Standing enemy defensive structures (towers/watchtowers) — weigh into
     /// the assault go/no-go alongside their field army.
     pub enemy_towers: i32,
@@ -85,6 +89,8 @@ pub struct PlannerTuning {
     pub mix_size: i32,
     pub wants_market: bool,
     pub wants_fishing: bool,
+    /// Fields the bot works toward once its economy is standing.
+    pub farm_target: i32,
     /// Below this gold, sell a glut resource at the market for a war chest.
     pub gold_floor: i32,
     /// Wood/stone above this is a glut the market may sell down.
@@ -437,6 +443,11 @@ pub fn next_build(s: &PlannerState, tune: &PlannerTuning) -> Option<BuildDecisio
         if pop_full {
             return Some(house());
         }
+        // A field is the only food that grows back, so a starving bot sows
+        // before it does anything else with wood.
+        if s.farmland_near && s.farms < tune.farm_target + 2 && s.wood >= 45 {
+            return Some(build(BuildingKind::Farm));
+        }
         if tune.wants_fishing && s.shore_near && !has(BuildingKind::FishingHut) {
             return Some(build(BuildingKind::FishingHut));
         }
@@ -471,6 +482,9 @@ pub fn next_build(s: &PlannerState, tune: &PlannerTuning) -> Option<BuildDecisio
     // 3b) Economy infrastructure: the Market is the gold engine (cavalry,
     // siege and tech all cost gold), a Granary shortens food hauls, and a
     // shoreline Fishing Hut makes food self-sustaining.
+    if s.farmland_near && s.farms < tune.farm_target {
+        return Some(build(BuildingKind::Farm));
+    }
     if tune.wants_market && !has(BuildingKind::Market) {
         return Some(build(BuildingKind::Market));
     }
@@ -696,6 +710,8 @@ mod tests {
             enemy_has_walls: false,
             threat_near_home: 0,
             shore_near: false,
+            farmland_near: false,
+            farms: 0,
             enemy_towers: 0,
         }
     }
@@ -722,6 +738,7 @@ mod tests {
             mix_size: 1,
             wants_market: false,
             wants_fishing: false,
+            farm_target: 0,
             gold_floor: 0,
             sell_threshold: i32::MAX,
         }

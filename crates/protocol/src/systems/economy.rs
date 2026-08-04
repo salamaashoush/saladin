@@ -23,27 +23,28 @@ pub fn economy(
     mut q_nodes: Query<(&Pos, &mut ResourceNode)>,
     mut stats: ResMut<crate::MatchStats>,
 ) {
-    // Fishing huts tend their waters: every water food node in reach of ANY
-    // hut regains a little each tick (capped at the natural school size).
+    // Regrowth. A sown field comes back on its own — how fast is the soil's
+    // doing — and a fishing hut tends the waters in its reach. Everything else
+    // (timber, ore, wild herds) is finite and stays mined out.
     // Additive + clamped, so iteration order can never desync the lockstep.
     let huts: Vec<saladin_sim::V2> = q_buildings
         .iter()
         .filter(|(_, b)| b.kind == BuildingKind::FishingHut)
         .map(|(p, _)| p.pos)
         .collect();
-    if !huts.is_empty() {
-        for (np, mut n) in &mut q_nodes {
-            if n.res_type != ResourceType::Food || n.remaining >= FOOD_YIELD {
-                continue;
-            }
-            let on_water =
-                !is_passable(cfg.seed, np.pos.x.to_num::<i32>(), np.pos.y.to_num::<i32>());
-            if !on_water {
-                continue;
-            }
-            if huts.iter().any(|h| dist(*h, np.pos) <= FISHING_HUT_RANGE) {
-                n.remaining = (n.remaining + FISH_REGEN_PER_TICK).min(FOOD_YIELD);
-            }
+    for (np, mut n) in &mut q_nodes {
+        // a sown field grows back to its own capacity
+        if n.regen > 0 && n.remaining < n.cap {
+            n.remaining = (n.remaining + n.regen).min(n.cap);
+        }
+        // a hut restocks the waters in its reach up to a natural school
+        if n.res_type == ResourceType::Food
+            && n.remaining < FOOD_YIELD
+            && !huts.is_empty()
+            && !is_passable(cfg.seed, np.pos.x.to_num::<i32>(), np.pos.y.to_num::<i32>())
+            && huts.iter().any(|h| dist(*h, np.pos) <= FISHING_HUT_RANGE)
+        {
+            n.remaining = (n.remaining + FISH_REGEN_PER_TICK).min(FOOD_YIELD);
         }
     }
     // Combat-unit entities grouped by owner (read pass).

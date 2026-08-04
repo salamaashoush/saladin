@@ -408,7 +408,7 @@ fn gather_command_targets_node() {
         GameId(30),
         MatchId(1),
         Pos { pos: V2::new(f(cx + 4), f(cy + 4)), facing: ZERO },
-        ResourceNode { res_type: ResourceType::Wood, remaining: 100 },
+        ResourceNode::deposit(ResourceType::Wood, 100),
     ));
 
     cmd(&mut app, PlayerCommand::Gather { player_id: 1, unit: 20, node: 30 });

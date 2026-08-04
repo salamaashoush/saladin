@@ -27,6 +27,8 @@ struct TerrainExtension {
     // x: slope where rock starts, y: slope where rock saturates,
     // z: grain amplitude, w: macro tint amplitude
     params: vec4<f32>,
+    // x: soil-overlay strength; the mesh carries per-vertex fertility in uv.x
+    overlay: vec4<f32>,
 }
 
 @group(#{MATERIAL_BIND_GROUP}) @binding(100)
@@ -80,6 +82,23 @@ fn fragment(
     let detail = 1.0 + (g - 0.5) * terrain.params.z * (1.0 - rocky);
     let macro_m = 1.0 + (macro_v - 0.5) * terrain.params.w * (1.0 - rocky);
     base = vec4<f32>(base.rgb * detail * macro_m, base.a);
+
+    // soil overlay: while a farm is being sited, wash the ground in how well
+    // it would grow — barren red through to deep green on the best alluvium
+    if terrain.overlay.x > 0.0 {
+#ifdef VERTEX_UVS
+        let soil = clamp(in.uv.x, 0.0, 1.0);
+        let dry = in.uv.y;
+        let barren = vec3<f32>(0.32, 0.06, 0.05);
+        let fair = vec3<f32>(0.35, 0.30, 0.05);
+        let rich = vec3<f32>(0.06, 0.42, 0.10);
+        var tint = mix(barren, fair, smoothstep(0.10, 0.30, soil));
+        tint = mix(tint, rich, smoothstep(0.30, 0.62, soil));
+        // banded contours so the eye reads discrete quality steps, not a wash
+        let band = 0.85 + 0.15 * step(0.5, fract(soil * 8.0));
+        base = vec4<f32>(mix(base.rgb, tint * band, terrain.overlay.x * dry * 0.7), base.a);
+#endif
+    }
 
     pbr_input.material.base_color = base;
     pbr_input.material.base_color = alpha_discard(pbr_input.material, pbr_input.material.base_color);

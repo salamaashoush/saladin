@@ -65,7 +65,7 @@ fn spawn_node(app: &mut App, id: u64, pos: V2, remaining: i32) {
         GameId(id),
         MatchId(1),
         Pos { pos, facing: ZERO },
-        ResourceNode { res_type: ResourceType::Wood, remaining },
+        ResourceNode::deposit(ResourceType::Wood, remaining),
     ));
 }
 
@@ -342,7 +342,7 @@ fn fishing_hut_speeds_nearby_fish() {
             GameId(id),
             MatchId(1),
             Pos { pos: water, facing: ZERO },
-            ResourceNode { res_type: ResourceType::Food, remaining: 200 },
+            ResourceNode::deposit(ResourceType::Food, 200),
         ));
     };
 
@@ -413,7 +413,7 @@ fn fishing_hut_regenerates_fish() {
         GameId(20),
         MatchId(1),
         Pos { pos: water, facing: ZERO },
-        ResourceNode { res_type: ResourceType::Food, remaining: 50 },
+        ResourceNode::deposit(ResourceType::Food, 50),
     ));
     let far = V2::new(water.x, water.y); // control compares against its own start
     let _ = far;

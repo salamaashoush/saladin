@@ -20,7 +20,7 @@ pub fn scatter_world_nodes(world: &mut World, match_id: u64) {
             GameId(id),
             MatchId(match_id),
             Pos { pos: n.pos, facing: Fx::ZERO },
-            ResourceNode { res_type: n.res_type, remaining: n.yield_ },
+            ResourceNode::deposit(n.res_type, n.yield_),
         ));
     }
 }
@@ -50,6 +50,20 @@ pub(crate) fn spawn_building(world: &mut World, owner: u64, kind: BuildingKind, 
         Building { kind, hp: def.max_hp, cooldown: Fx::ZERO, rally: pos },
     ));
     id
+}
+
+/// The standing crop on a farm: a food node tied to the building that sowed it,
+/// starting part-grown so a new field is not instantly worth harvesting.
+pub(crate) fn spawn_field(world: &mut World, owner: u64, building: u64, pos: V2, regen: i32, match_id: u64) {
+    let id = world.resource_mut::<NextEntityId>().alloc();
+    world.spawn((
+        GameId(id),
+        Owner(owner),
+        MatchId(match_id),
+        FieldOf(building),
+        Pos { pos, facing: Fx::ZERO },
+        ResourceNode::renewable(ResourceType::Food, FARM_STORE / 3, FARM_STORE, regen),
+    ));
 }
 
 #[allow(clippy::too_many_arguments)]

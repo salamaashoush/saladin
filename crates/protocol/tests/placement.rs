@@ -210,7 +210,7 @@ fn no_building_on_resource_nodes() {
         GameId(50),
         MatchId(1),
         Pos { pos: center(cx + 5, cy + 5), facing: ZERO },
-        ResourceNode { res_type: ResourceType::Wood, remaining: 100 },
+        ResourceNode::deposit(ResourceType::Wood, 100),
     ));
 
     cmd(&mut app, PlayerCommand::Build { player_id: 1, kind: BuildingKind::Tower, pos: center(cx + 5, cy + 5), facing: 0 });

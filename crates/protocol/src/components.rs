@@ -65,7 +65,31 @@ pub struct Building {
 pub struct ResourceNode {
     pub res_type: ResourceType,
     pub remaining: i32,
+    /// Natural maximum — regrowth never carries a node past it.
+    #[serde(default)]
+    pub cap: i32,
+    /// Regained per economy tick. Zero means a finite deposit: a felled wood,
+    /// a mined-out seam and a hunted herd stay gone.
+    #[serde(default)]
+    pub regen: i32,
 }
+
+impl ResourceNode {
+    /// A finite deposit: timber, ore, a wild herd.
+    pub fn deposit(res_type: ResourceType, amount: i32) -> ResourceNode {
+        ResourceNode { res_type, remaining: amount, cap: amount, regen: 0 }
+    }
+
+    /// A stock that grows back: a sown field, a tended fishery.
+    pub fn renewable(res_type: ResourceType, remaining: i32, cap: i32, regen: i32) -> ResourceNode {
+        ResourceNode { res_type, remaining, cap, regen }
+    }
+}
+
+/// Links a node to the structure that produces it — a farm's standing crop.
+/// When the building falls, the field goes with it.
+#[derive(Component, Clone, Copy, Debug, Serialize, Deserialize)]
+pub struct FieldOf(pub u64);
 
 /// A player (human or bot) — its own entity carrying the stockpile + faction.
 #[derive(Component, Clone, Debug, Serialize, Deserialize)]

@@ -113,6 +113,11 @@ pub fn setup(app: &mut App) {
             app.insert_state(GameState::Playing);
             app.add_systems(Update, (auto_screenshot, auto_select_building, debug_layout));
         }
+        Ok("soil") => {
+            // farm siting: the terrain wears its fertility overlay
+            app.insert_state(GameState::Playing);
+            app.add_systems(Update, (auto_screenshot, arm_farm_mode));
+        }
         Ok("layout") => {
             // in-game + computed-rect dump for HUD layout debugging
             app.insert_state(GameState::Playing);
@@ -587,7 +592,7 @@ pub fn auto_spawn_units(world: &mut World, mut stage: Local<u8>) {
                 GameId(id),
                 saladin_protocol::MatchId(1),
                 saladin_protocol::Pos { pos, facing: saladin_sim::Fx::ZERO },
-                ResourceNode { res_type: res, remaining: 200 },
+                ResourceNode::deposit(res, 200),
             ));
         };
         for (i, res) in
@@ -695,6 +700,14 @@ pub fn auto_spawn_units(world: &mut World, mut stage: Local<u8>) {
                 path_idx: 0,
             },
         ));
+    }
+}
+
+/// Screenshot harness only: drop the player into farm-siting mode so the soil
+/// overlay is on when the shot is taken.
+pub fn arm_farm_mode(mut mode: ResMut<crate::input::InputMode>) {
+    if !matches!(*mode, crate::input::InputMode::Build(saladin_sim::BuildingKind::Farm)) {
+        *mode = crate::input::InputMode::Build(saladin_sim::BuildingKind::Farm);
     }
 }
 

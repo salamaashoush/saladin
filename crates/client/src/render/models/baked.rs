@@ -67,6 +67,7 @@ pub fn building_kind_name(kind: BuildingKind) -> &'static str {
         BuildingKind::FishingHut => "fishing_hut",
         BuildingKind::SiegeWorkshop => "siege_workshop",
         BuildingKind::Watchtower => "watchtower",
+        BuildingKind::Farm => "farm",
     }
 }
 

@@ -591,6 +591,9 @@ pub fn build_mode_hint(
         InputMode::Build(k) if k == saladin_sim::BuildingKind::Wall => {
             "Drag to draw a wall (any direction)  -  Esc cancels"
         }
+        InputMode::Build(k) if building_def(k).min_fertility > saladin_sim::ZERO => {
+            "Green ground is fertile - fields only take on good soil  -  Esc cancels"
+        }
         InputMode::Build(_) => "R rotates the building  -  Esc cancels",
         InputMode::Demolish => "Click your buildings to demolish  -  Esc cancels",
         InputMode::Normal => "",

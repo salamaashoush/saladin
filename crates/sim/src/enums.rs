@@ -66,6 +66,7 @@ u8_enum!(BuildingKind {
     FishingHut = 10,
     SiegeWorkshop = 11,
     Watchtower = 12,
+    Farm = 13,
 } default Keep);
 
 u8_enum!(ResourceType {

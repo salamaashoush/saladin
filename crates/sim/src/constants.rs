@@ -42,6 +42,14 @@ pub const FOOD_YIELD: i32 = 160;
 /// fishing hut's reach — huts sustain their fishery; unmanaged waters fish out.
 pub const FISH_REGEN_PER_TICK: i32 = 2;
 
+// Farms: the only renewable food that scales. A field holds FARM_STORE of
+// standing crop and re-grows FARM_REGEN_MAX per economy tick on the best soil,
+// nothing at all below FARM_MIN_FERTILITY — which is what makes floodplains,
+// deltas and oases worth taking and holding.
+pub const FARM_STORE: i32 = 90;
+pub const FARM_REGEN_MAX: i32 = 7;
+pub const FARM_MIN_FERTILITY: Fx = crate::fx!("0.22");
+
 // Food economy: every owned unit eats FOOD_PER_UNIT per economy tick; an empty
 // stockpile bleeds STARVE_DPS hp/sec.
 pub const FOOD_PER_UNIT: i32 = 1;

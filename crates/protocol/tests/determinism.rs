@@ -178,7 +178,7 @@ fn peasant_harvests_tree_and_banks_at_keep() {
         GameId(20),
         MatchId(1),
         Pos { pos: tree_pos, facing: ZERO },
-        ResourceNode { res_type: ResourceType::Wood, remaining: 120 },
+        ResourceNode::deposit(ResourceType::Wood, 120),
     ));
     // a peasant near the tree, assigned to gather it
     let pe_pos = V2::new(f(cx + 4) + h, f(cy + 4) + h);
