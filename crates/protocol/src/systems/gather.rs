@@ -4,7 +4,7 @@ use bevy_ecs::prelude::*;
 use bevy_platform::collections::HashMap;
 use saladin_sim::{
     AStar, BuildingKind, DEPOSIT_RANGE, FISHING_HUT_RANGE, Fx, GatherState, HARVEST_RANGE,
-    HARVEST_TIME, MAX_EXPANSIONS, Occupant, ResourceType, V2, building_def, dist, is_passable,
+    HARVEST_TIME, MAX_EXPANSIONS, Occupant, ResourceType, V2, building_def, dist, is_passable, move_cost_at,
     nearest_passable_grid, nearest_reachable_passable_grid, occupancy_set, tile_key, unit_def,
 };
 
@@ -26,7 +26,8 @@ fn move_patch(astar: &mut AStar, seed: u32, occ: &std::collections::HashSet<i32>
     let passable = |tx: i32, ty: i32| is_passable(seed, tx, ty) && !occ.contains(&tile_key(tx, ty));
     let snap = nearest_reachable_passable_grid(&passable, from, to, REACH_CAP)
         .unwrap_or_else(|| nearest_passable_grid(&passable, to.x, to.y));
-    let path = astar.find_path(&passable, from.x, from.y, snap.x, snap.y, MAX_EXPANSIONS);
+    let cost = |tx: i32, ty: i32| move_cost_at(seed, tx, ty);
+    let path = astar.find_path_costed(&passable, &cost, from.x, from.y, snap.x, snap.y, MAX_EXPANSIONS);
     if path.is_empty() {
         None
     } else {

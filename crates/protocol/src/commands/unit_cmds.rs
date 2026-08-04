@@ -10,8 +10,9 @@ pub(crate) fn path_to(world: &mut World, from: V2, to: V2) -> Vec<V2> {
     let seed = world.resource::<WorldConfig>().seed;
     let occ = building_occupancy(world, false);
     let passable = |tx: i32, ty: i32| is_passable(seed, tx, ty) && !occ.contains(&tile_key(tx, ty));
+    let cost = |tx: i32, ty: i32| move_cost_at(seed, tx, ty);
     let mut scratch = world.resource_mut::<PathScratch>();
-    scratch.0.find_path(&passable, from.x, from.y, to.x, to.y, MAX_EXPANSIONS)
+    scratch.0.find_path_costed(&passable, &cost, from.x, from.y, to.x, to.y, MAX_EXPANSIONS)
 }
 
 /// Manual move order: cancels gathering and combat pursuit, re-homes the unit at
@@ -27,9 +28,10 @@ pub(crate) fn move_unit(world: &mut World, owner: u64, unit: u64, target: V2) {
     let seed = world.resource::<WorldConfig>().seed;
     let occ = building_occupancy(world, false);
     let passable = |tx: i32, ty: i32| is_passable(seed, tx, ty) && !occ.contains(&tile_key(tx, ty));
+    let cost = |tx: i32, ty: i32| move_cost_at(seed, tx, ty);
     let path = {
         let mut scratch = world.resource_mut::<PathScratch>();
-        scratch.0.find_path(&passable, from.x, from.y, target.x, target.y, MAX_EXPANSIONS)
+        scratch.0.find_path_costed(&passable, &cost, from.x, from.y, target.x, target.y, MAX_EXPANSIONS)
     };
     if let Some(mut u) = world.get_mut::<Unit>(e) {
         u.gather_state = GatherState::Idle;

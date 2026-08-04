@@ -292,6 +292,56 @@ pub fn buildable_grid(seed: u32) -> &'static [bool] {
     grid
 }
 
+/// Per-seed movement-cost grid: what one tile of this ground costs a walker.
+/// Clamped at 1 so the pathfinder's octile heuristic stays admissible — the
+/// "fast" biomes (a dry wadi bed, a salt pan) are fast because everything
+/// around them drags, not because they cost less than open ground.
+pub fn move_cost_grid(seed: u32) -> &'static [Fx] {
+    use std::cell::Cell;
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+
+    const EMPTY: &[Fx] = &[];
+    thread_local! {
+        static LAST: Cell<(u32, &'static [Fx])> = const { Cell::new((u32::MAX, EMPTY)) };
+    }
+    let (last_seed, last_grid) = LAST.with(|c| c.get());
+    if last_seed == seed && !last_grid.is_empty() {
+        return last_grid;
+    }
+
+    static GRIDS: OnceLock<Mutex<HashMap<u32, &'static [Fx]>>> = OnceLock::new();
+    let grids = GRIDS.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut g = grids.lock().unwrap();
+    let grid: &'static [Fx] = match g.get(&seed) {
+        Some(&grid) => grid,
+        None => {
+            let world = crate::worldgrid::world_grid(seed);
+            let v: Vec<Fx> = world
+                .biome
+                .iter()
+                .map(|&b| {
+                    let c = crate::biomes::move_cost_mul(b);
+                    if c >= Fx::MAX { Fx::ONE } else { c.max(Fx::ONE) }
+                })
+                .collect();
+            let leaked: &'static [Fx] = Box::leak(v.into_boxed_slice());
+            g.insert(seed, leaked);
+            leaked
+        }
+    };
+    LAST.with(|c| c.set((seed, grid)));
+    grid
+}
+
+/// What entering tile (tx, ty) costs a walker, 1 = open ground.
+pub fn move_cost_at(seed: u32, tx: i32, ty: i32) -> Fx {
+    if tx < 0 || ty < 0 || tx >= WORLD_SIZE || ty >= WORLD_SIZE {
+        return Fx::ONE;
+    }
+    move_cost_grid(seed)[(ty * WORLD_SIZE + tx) as usize]
+}
+
 /// Tile-space buildability (in-bounds + buildable biome).
 pub fn is_buildable_tile(seed: u32, tx: i32, ty: i32) -> bool {
     if tx < 0 || ty < 0 || tx >= WORLD_SIZE || ty >= WORLD_SIZE {

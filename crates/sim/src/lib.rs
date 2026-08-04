@@ -59,7 +59,7 @@ pub use terrain::{
     FAIR_MIN_FOOD, FAIR_MIN_STONE, FAIR_MIN_WOOD, FAIR_RADIUS, ScatterRule, ScatteredNode,
     TerrainSample, compose_seed, fair_start_nodes, find_land_near, is_coastal, is_land,
     NodeSite, fertility_at, is_passable, node_reachable, node_site, ore_at, passable_grid, region_at,
-    region_grid, render_height, temp_at, world_climate,
+    region_grid, render_height, temp_at, world_climate, move_cost_at, move_cost_grid,
     dominant_region, buildable_grid, find_keep_site, is_buildable_tile, is_water_tile, sample_terrain, scatter_nodes,
     seed_base, seed_bias, seed_preset, start_point,
 };

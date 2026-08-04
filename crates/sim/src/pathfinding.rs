@@ -239,6 +239,23 @@ impl AStar {
         ty: Fx,
         max_expansions: usize,
     ) -> Vec<V2> {
+        self.find_path_costed(passable, &|_, _| Fx::ONE, sx, sy, tx, ty, max_expansions)
+    }
+
+    /// A* that pays for the ground it crosses. `step_cost(tx, ty)` multiplies
+    /// the cost of entering a tile and must never drop below 1, or the octile
+    /// heuristic stops being admissible and the search returns junk.
+    #[allow(clippy::too_many_arguments)]
+    pub fn find_path_costed<P: Fn(i32, i32) -> bool, C: Fn(i32, i32) -> Fx>(
+        &mut self,
+        passable: &P,
+        step_cost: &C,
+        sx: Fx,
+        sy: Fx,
+        tx: Fx,
+        ty: Fx,
+        max_expansions: usize,
+    ) -> Vec<V2> {
         let s = nearest_passable_grid(passable, sx, sy);
         let goal = nearest_passable_grid(passable, tx, ty);
         let sx_t = floor_i(s.x);
@@ -317,7 +334,7 @@ impl AStar {
                 if self.is_closed(ni) {
                     continue;
                 }
-                let tentative = g_cur + cost;
+                let tentative = g_cur + cost * step_cost(nx, ny);
                 if tentative < self.g_at(ni) {
                     self.touch(ni, tentative, cur as i32);
                     open.push(Reverse((tentative + h(nx, ny), ni as u32)));
@@ -369,6 +386,32 @@ pub fn find_path_grid<P: Fn(i32, i32) -> bool>(passable: &P, sx: Fx, sy: Fx, tx:
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_costed_path_goes_around_the_bog() {
+        // open field with a wide expensive strip down the middle: the walker
+        // should detour around it rather than wade straight through
+        let passable = |_x: i32, _y: i32| true;
+        let bog = |x: i32, y: i32| {
+            if (10..14).contains(&x) && (0..18).contains(&y) { crate::fx!("6") } else { Fx::ONE }
+        };
+        let mut a = AStar::new();
+        let path = a.find_path_costed(
+            &passable,
+            &bog,
+            crate::fx!("5.5"),
+            crate::fx!("9.5"),
+            crate::fx!("18.5"),
+            crate::fx!("9.5"),
+            20_000,
+        );
+        assert!(!path.is_empty(), "no path at all");
+        let waded = path.iter().any(|p| {
+            let (x, y) = (p.x.to_num::<i32>(), p.y.to_num::<i32>());
+            (10..14).contains(&x) && (2..16).contains(&y)
+        });
+        assert!(!waded, "the walker ploughed straight through the bog: {path:?}");
+    }
+
     use super::*;
 
     #[test]

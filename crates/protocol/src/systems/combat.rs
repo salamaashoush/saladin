@@ -18,7 +18,7 @@ use saladin_sim::{
     GarrisonOccupant, MORALE_MAX, Stance, UnitKind, V2, building_def, cell_of, combat_action, dist,
     dist2, effective_building_def, effective_damage, effective_unit_def,
     elevation_at, elevation_range_bonus, garrison_fire_power, is_passable, is_routing, morale_after_hit,
-    morale_recover, nearest_passable_grid, unit_def,
+    morale_recover, move_cost_at, nearest_passable_grid, unit_def,
 };
 
 const DT: Fx = COMBAT_DT;
@@ -198,7 +198,8 @@ fn nearest_in_rings(
 /// re-path on a later combat tick once they are closer).
 fn pursuit_patch(scratch: &mut PathScratch, seed: u32, from: V2, to: V2) -> Option<(Vec<V2>, V2)> {
     let passable = |tx: i32, ty: i32| is_passable(seed, tx, ty);
-    let path = scratch.0.find_path(&passable, from.x, from.y, to.x, to.y, PURSUIT_EXPANSIONS);
+    let cost = |tx: i32, ty: i32| move_cost_at(seed, tx, ty);
+    let path = scratch.0.find_path_costed(&passable, &cost, from.x, from.y, to.x, to.y, PURSUIT_EXPANSIONS);
     if path.is_empty() {
         let snap = nearest_passable_grid(&passable, to.x, to.y);
         Some((vec![snap], snap))
