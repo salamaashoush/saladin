@@ -1,4 +1,4 @@
-use super::{building_occupancy, find_owned};
+use super::{find_owned, occupancy_and_gates};
 use crate::components::*;
 use crate::WorldConfig;
 use bevy_ecs::prelude::*;
@@ -38,10 +38,13 @@ pub(crate) fn occupant_count(world: &mut World, building: u64) -> i32 {
 
 /// Snap a unit back onto the field at the host's edge: the nearest passable tile
 /// around the structure so ejected occupants never land on water/inside a wall.
-fn field_exit(world: &mut World, host_pos: V2, footprint: i32) -> V2 {
+fn field_exit(world: &mut World, owner: u64, host_pos: V2, footprint: i32) -> V2 {
     let seed = world.resource::<WorldConfig>().seed;
-    let occ = building_occupancy(world, false);
-    let passable = |tx: i32, ty: i32| is_passable(seed, tx, ty) && !occ.contains(&tile_key(tx, ty));
+    let (occ, gates) = occupancy_and_gates(world, false);
+    let passable = |tx: i32, ty: i32| {
+        let k = tile_key(tx, ty);
+        is_passable(seed, tx, ty) && !occ.contains(&k) && !gate_blocks(&gates, k, owner)
+    };
     let r = Fx::from_num(footprint) / Fx::from_num(2) + saladin_sim::fx!("0.6");
     for (dx, dy) in DIRS12 {
         let px = host_pos.x + dx * r;
@@ -70,6 +73,10 @@ pub(crate) fn garrison(world: &mut World, owner: u64, unit: u64, building: u64) 
     if !can_garrison(unit_def(ukind)) {
         return;
     }
+    let Some(state) = world.get::<Building>(be).map(|b| b.state) else { return };
+    if !operational(state) {
+        return; // a foundation shelters nobody
+    }
     let bdef = building_def(bkind);
     if garrison_free_slots(bdef, occupant_count(world, building)) <= 0 {
         return;
@@ -97,12 +104,14 @@ pub(crate) fn ungarrison(world: &mut World, owner: u64, building: u64) {
 /// voluntary demolition (occupants always survive a demolish).
 pub(crate) fn eject_all(world: &mut World, building: u64) {
     let host = {
-        let mut q = world.query::<(&GameId, &Pos, &Building)>();
-        q.iter(world).find(|(g, _, _)| g.0 == building).map(|(_, p, b)| (p.pos, building_def(b.kind).footprint))
+        let mut q = world.query::<(&GameId, &Pos, &Building, &Owner)>();
+        q.iter(world)
+            .find(|(g, _, _, _)| g.0 == building)
+            .map(|(_, p, b, o)| (p.pos, building_def(b.kind).footprint, o.0))
     };
-    let Some((host_pos, footprint)) = host else { return };
+    let Some((host_pos, footprint, owner)) = host else { return };
     for e in occupants_of(world, building) {
-        let exit = field_exit(world, host_pos, footprint);
+        let exit = field_exit(world, owner, host_pos, footprint);
         if let Some(mut pos) = world.get_mut::<Pos>(e) {
             pos.pos = exit;
         }

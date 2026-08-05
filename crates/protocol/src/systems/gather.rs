@@ -1,19 +1,22 @@
-use crate::components::{Building, GameId, MatchId, Owner, Player, Pos, ResourceNode, Unit};
+use crate::components::{Building, FieldOf, GameId, MatchId, Owner, Player, Pos, ResourceNode, Unit};
 use crate::{GameIndex, MatchStatuses, PathScratch, WorldConfig};
 use bevy_ecs::prelude::*;
 use bevy_platform::collections::HashMap;
 use saladin_sim::{
-    AStar, BuildingKind, DEPOSIT_RANGE, FISHING_HUT_RANGE, Fx, GatherState, HARVEST_RANGE,
-    HARVEST_TIME, MAX_EXPANSIONS, Occupant, ResourceType, V2, building_def, dist, is_passable, move_cost_at,
-    nearest_passable_grid, nearest_reachable_passable_grid, occupancy_set, tile_key, unit_def,
+    AStar, AuraTarget, DEPOSIT_RANGE, Fx, GatherState, harvest_reach,
+    HARVEST_TIME, MAX_EXPANSIONS, Occupant, ResourceType, V2, WorkAura, building_def, dist, is_passable, move_cost_at,
+    gate_blocks, nearest_passable_grid, nearest_reachable_passable_grid, occupancy_set, operational,
+    res_bit, tile_key, unit_def,
 };
 
 const AI_DT: Fx = saladin_sim::AI_DT;
 
-/// A computed move: a path plus the first waypoint to head for.
+/// A computed move: a path, the first waypoint to head for, and the tile the
+/// walk actually ends on (which is NOT the goal when the goal is unreachable).
 struct MovePatch {
     path: Vec<V2>,
     target: V2,
+    end: V2,
 }
 
 /// Cap on the reachable-region flood. The snapped target/approach tile is always
@@ -22,8 +25,19 @@ struct MovePatch {
 /// gather/deposit tick.
 const REACH_CAP: usize = 1024;
 
-fn move_patch(astar: &mut AStar, seed: u32, occ: &std::collections::HashSet<i32>, from: V2, to: V2) -> Option<MovePatch> {
-    let passable = |tx: i32, ty: i32| is_passable(seed, tx, ty) && !occ.contains(&tile_key(tx, ty));
+fn move_patch(
+    astar: &mut AStar,
+    seed: u32,
+    occ: &std::collections::HashSet<i32>,
+    gates: &[(i32, u64)],
+    viewer: u64,
+    from: V2,
+    to: V2,
+) -> Option<MovePatch> {
+    let passable = |tx: i32, ty: i32| {
+        let k = tile_key(tx, ty);
+        is_passable(seed, tx, ty) && !occ.contains(&k) && !gate_blocks(gates, k, viewer)
+    };
     let snap = nearest_reachable_passable_grid(&passable, from, to, REACH_CAP)
         .unwrap_or_else(|| nearest_passable_grid(&passable, to.x, to.y));
     let cost = |tx: i32, ty: i32| move_cost_at(seed, tx, ty);
@@ -32,7 +46,7 @@ fn move_patch(astar: &mut AStar, seed: u32, occ: &std::collections::HashSet<i32>
         None
     } else {
         let target = path[0];
-        Some(MovePatch { path, target })
+        Some(MovePatch { path, target, end: snap })
     }
 }
 
@@ -41,8 +55,14 @@ struct Dropoff {
     owner: u64,
     pos: V2,
     footprint: i32,
-    is_keep: bool,
-    food_dropoff: bool,
+    accepts: u8,
+}
+
+/// A standing work bonus a building projects over the nodes around it.
+struct Aura {
+    owner: u64,
+    pos: V2,
+    aura: WorkAura,
 }
 
 /// Gather AI state machine — runs every AI tick (200 ms). Sets movement targets,
@@ -55,44 +75,83 @@ pub fn gather(
     mut scratch: ResMut<PathScratch>,
     index: Res<GameIndex>,
     mut commands: Commands,
-    q_buildings: Query<(&Pos, &Building, &Owner)>,
+    q_buildings: Query<(&GameId, &Pos, &Building, &Owner)>,
     mut q_nodes: Query<(&GameId, &Pos, &mut ResourceNode, &MatchId)>,
     mut q_players: Query<(Entity, &mut Player)>,
     mut q_units: Query<(&GameId, &Pos, &Owner, &MatchId, &mut Unit)>,
+    q_fields: Query<(&GameId, &FieldOf)>,
     mut stats: ResMut<crate::MatchStats>,
 ) {
     let seed = cfg.seed;
 
     // ── read-only snapshots ──────────────────────────────────────────────────
     let occupants: Vec<Occupant> =
-        q_buildings.iter().map(|(p, b, _)| Occupant { kind: b.kind, pos: p.pos }).collect();
+        q_buildings.iter().map(|(_, p, b, _)| Occupant { kind: b.kind, pos: p.pos }).collect();
     let occ = occupancy_set(&occupants, false);
+    // a finished gatehouse is a door for its owner and a wall for everyone else
+    let gates: Vec<(i32, u64)> = q_buildings
+        .iter()
+        .filter(|(_, _, b, _)| building_def(b.kind).passable && operational(b.state))
+        .map(|(_, p, _, o)| (tile_key(p.pos.x.to_num::<i32>(), p.pos.y.to_num::<i32>()), o.0))
+        .collect();
 
     let dropoffs: Vec<Dropoff> = q_buildings
         .iter()
-        .map(|(p, b, owner)| {
+        .filter(|(_, _, b, _)| operational(b.state))
+        .filter_map(|(_, p, b, owner)| {
             let def = building_def(b.kind);
-            Dropoff {
+            (def.accepts != 0).then_some(Dropoff {
                 owner: owner.0,
                 pos: p.pos,
                 footprint: def.footprint,
-                is_keep: b.kind == BuildingKind::Keep,
-                food_dropoff: def.food_dropoff,
-            }
+                accepts: def.accepts,
+            })
         })
         .collect();
 
-    // friendly fishing huts double the harvest rate of nearby water food nodes
-    let huts: Vec<(u64, V2)> = q_buildings
+    // work auras: the hut's nets over its fishery, the granary's hands over the
+    // fields. One field on the def, one loop here.
+    let auras: Vec<Aura> = q_buildings
         .iter()
-        .filter(|(_, b, _)| b.kind == BuildingKind::FishingHut)
-        .map(|(p, _, o)| (o.0, p.pos))
+        .filter(|(_, _, b, _)| operational(b.state))
+        .filter_map(|(_, p, b, o)| {
+            building_def(b.kind).aura.map(|aura| Aura { owner: o.0, pos: p.pos, aura })
+        })
         .collect();
+    // A crop is sown at its farm's own centre, which on an even footprint is the
+    // corner four blocked tiles share, so a reaper stands back by the farm's
+    // whole footprint.
+    let footprint_of: HashMap<u64, i32> =
+        q_buildings.iter().map(|(g, _, b, _)| (g.0, building_def(b.kind).footprint)).collect();
+    let field_nodes: HashMap<u64, i32> = q_fields
+        .iter()
+        .map(|(g, f)| (g.0, footprint_of.get(&f.0).copied().unwrap_or(1)))
+        .collect();
+    let aura_mult = |owner: u64, at: V2, target: AuraTarget| -> Fx {
+        let mut best = Fx::ONE;
+        for a in &auras {
+            if a.owner != owner || a.aura.target != target || a.aura.harvest_mult <= best {
+                continue;
+            }
+            if dist(a.pos, at) <= a.aura.radius {
+                best = a.aura.harvest_mult;
+            }
+        }
+        best
+    };
 
-    let mut node_map: HashMap<u64, V2> = HashMap::new();
+    // Position + the reach a harvester needs to work it. The span of unstandable
+    // ground under a node is what the reach has to clear: a farm's whole
+    // footprint for a crop, the water tile itself for a school of fish.
+    let mut node_map: HashMap<u64, (V2, Fx)> = HashMap::new();
     let mut nodes_list: Vec<(u64, V2, u64)> = Vec::new();
     for (gid, p, _n, m) in q_nodes.iter() {
-        node_map.insert(gid.0, p.pos);
+        let span = match field_nodes.get(&gid.0) {
+            Some(fp) => *fp,
+            None if !is_passable(seed, p.pos.x.to_num::<i32>(), p.pos.y.to_num::<i32>()) => 1,
+            None => 0,
+        };
+        node_map.insert(gid.0, (p.pos, harvest_reach(span)));
         nodes_list.push((gid.0, p.pos, m.0));
     }
 
@@ -108,8 +167,7 @@ pub fn gather(
             if d.owner != owner {
                 continue;
             }
-            let accepts = d.is_keep || (d.food_dropoff && carry == ResourceType::Food);
-            if !accepts {
+            if d.accepts & res_bit(carry) == 0 {
                 continue;
             }
             let dd = dist(from, d.pos);
@@ -154,7 +212,7 @@ pub fn gather(
 
         match u.gather_state {
             GatherState::ToResource => {
-                let Some(node_pos) = node_map.get(&u.target_node).copied() else {
+                let Some((node_pos, reach)) = node_map.get(&u.target_node).copied() else {
                     retarget(&mut u, here, mid, 0, &nearest_node);
                     continue;
                 };
@@ -165,12 +223,15 @@ pub fn gather(
                     retarget(&mut u, here, mid, skip, &nearest_node);
                     continue;
                 }
-                if dist(here, node_pos) <= HARVEST_RANGE {
+                if dist(here, node_pos) <= reach {
                     u.gather_state = GatherState::Harvesting;
                     u.harvest_timer = Fx::ZERO;
                     u.has_target = false;
                 } else if !u.has_target {
-                    match move_patch(&mut scratch.0, seed, &occ, here, node_pos) {
+                    let patch =
+                        move_patch(&mut scratch.0, seed, &occ, &gates, owner.0, here, node_pos)
+                            .filter(|p| !stuck(here, p.end, node_pos, reach));
+                    match patch {
                         Some(p) => {
                             u.path = p.path;
                             u.path_idx = 0;
@@ -199,14 +260,21 @@ pub fn gather(
                     retarget(&mut u, here, mid, 0, &nearest_node);
                     continue;
                 }
-                // fish (water food node) near a friendly hut: nets work double
-                let is_fish = node.res_type == ResourceType::Food
-                    && !is_passable(seed, npos.pos.x.to_num::<i32>(), npos.pos.y.to_num::<i32>());
-                let boosted = is_fish
-                    && huts
-                        .iter()
-                        .any(|(o, hp)| *o == owner.0 && dist(*hp, npos.pos) <= FISHING_HUT_RANGE);
-                let step = if boosted { AI_DT + AI_DT } else { AI_DT };
+                // a hut's nets over its fishery, a granary's hands over its
+                // fields: whichever aura covers this node speeds the work
+                let target = if field_nodes.contains_key(&u.target_node) {
+                    Some(AuraTarget::Field)
+                } else if node.res_type == ResourceType::Food
+                    && !is_passable(seed, npos.pos.x.to_num::<i32>(), npos.pos.y.to_num::<i32>())
+                {
+                    Some(AuraTarget::WaterFood)
+                } else {
+                    None
+                };
+                let step = match target {
+                    Some(t) => AI_DT * aura_mult(owner.0, npos.pos, t),
+                    None => AI_DT,
+                };
                 let timer = u.harvest_timer + step;
                 if timer < HARVEST_TIME {
                     u.harvest_timer = timer;
@@ -257,7 +325,7 @@ pub fn gather(
                         retarget(&mut u, here, mid, 0, &nearest_node);
                     }
                 } else if !u.has_target {
-                    match move_patch(&mut scratch.0, seed, &occ, here, drop.pos) {
+                    match move_patch(&mut scratch.0, seed, &occ, &gates, owner.0, here, drop.pos) {
                         Some(p) => {
                             u.path = p.path;
                             u.path_idx = 0;
@@ -274,9 +342,27 @@ pub fn gather(
                     }
                 }
             }
-            GatherState::Idle => {}
+            // a builder is driven by the construction loop, not the gather one
+            GatherState::Idle | GatherState::Constructing => {}
         }
     }
+}
+
+/// True when walking cannot help. `end` is the standable tile nearest the node
+/// that this walker can actually reach; the flood never returns one worse than
+/// the tile it started on, so "no closer than where I stand, and still out of
+/// working range" means the node is behind something and no amount of marching
+/// will change that.
+///
+/// Without this, `ToResource` is an absorbing state: the walk re-plans to the
+/// tile the walker already occupies, forever. It is not theoretical — a Hard
+/// bot funnels every peasant onto one food node under a famine bias, and one
+/// node it cannot reach froze all fourteen of them, and the whole economy with
+/// them, for the rest of the match. The slack of a tile keeps a walker that is
+/// practically there from throwing its node away over a rounding bit.
+fn stuck(here: V2, end: V2, node: V2, reach: Fx) -> bool {
+    dist(here, node) > reach + Fx::ONE
+        && saladin_sim::dist2(end, node) >= saladin_sim::dist2(here, node)
 }
 
 /// Head to the nearest remaining node in the unit's own match, else idle.

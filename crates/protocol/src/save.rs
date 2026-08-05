@@ -26,8 +26,16 @@ struct SaveRow {
     research: Option<Research>,
 }
 
+/// bincode 1.3 is NOT self-describing: a component that gains a field decodes
+/// old bytes as garbage (or EOF) rather than defaulting, and `#[serde(default)]`
+/// cannot save it. The magic+version header turns that into a clean refusal.
+pub const SAVE_MAGIC: u64 = 0x5361_6C61_4469_6E00;
+pub const SAVE_VERSION: u32 = 1;
+
 #[derive(Serialize, Deserialize)]
 pub struct SaveGame {
+    magic: u64,
+    version: u32,
     pub seed: u32,
     pub tick: u64,
     pub next_id: u64,
@@ -75,6 +83,8 @@ pub fn snapshot(world: &mut World) -> SaveGame {
         q.iter(world).cloned().collect()
     };
     SaveGame {
+        magic: SAVE_MAGIC,
+        version: SAVE_VERSION,
         seed: world.resource::<WorldConfig>().seed,
         tick: world.resource::<Tick>().0,
         next_id: world.resource::<NextEntityId>().0,
@@ -121,6 +131,9 @@ pub fn restore(world: &mut World, save: SaveGame) {
         if let Some(n) = r.node {
             e.insert(n);
         }
+        if let Some(f) = r.field {
+            e.insert(f);
+        }
         if let Some(p) = r.player {
             e.insert(p);
         }
@@ -138,5 +151,9 @@ pub fn to_bytes(save: &SaveGame) -> Vec<u8> {
 }
 
 pub fn from_bytes(bytes: &[u8]) -> Option<SaveGame> {
-    bincode::deserialize(bytes).ok()
+    if bytes.len() < 12 || u64::from_le_bytes(bytes[0..8].try_into().ok()?) != SAVE_MAGIC {
+        return None;
+    }
+    let save: SaveGame = bincode::deserialize(bytes).ok()?;
+    (save.version == SAVE_VERSION).then_some(save)
 }

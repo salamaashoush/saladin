@@ -64,7 +64,7 @@ fn spawn_keep(app: &mut App, gid: u64, owner: u64, pos: V2) {
         Owner(owner),
         MatchId(1),
         Pos { pos, facing: ZERO },
-        Building { kind: BuildingKind::Keep, hp: def.max_hp, cooldown: ZERO, rally: pos },
+        Building::new(BuildingKind::Keep, def.max_hp, pos),
     ));
 }
 
@@ -93,6 +93,7 @@ fn spawn_soldier(app: &mut App, gid: u64, owner: u64, pos: V2, hp: i32) {
             routing: false,
             home: pos,
             garrisoned_in: 0,
+            job_site: 0,
             path: vec![],
             path_idx: 0,
         },
@@ -108,9 +109,19 @@ fn training_and_combat_losses_are_counted() {
     spawn_player(&mut app, 2);
     spawn_keep(&mut app, 10, 1, V2::new(f(cx + 1), f(cy + 1)));
 
+    // both orders queue at the keep and are counted as they walk out of it
     cmd(&mut app, PlayerCommand::Train { player_id: 1, kind: UnitKind::Peasant });
     cmd(&mut app, PlayerCommand::Train { player_id: 1, kind: UnitKind::Peasant });
     step(app.world_mut());
+    assert_eq!(
+        app.world().resource::<MatchStats>().0.get(&1).map(|s| s.trained),
+        None,
+        "an order is not a unit"
+    );
+    let train_ticks = (unit_def(UnitKind::Peasant).train_time.to_num::<i64>() as usize + 1) * 20 * 2;
+    for _ in 0..train_ticks {
+        step(app.world_mut());
+    }
     assert_eq!(
         app.world().resource::<MatchStats>().0.get(&1).map(|s| s.trained),
         Some(2),

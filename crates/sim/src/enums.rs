@@ -1,11 +1,11 @@
 use serde::{Deserialize, Serialize};
 
 macro_rules! u8_enum {
-    ($name:ident { $($variant:ident = $val:literal),+ $(,)? } default $def:ident) => {
+    ($name:ident { $($(#[$vm:meta])* $variant:ident = $val:literal),+ $(,)? } default $def:ident) => {
         #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
         #[repr(u8)]
         pub enum $name {
-            $($variant = $val),+
+            $($(#[$vm])* $variant = $val),+
         }
 
         impl $name {
@@ -67,6 +67,8 @@ u8_enum!(BuildingKind {
     SiegeWorkshop = 11,
     Watchtower = 12,
     Farm = 13,
+    Storehouse = 14,
+    Mosque = 15,
 } default Keep);
 
 u8_enum!(ResourceType {
@@ -81,7 +83,18 @@ u8_enum!(GatherState {
     ToResource = 1,
     Harvesting = 2,
     ToStockpile = 3,
+    /// Walking to, or working on, a construction/repair job site.
+    Constructing = 4,
 } default Idle);
+
+u8_enum!(BuildState {
+    /// Founded and paid for, not yet finished: a real, frail target that does
+    /// nothing until a builder tops it out.
+    Site = 0,
+    Complete = 1,
+    /// Standing and fully operational while it works toward `target_kind`.
+    Upgrading = 2,
+} default Complete);
 
 u8_enum!(Faction {
     Ayyubid = 0,

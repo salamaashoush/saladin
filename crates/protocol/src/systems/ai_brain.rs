@@ -1,6 +1,6 @@
 use crate::commands::{
-    assign_idle_gatherers, build, garrison, market_buy_cmd, market_trade, path_to, start_research,
-    train, ungarrison,
+    assign_builders, assign_idle_gatherers, build_context, build_with, garrison, market_buy_cmd,
+    market_trade, path_to, repair, start_research, train, ungarrison, upgrade_building,
 };
 use crate::components::*;
 use bevy_ecs::prelude::*;
@@ -12,6 +12,9 @@ const AI_BRAIN_DT: Fx = saladin_sim::AI_BRAIN_DT;
 const HOME_THREAT_RADIUS: Fx = saladin_sim::fx!("24"); // enemy combatants this close to home = a threat
 const HOME_RADIUS: Fx = saladin_sim::fx!("18"); // own combat units this close to a building count as "home"
 const SHORE_SCAN: i32 = 14; // tile radius around the keep that counts as "shore near"
+// How far out a bot will plant a forward Storehouse. Past this the outpost is
+// indefensible and the haul home costs more than the drop-off saves.
+const REMOTE_CLUSTER_MAX: Fx = saladin_sim::fx!("48");
 
 fn is_combat(kind: UnitKind) -> bool {
     unit_def(kind).attack > 0
@@ -35,6 +38,17 @@ struct BotSnap {
     fishing_blocked: bool,
 }
 
+/// One structure's lifecycle row, for the planner's site/damage/upgrade view.
+#[derive(Clone, Copy)]
+struct Lifecycle {
+    id: u64,
+    pos: V2,
+    owner: u64,
+    kind: BuildingKind,
+    state: BuildState,
+    hp: i32,
+}
+
 #[derive(Clone, Copy)]
 struct USnap {
     id: u64,
@@ -47,6 +61,7 @@ struct USnap {
     gather_state: GatherState,
     target_node: u64,
     garrisoned_in: u64,
+    job_site: u64,
 }
 
 /// Strategic skirmish AI. Under lockstep every client runs this identically (the
@@ -98,6 +113,7 @@ pub fn ai_brain(world: &mut World) {
                 gather_state: u.gather_state,
                 target_node: u.target_node,
                 garrisoned_in: u.garrisoned_in,
+                job_site: u.job_site,
             })
             .collect()
     };
@@ -105,11 +121,34 @@ pub fn ai_brain(world: &mut World) {
         let mut q = world.query::<(&GameId, &Pos, &Owner, &Building, &MatchId)>();
         q.iter(world).map(|(g, p, o, b, m)| (g.0, p.pos, o.0, b.kind, m.0)).collect()
     };
+    // lifecycle of every structure, for the planner's site/damage view
+    let mut lifecycles: Vec<Lifecycle> = {
+        let mut q = world.query::<(&GameId, &Pos, &Owner, &Building)>();
+        q.iter(world)
+            .map(|(g, p, o, b)| Lifecycle {
+                id: g.0,
+                pos: p.pos,
+                owner: o.0,
+                kind: b.kind,
+                state: b.state,
+                hp: b.hp,
+            })
+            .collect()
+    };
+    lifecycles.sort_by_key(|l| l.id);
+    let tech_of: HashMap<u64, u64> = {
+        let mut q = world.query::<&Player>();
+        q.iter(world).map(|p| (p.player_id, p.tech_mask)).collect()
+    };
     // node id → resource type, for the committed re-steer (carry_type lags — it
     // holds the last DEPOSITED load — so steering keys off the target NODE).
     let node_type: HashMap<u64, ResourceType> = {
         let mut q = world.query::<(&GameId, &ResourceNode)>();
         q.iter(world).map(|(g, n)| (g.0, n.res_type)).collect()
+    };
+    let node_pos: Vec<(u64, V2)> = {
+        let mut q = world.query::<(&GameId, &Pos, &ResourceNode)>();
+        q.iter(world).map(|(g, p, _)| (g.0, p.pos)).collect()
     };
 
     let paused: StdSet<u64> = {
@@ -160,18 +199,20 @@ pub fn ai_brain(world: &mut World) {
             }
         }
 
+        // what the bot can DO, not what it has paid for: a foundation houses
+        // nobody, fires nothing and unlocks nothing until a peasant finishes it
         let mut owned: StdSet<BuildingKind> = StdSet::new();
         let mut towers = 0;
         let mut cap = 0;
-        for (_, _, o, k, _) in &buildings {
-            if *o != owner {
+        for l in &lifecycles {
+            if l.owner != owner || !operational(l.state) {
                 continue;
             }
-            owned.insert(*k);
-            if *k == BuildingKind::Tower {
+            owned.insert(l.kind);
+            if l.kind == BuildingKind::Tower {
                 towers += 1;
             }
-            cap += building_def(*k).pop;
+            cap += building_def(l.kind).pop;
         }
 
         // enemy census + threat + walls
@@ -233,9 +274,12 @@ pub fn ai_brain(world: &mut World) {
 
         // soil worth sowing within building reach of the keep, and the fields
         // already standing on it
-        let farms = buildings
+        // STANDING fields only: the ladder adds `sites_in_flight[Farm]` on top,
+        // so counting sites here too made every ploughed foundation block two
+        // slots of the farm target.
+        let farms = lifecycles
             .iter()
-            .filter(|(_, _, o, k, m)| *o == owner && *m == bot.match_id && *k == BuildingKind::Farm)
+            .filter(|l| l.owner == owner && l.kind == BuildingKind::Farm && operational(l.state))
             .count() as i32;
         let farmland_near = {
             let seed = world.resource::<crate::WorldConfig>().seed;
@@ -250,6 +294,73 @@ pub fn ai_brain(world: &mut World) {
                 }
             }
             found
+        };
+
+        // sites rising, structures hurt, towers worth raising
+        let mask = tech_of.get(&owner).copied().unwrap_or(0);
+        let mut sites_in_flight = [0i32; 16];
+        let (mut damaged, mut storehouses, mut upgradable_towers) = (0, 0, 0);
+        let mut worst: Option<(i32, u64)> = None;
+        let mut oldest_tower = 0u64;
+        for l in &lifecycles {
+            if l.owner != owner {
+                continue;
+            }
+            match l.state {
+                BuildState::Site => sites_in_flight[l.kind as usize] += 1,
+                _ => {
+                    let max_hp = saladin_sim::effective_building_def(l.kind, mask).max_hp.max(1);
+                    if tune.repair_threshold > 0 && l.hp * 100 < max_hp * tune.repair_threshold {
+                        damaged += 1;
+                        let pct = l.hp * 100 / max_hp;
+                        if worst.is_none_or(|(bp, _)| pct < bp) {
+                            worst = Some((pct, l.id));
+                        }
+                    }
+                    if l.kind == BuildingKind::Storehouse {
+                        storehouses += 1;
+                    }
+                    if l.kind == BuildingKind::Tower && l.state == BuildState::Complete && oldest_tower == 0 {
+                        oldest_tower = l.id;
+                    }
+                    if l.kind == BuildingKind::Tower && l.state == BuildState::Complete {
+                        upgradable_towers += 1;
+                    }
+                }
+            }
+        }
+        let builders_busy = units
+            .iter()
+            .filter(|u| u.owner == owner && u.gather_state == GatherState::Constructing)
+            .count() as i32;
+        // the nearest resource cluster no drop-off can serve — the reason to
+        // plant a Storehouse. Own buildings are the anchors; TOWN_RADIUS is the
+        // reach a town has without one.
+        let remote_cluster = if tune.wants_expansion {
+            let reach2 = TOWN_RADIUS * TOWN_RADIUS;
+            let far2 = REMOTE_CLUSTER_MAX * REMOTE_CLUSTER_MAX;
+            // ties break on the lowest GameId, never on ECS iteration order:
+            // this feeds a build decision, so an order-dependent pick would
+            // desync two peers that agree on everything else.
+            let mut best: Option<(Fx, u64, V2)> = None;
+            for (id, npos) in &node_pos {
+                let d = dist2(*npos, keep_pos);
+                if d > far2 {
+                    continue;
+                }
+                if let Some((bd, bid, _)) = best {
+                    if d > bd || (d == bd && *id >= bid) {
+                        continue;
+                    }
+                }
+                if owned_b_pos.iter().any(|b| dist2(*npos, *b) <= reach2) {
+                    continue;
+                }
+                best = Some((d, *id, *npos));
+            }
+            best.map(|(_, _, p)| p)
+        } else {
+            None
         };
 
         let state = PlannerState {
@@ -273,6 +384,12 @@ pub fn ai_brain(world: &mut World) {
             farmland_near,
             farms,
             enemy_towers,
+            sites_in_flight,
+            damaged,
+            builders_busy,
+            storehouses,
+            upgradable_towers,
+            remote_cluster,
         };
 
         // ── economy: steer gatherers to what the bot is short of ──────────────
@@ -337,6 +454,7 @@ pub fn ai_brain(world: &mut World) {
             steer_to(world, scarce_build, Some(&[glut]), 3);
         }
         assign_idle_gatherers(world, owner, idle_bias);
+        staff_jobs(world, owner, &units, &lifecycles, tune.builders_per_site);
 
         // ── phase + one macro decision per profile-paced window ───────────────
         let phase = next_phase(&state, &tune);
@@ -345,24 +463,53 @@ pub fn ai_brain(world: &mut World) {
         if decision_cd <= Fx::ZERO {
             decision_cd = prof.decision_interval;
             if let Some(plan) = next_build(&state, &tune) {
-                if plan.is_unit {
-                    if let Some(kind) = UnitKind::from_u8(plan.kind) {
-                        train(world, owner, kind);
+                match plan.action {
+                    BuildAction::Train => {
+                        if let Some(kind) = UnitKind::from_u8(plan.kind) {
+                            train(world, owner, kind);
+                        }
                     }
-                } else if let Some(kind) = BuildingKind::from_u8(plan.kind) {
-                    // Defensive towers keep a wood reserve; structural buildings
-                    // just need to be affordable (build() re-checks the rest).
-                    let reserve_ok = kind != BuildingKind::Tower
-                        || stock.wood >= building_def(kind).cost.wood + tune.wood_buffer;
-                    if reserve_ok {
-                        let placed = place_near(world, owner, kind, keep_pos);
-                        // an affordable hut with no legal shoreline tile would
-                        // stall the ladder forever — stop asking for one
-                        if !placed
-                            && kind == BuildingKind::FishingHut
-                            && stock.can_afford(&building_def(kind).cost)
-                        {
-                            fishing_blocked = true;
+                    BuildAction::Build => {
+                        if let Some(kind) = BuildingKind::from_u8(plan.kind) {
+                            // Defensive towers keep a wood reserve; structural
+                            // buildings just need to be affordable (build()
+                            // re-checks the rest).
+                            let reserve_ok = kind != BuildingKind::Tower
+                                || stock.wood >= building_def(kind).cost.wood + tune.wood_buffer;
+                            let anchor = if kind == BuildingKind::Storehouse {
+                                state.remote_cluster.unwrap_or(keep_pos)
+                            } else {
+                                keep_pos
+                            };
+                            if reserve_ok {
+                                let placed = place_near(world, owner, kind, anchor);
+                                // an affordable hut with no legal shoreline tile
+                                // would stall the ladder forever — stop asking
+                                if placed.is_none()
+                                    && kind == BuildingKind::FishingHut
+                                    && stock.can_afford(&building_def(kind).cost)
+                                {
+                                    fishing_blocked = true;
+                                }
+                            }
+                        }
+                    }
+                    // Raising a tower in place and mending a battered hall are
+                    // the SAME order a human gives: pay, then send hands.
+                    BuildAction::Upgrade => {
+                        if oldest_tower != 0 {
+                            upgrade_building(world, owner, oldest_tower);
+                        }
+                    }
+                    BuildAction::Repair => {
+                        if let Some((_, id)) = worst {
+                            let pos =
+                                lifecycles.iter().find(|l| l.id == id).map(|l| l.pos).unwrap_or(keep_pos);
+                            let mut taken: StdSet<u64> =
+                                units.iter().filter(|u| u.job_site != 0).map(|u| u.id).collect();
+                            let crew =
+                                spare_hands(&units, owner, pos, tune.builders_per_site, &mut taken);
+                            assign_builders(world, owner, id, &crew);
                         }
                     }
                 }
@@ -487,7 +634,7 @@ pub fn ai_brain(world: &mut World) {
             let recalls: Vec<(Entity, V2)> =
                 by_closest.iter().take(n.max(0) as usize).map(|a| (a.entity, a.pos)).collect();
             for (e, pos) in recalls {
-                let path = path_to(world, pos, keep_pos);
+                let path = path_to(world, owner, pos, keep_pos);
                 if let Some(mut u) = world.get_mut::<Unit>(e) {
                     u.attack_target = 0;
                     u.stance = Stance::Defensive;
@@ -547,7 +694,7 @@ pub fn ai_brain(world: &mut World) {
                         role
                     };
                     if let Some(t) = target_for_role(eff_role, pos, &intel).or(intel.keep) {
-                        let path = path_to(world, pos, t.pos);
+                        let path = path_to(world, owner, pos, t.pos);
                         if let Some(mut u) = world.get_mut::<Unit>(e) {
                             u.attack_target = t.id;
                             u.stance = Stance::Aggressive;
@@ -577,7 +724,7 @@ pub fn ai_brain(world: &mut World) {
                 wave_launched = 0; // wave resolved (won, died, or walked home)
             } else if should_retreat(wave_launched, soldiers, tac.retreat_pct) {
                 for (e, pos) in field_units {
-                    let path = path_to(world, pos, keep_pos);
+                    let path = path_to(world, owner, pos, keep_pos);
                     if let Some(mut u) = world.get_mut::<Unit>(e) {
                         u.attack_target = 0;
                         u.stance = Stance::Defensive;
@@ -615,7 +762,7 @@ pub fn ai_brain(world: &mut World) {
                 .min_by_key(|u| u.id)
                 .map(|u| (u.entity, u.pos, u.id));
             if let (Some(tpos), Some((e, pos, id))) = (target, best) {
-                let path = path_to(world, pos, tpos);
+                let path = path_to(world, owner, pos, tpos);
                 if let Some(mut u) = world.get_mut::<Unit>(e) {
                     u.gather_state = GatherState::Idle;
                     u.target_node = 0;
@@ -647,9 +794,14 @@ pub fn ai_brain(world: &mut World) {
 /// Try to place `kind` on a clear spot spiralling out from the keep. Eight
 /// rays cover ordinary structures; a shoreline building needs the FULL ring
 /// perimeter — its one valid waterside tile is rarely on a ray.
-fn place_near(world: &mut World, owner: u64, kind: BuildingKind, keep: V2) -> bool {
-    if build(world, owner, kind, keep, 0) {
-        return true;
+fn place_near(world: &mut World, owner: u64, kind: BuildingKind, keep: V2) -> Option<u64> {
+    // ONE context for the whole probe: a shoreline scan asks ~800 questions and
+    // each one used to re-walk every building and every resource node on the map.
+    let mut ctx = build_context(world, owner)?;
+    let mut try_at =
+        |world: &mut World, pos: V2| build_with(world, &mut ctx, owner, kind, pos, 0).ok();
+    if let Some(id) = try_at(world, keep) {
+        return Some(id);
     }
     // A field needs soil and a hut needs a shore; both are scarce enough that
     // the eight-spoke scan below walks straight past them.
@@ -657,22 +809,73 @@ fn place_near(world: &mut World, owner: u64, kind: BuildingKind, keep: V2) -> bo
         for r in 2..=SHORE_SCAN {
             for (dx, dy) in ring_perimeter(r) {
                 let pos = V2::new(keep.x + Fx::from_num(dx), keep.y + Fx::from_num(dy));
-                if build(world, owner, kind, pos, 0) {
-                    return true;
+                if let Some(id) = try_at(world, pos) {
+                    return Some(id);
                 }
             }
         }
-        return false;
+        return None;
     }
     for r in 3..26 {
         for (dx, dy) in [(1, 0), (1, 1), (0, 1), (-1, 1), (-1, 0), (-1, -1), (0, -1), (1, -1)] {
             let pos = V2::new(keep.x + Fx::from_num(dx * r), keep.y + Fx::from_num(dy * r));
-            if build(world, owner, kind, pos, 0) {
-                return true;
+            if let Some(id) = try_at(world, pos) {
+                return Some(id);
             }
         }
     }
-    false
+    None
+}
+
+/// The `n` peasants nearest `at` that are not already on a job — ties on the
+/// lowest GameId, never on iteration order. `taken` stops one pass handing the
+/// same hand to two sites off a stale snapshot.
+fn spare_hands(units: &[USnap], owner: u64, at: V2, n: i32, taken: &mut StdSet<u64>) -> Vec<u64> {
+    let mut cand: Vec<(Fx, u64)> = units
+        .iter()
+        .filter(|u| {
+            u.owner == owner
+                && u.kind == UnitKind::Peasant
+                && u.garrisoned_in == 0
+                && u.gather_state != GatherState::Constructing
+                && !taken.contains(&u.id)
+        })
+        .map(|u| (dist2(u.pos, at), u.id))
+        .collect();
+    cand.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
+    let picked: Vec<u64> = cand.into_iter().take(n.max(0) as usize).map(|(_, id)| id).collect();
+    for id in &picked {
+        taken.insert(*id);
+    }
+    picked
+}
+
+/// Keep every paid-for site and every upgrade manned. An unmanned site never
+/// finishes, and the planner's `sites_in_flight` gate would then wedge the
+/// whole build ladder behind it — so this is not a nicety.
+fn staff_jobs(world: &mut World, owner: u64, units: &[USnap], jobs: &[Lifecycle], want: i32) {
+    let hands = units.iter().filter(|u| u.owner == owner && u.kind == UnitKind::Peasant).count();
+    if hands <= 2 {
+        return; // never strip the economy bare to raise a wall
+    }
+    let mut taken: StdSet<u64> =
+        units.iter().filter(|u| u.job_site != 0).map(|u| u.id).collect();
+    for j in jobs {
+        if j.owner != owner || j.state == BuildState::Complete {
+            continue;
+        }
+        let crew = units
+            .iter()
+            .filter(|u| u.owner == owner && u.job_site == j.id)
+            .count() as i32;
+        let short = want.max(1) - crew;
+        if short <= 0 {
+            continue;
+        }
+        for u in spare_hands(units, owner, j.pos, short, &mut taken) {
+            repair(world, owner, u, j.id);
+        }
+    }
 }
 
 /// Every tile on the square ring of radius `r`, in deterministic scan order.

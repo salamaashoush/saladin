@@ -5,8 +5,9 @@
 use bevy_app::prelude::*;
 use saladin_protocol::*;
 use saladin_sim::{
-    BuildingKind, FARM_MIN_FERTILITY, FARM_STORE, Faction, Fx, ResourceType, Stockpile, V2,
-    WORLD_SIZE, ZERO, building_def, compose_seed, fx, is_buildable_tile,
+    BuildingKind, FARM_MIN_FERTILITY, FARM_STORE, Faction, Fx, GatherState, ResourceType, Stance,
+    Stockpile, UnitKind, V2, WORLD_SIZE, ZERO, building_def, compose_seed, fx, is_buildable_tile,
+    unit_def,
 };
 
 fn build_app(seed: u32) -> App {
@@ -49,8 +50,82 @@ fn spawn_keep(app: &mut App, id: u64, owner: u64, pos: V2) {
         Owner(owner),
         MatchId(1),
         Pos { pos, facing: ZERO },
-        Building { kind: BuildingKind::Keep, hp: def.max_hp, cooldown: ZERO, rally: pos },
+        Building::new(BuildingKind::Keep, def.max_hp, pos),
     ));
+}
+
+fn spawn_building(app: &mut App, id: u64, owner: u64, kind: BuildingKind, pos: V2) {
+    let def = building_def(kind);
+    app.world_mut().spawn((
+        GameId(id),
+        Owner(owner),
+        MatchId(1),
+        Pos { pos, facing: ZERO },
+        Building::new(kind, def.max_hp, pos),
+    ));
+}
+
+/// A building is LABOUR now: a Build order without hands founds a site and
+/// nothing more, so every test that wants a standing farm hires a crew.
+fn crew(app: &mut App, owner: u64, at: V2, n: u64, first: u64) -> Vec<u64> {
+    let def = unit_def(UnitKind::Peasant);
+    (0..n)
+        .map(|i| {
+            let id = first + i;
+            let pos = V2::new(at.x + Fx::from_num(3 + i as i32), at.y);
+            app.world_mut().spawn((
+                GameId(id),
+                Owner(owner),
+                MatchId(1),
+                Pos { pos, facing: ZERO },
+                Unit {
+                    kind: UnitKind::Peasant,
+                    target: pos,
+                    has_target: false,
+                    speed: def.speed,
+                    gather_state: GatherState::Idle,
+                    target_node: 0,
+                    carrying: 0,
+                    carry_type: ResourceType::Wood,
+                    harvest_timer: ZERO,
+                    hp: def.max_hp,
+                    attack_target: 0,
+                    attack_cooldown: ZERO,
+                    stance: Stance::Aggressive,
+                    morale: Fx::ONE,
+                    routing: false,
+                    home: pos,
+                    garrisoned_in: 0,
+                    job_site: 0,
+                    path: vec![],
+                    path_idx: 0,
+                },
+            ));
+            id
+        })
+        .collect()
+}
+
+/// Site a farm at `at` with a crew and run until it stands. Returns false if
+/// the field was never ploughed.
+fn raise_farm(app: &mut App, at: V2, first_id: u64) -> bool {
+    let hands = crew(app, 1, at, 3, first_id);
+    cmd(app, PlayerCommand::Build {
+        player_id: 1,
+        kind: BuildingKind::Farm,
+        pos: at,
+        facing: 0,
+        builders: hands,
+    });
+    for _ in 0..900 {
+        step(app.world_mut());
+        let world = app.world_mut();
+        let mut q = world.query::<&Building>();
+        if q.iter(world).any(|b| b.kind == BuildingKind::Farm && b.complete()) {
+            return true;
+        }
+    }
+    false
 }
 
 fn center(tx: i32, ty: i32) -> V2 {
@@ -98,13 +173,13 @@ fn a_field_needs_soil_worth_sowing() {
 
     let (bx, by) = block(seed, false);
     spawn_keep(&mut app, 10, 1, center(bx - 5, by - 5));
-    cmd(&mut app, PlayerCommand::Build { player_id: 1, kind: BuildingKind::Farm, pos: center(bx, by), facing: 0 });
+    cmd(&mut app, PlayerCommand::Build { player_id: 1, kind: BuildingKind::Farm, pos: center(bx, by), facing: 0, builders: vec![] });
     step(app.world_mut());
     assert_eq!(farms(&mut app), 0, "nothing grows on barren ground");
 
     let (fx_, fy) = block(seed, true);
     spawn_keep(&mut app, 11, 1, center(fx_ - 5, fy - 5));
-    cmd(&mut app, PlayerCommand::Build { player_id: 1, kind: BuildingKind::Farm, pos: center(fx_, fy), facing: 0 });
+    cmd(&mut app, PlayerCommand::Build { player_id: 1, kind: BuildingKind::Farm, pos: center(fx_, fy), facing: 0, builders: vec![] });
     step(app.world_mut());
     assert_eq!(farms(&mut app), 1, "good soil takes the plough");
 }
@@ -116,8 +191,7 @@ fn a_sown_field_is_harvestable_and_regrows() {
     spawn_player(&mut app, 1);
     let (bx, by) = block(seed, true);
     spawn_keep(&mut app, 10, 1, center(bx - 5, by - 5));
-    cmd(&mut app, PlayerCommand::Build { player_id: 1, kind: BuildingKind::Farm, pos: center(bx, by), facing: 0 });
-    step(app.world_mut());
+    assert!(raise_farm(&mut app, center(bx, by), 20), "the crew never raised the farm");
 
     let sown = fields(&mut app);
     assert_eq!(sown.len(), 1, "sowing a farm plants exactly one field");
@@ -148,8 +222,7 @@ fn razing_a_farm_takes_its_crop() {
     spawn_player(&mut app, 1);
     let (bx, by) = block(seed, true);
     spawn_keep(&mut app, 10, 1, center(bx - 5, by - 5));
-    cmd(&mut app, PlayerCommand::Build { player_id: 1, kind: BuildingKind::Farm, pos: center(bx, by), facing: 0 });
-    step(app.world_mut());
+    assert!(raise_farm(&mut app, center(bx, by), 20), "the crew never raised the farm");
     assert_eq!(fields(&mut app).len(), 1);
 
     let farm_id = {
@@ -178,7 +251,7 @@ fn farms_keep_two_worlds_in_lockstep() {
         })
         .collect();
     for app in &mut worlds {
-        cmd(app, PlayerCommand::Build { player_id: 1, kind: BuildingKind::Farm, pos: center(bx, by), facing: 0 });
+        cmd(app, PlayerCommand::Build { player_id: 1, kind: BuildingKind::Farm, pos: center(bx, by), facing: 0, builders: vec![] });
     }
     for _ in 0..90 {
         for app in &mut worlds {
@@ -188,4 +261,110 @@ fn farms_keep_two_worlds_in_lockstep() {
         let b = worlds[1].world().resource::<StateHash>().0;
         assert_eq!(a, b, "farm regrowth desynced the two worlds");
     }
+}
+
+/// The Granary's whole role: it stores nothing and instead WORKS the fields in
+/// its reach. Two identical farms, one hubbed and one not.
+#[test]
+fn a_granary_makes_the_fields_around_it_grow_faster() {
+    let seed = compose_seed(11, 1);
+    let mut app = build_app(seed);
+    spawn_player(&mut app, 1);
+    let (bx, by) = block(seed, true);
+    spawn_keep(&mut app, 10, 1, center(bx - 5, by - 5));
+    assert!(raise_farm(&mut app, center(bx, by), 20), "the crew never raised the farm");
+    assert_eq!(fields(&mut app).len(), 1);
+
+    let drain = |app: &mut App| {
+        let world = app.world_mut();
+        let mut q = world.query::<(&mut ResourceNode, &FieldOf)>();
+        for (mut n, _) in q.iter_mut(world) {
+            n.remaining = 1;
+        }
+    };
+    drain(&mut app);
+    for _ in 0..41 {
+        step(app.world_mut());
+    }
+    let bare = fields(&mut app)[0].remaining;
+
+    // the same field, now inside a granary's reach
+    spawn_building(&mut app, 12, 1, BuildingKind::Granary, center(bx + 3, by + 3));
+    drain(&mut app);
+    for _ in 0..41 {
+        step(app.world_mut());
+    }
+    let hubbed = fields(&mut app)[0].remaining;
+    assert!(hubbed > bare, "granary aura did nothing ({bare} -> {hubbed})");
+}
+
+/// The aura is a work bonus its OWNER pays for. A granary the enemy built next
+/// to your fields tended them for free, because the regen loop matched on
+/// geography alone and never asked whose crop it was.
+#[test]
+fn an_enemy_granary_does_not_tend_your_fields() {
+    let seed = compose_seed(11, 1);
+    let (bx, by) = block(seed, true);
+
+    let run = |granary_owner: Option<u64>| -> i32 {
+        let mut app = build_app(seed);
+        spawn_player(&mut app, 1);
+        spawn_player(&mut app, 2);
+        spawn_keep(&mut app, 10, 1, center(bx - 5, by - 5));
+        assert!(raise_farm(&mut app, center(bx, by), 20), "the crew never raised the farm");
+        if let Some(o) = granary_owner {
+            spawn_building(&mut app, 12, o, BuildingKind::Granary, center(bx + 3, by + 3));
+        }
+        {
+            let world = app.world_mut();
+            let mut q = world.query::<(&mut ResourceNode, &FieldOf)>();
+            for (mut n, _) in q.iter_mut(world) {
+                n.remaining = 1;
+            }
+        }
+        for _ in 0..41 {
+            step(app.world_mut());
+        }
+        fields(&mut app)[0].remaining
+    };
+
+    let bare = run(None);
+    let mine = run(Some(1));
+    let theirs = run(Some(2));
+    assert!(mine > bare, "your own granary must tend your fields ({bare} -> {mine})");
+    assert_eq!(theirs, bare, "an enemy granary tended your crop ({bare} -> {theirs})");
+}
+
+/// The whole point of a farm: a peasant walks to the crop, cuts it and carries
+/// it home. The field node sits at the farm's own footprint CENTRE, which on an
+/// even footprint is the corner shared by four tiles the building occupies — so
+/// the nearest ground a harvester can stand on is over a tile away and a plain
+/// HARVEST_RANGE test can never be satisfied. Every earlier farming test
+/// asserted the field EXISTED and REGREW; none of them ever ate from it.
+#[test]
+fn a_peasant_can_actually_eat_from_a_farm() {
+    let seed = compose_seed(11, 1);
+    let mut app = build_app(seed);
+    spawn_player(&mut app, 1);
+    let (bx, by) = block(seed, true);
+    spawn_keep(&mut app, 10, 1, center(bx - 5, by - 5));
+    assert!(raise_farm(&mut app, center(bx, by), 20), "the crew never raised the farm");
+
+    let field = {
+        let world = app.world_mut();
+        let mut q = world.query::<(&GameId, &FieldOf)>();
+        q.iter(world).map(|(g, _)| g.0).next().unwrap()
+    };
+    let hand = crew(&mut app, 1, center(bx, by), 1, 40)[0];
+    let food = |app: &mut App| -> i32 {
+        let world = app.world_mut();
+        let mut q = world.query::<&Player>();
+        q.iter(world).find(|p| p.player_id == 1).unwrap().stock.food
+    };
+    let before = food(&mut app);
+    cmd(&mut app, PlayerCommand::Gather { player_id: 1, unit: hand, node: field });
+    for _ in 0..600 {
+        step(app.world_mut());
+    }
+    assert!(food(&mut app) > before, "600 ticks on a standing field and not one bushel came in");
 }

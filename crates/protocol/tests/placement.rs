@@ -51,7 +51,7 @@ fn spawn_building(app: &mut App, id: u64, owner: u64, kind: BuildingKind, pos: V
         Owner(owner),
         MatchId(1),
         Pos { pos, facing: ZERO },
-        Building { kind, hp: def.max_hp, cooldown: ZERO, rally: pos },
+        Building::new(kind, def.max_hp, pos),
     ));
 }
 
@@ -113,14 +113,14 @@ fn fishing_hut_needs_real_water_not_just_land() {
     spawn_building(&mut app, 10, 1, BuildingKind::Keep, center(cx + 1, cy + 1));
 
     // inland: rejected even though the ground is perfectly buildable
-    cmd(&mut app, PlayerCommand::Build { player_id: 1, kind: BuildingKind::FishingHut, pos: center(cx + 4, cy + 4), facing: 0 });
+    cmd(&mut app, PlayerCommand::Build { player_id: 1, kind: BuildingKind::FishingHut, pos: center(cx + 4, cy + 4), facing: 0, builders: vec![] });
     step(app.world_mut());
     assert_eq!(building_count(&mut app, BuildingKind::FishingHut), 0, "no fishing hut on dry land");
 
     // shoreline: accepted (anchor keep placed beside it for the town radius)
     let (sx, sy) = shore_tile(seed);
     spawn_building(&mut app, 11, 1, BuildingKind::Keep, center(sx - 2, sy - 2));
-    cmd(&mut app, PlayerCommand::Build { player_id: 1, kind: BuildingKind::FishingHut, pos: center(sx, sy), facing: 0 });
+    cmd(&mut app, PlayerCommand::Build { player_id: 1, kind: BuildingKind::FishingHut, pos: center(sx, sy), facing: 0, builders: vec![] });
     step(app.world_mut());
     assert_eq!(building_count(&mut app, BuildingKind::FishingHut), 1, "fishing hut builds on the shore");
 }
@@ -163,7 +163,7 @@ fn no_building_on_fords() {
     }
     assert!(anchored, "keep anchored near the ford");
 
-    cmd(&mut app, PlayerCommand::Build { player_id: 1, kind: BuildingKind::Tower, pos: center(fx_, fy), facing: 0 });
+    cmd(&mut app, PlayerCommand::Build { player_id: 1, kind: BuildingKind::Tower, pos: center(fx_, fy), facing: 0, builders: vec![] });
     step(app.world_mut());
     assert_eq!(building_count(&mut app, BuildingKind::Tower), 0, "fords stay open chokepoints");
 }
@@ -177,7 +177,7 @@ fn buildings_must_rise_within_the_town_radius() {
     spawn_building(&mut app, 10, 1, BuildingKind::Keep, center(cx + 1, cy + 1));
 
     // adjacent to town: fine
-    cmd(&mut app, PlayerCommand::Build { player_id: 1, kind: BuildingKind::House, pos: center(cx + 5, cy + 1), facing: 0 });
+    cmd(&mut app, PlayerCommand::Build { player_id: 1, kind: BuildingKind::House, pos: center(cx + 5, cy + 1), facing: 0, builders: vec![] });
     step(app.world_mut());
     assert_eq!(building_count(&mut app, BuildingKind::House), 1);
 
@@ -194,7 +194,7 @@ fn buildings_must_rise_within_the_town_radius() {
         }
         found.expect("distant buildable spot")
     };
-    cmd(&mut app, PlayerCommand::Build { player_id: 1, kind: BuildingKind::House, pos: center(fx2 + 1, fy2 + 1), facing: 0 });
+    cmd(&mut app, PlayerCommand::Build { player_id: 1, kind: BuildingKind::House, pos: center(fx2 + 1, fy2 + 1), facing: 0, builders: vec![] });
     step(app.world_mut());
     assert_eq!(building_count(&mut app, BuildingKind::House), 1, "no teleport-building across the map");
 }
@@ -213,18 +213,71 @@ fn no_building_on_resource_nodes() {
         ResourceNode::deposit(ResourceType::Wood, 100),
     ));
 
-    cmd(&mut app, PlayerCommand::Build { player_id: 1, kind: BuildingKind::Tower, pos: center(cx + 5, cy + 5), facing: 0 });
+    cmd(&mut app, PlayerCommand::Build { player_id: 1, kind: BuildingKind::Tower, pos: center(cx + 5, cy + 5), facing: 0, builders: vec![] });
     step(app.world_mut());
     assert_eq!(building_count(&mut app, BuildingKind::Tower), 0, "the tree blocks the tile");
 }
 
 #[test]
-fn granary_banks_food_without_a_keep_nearby() {
+fn a_storehouse_banks_a_haul_without_a_keep_nearby() {
     let seed = 1;
     let mut app = build_app(seed);
     spawn_player(&mut app, 1);
     let (cx, cy) = inland_block(seed);
-    // keep far away is irrelevant; granary is the close drop-off
+    // keep far away is irrelevant; the storehouse is the close drop-off
+    spawn_building(&mut app, 10, 1, BuildingKind::Storehouse, center(cx + 1, cy + 1));
+
+    let def = unit_def(UnitKind::Peasant);
+    let pos = center(cx + 4, cy + 1);
+    app.world_mut().spawn((
+        GameId(20),
+        Owner(1),
+        MatchId(1),
+        Pos { pos, facing: ZERO },
+        Unit {
+            kind: UnitKind::Peasant,
+            target: pos,
+            has_target: false,
+            speed: def.speed,
+            gather_state: GatherState::ToStockpile,
+            target_node: 0,
+            carrying: 10,
+            carry_type: ResourceType::Food,
+            harvest_timer: ZERO,
+            hp: def.max_hp,
+            attack_target: 0,
+            attack_cooldown: ZERO,
+            stance: Stance::Aggressive,
+            morale: Fx::ONE,
+            routing: false,
+            home: pos,
+            garrisoned_in: 0,
+            job_site: 0,
+            path: vec![],
+            path_idx: 0,
+        },
+    ));
+
+    let before = {
+        let world = app.world_mut();
+        let mut q = world.query::<&Player>();
+        q.iter(world).next().unwrap().stock.food
+    };
+    for _ in 0..400 {
+        step(app.world_mut());
+    }
+    let world = app.world_mut();
+    let mut q = world.query::<&Player>();
+    let after = q.iter(world).next().unwrap().stock.food;
+    assert_eq!(after, before + 10, "the storehouse accepts the deposit");
+}
+
+#[test]
+fn a_granary_is_a_farm_hub_not_a_warehouse() {
+    let seed = 1;
+    let mut app = build_app(seed);
+    spawn_player(&mut app, 1);
+    let (cx, cy) = inland_block(seed);
     spawn_building(&mut app, 10, 1, BuildingKind::Granary, center(cx + 1, cy + 1));
 
     let def = unit_def(UnitKind::Peasant);
@@ -252,6 +305,7 @@ fn granary_banks_food_without_a_keep_nearby() {
             routing: false,
             home: pos,
             garrisoned_in: 0,
+            job_site: 0,
             path: vec![],
             path_idx: 0,
         },
@@ -268,7 +322,7 @@ fn granary_banks_food_without_a_keep_nearby() {
     let world = app.world_mut();
     let mut q = world.query::<&Player>();
     let after = q.iter(world).next().unwrap().stock.food;
-    assert_eq!(after, before + 10, "granary accepts the food deposit");
+    assert_eq!(after, before, "a granary stores nothing; it WORKS the fields");
 }
 
 #[test]
@@ -278,9 +332,13 @@ fn building_roles_are_coherent() {
     for &k in saladin_sim::BuildingKind::ALL {
         assert!(!building_def(k).blurb.is_empty(), "{k:?} has no role blurb");
     }
-    // food drop-offs are exactly granary + fishing hut + (keep accepts all)
-    assert!(building_def(Granary).food_dropoff);
-    assert!(building_def(FishingHut).food_dropoff);
+    // drop-offs: the keep and the storehouse take everything, the hut takes
+    // the catch, and nothing else is a warehouse
+    use saladin_sim::{ACCEPTS_ALL, ACCEPTS_FOOD};
+    assert_eq!(building_def(Keep).accepts, ACCEPTS_ALL);
+    assert_eq!(building_def(Storehouse).accepts, ACCEPTS_ALL);
+    assert_eq!(building_def(FishingHut).accepts, ACCEPTS_FOOD);
+    assert_eq!(building_def(Granary).accepts, 0);
     assert!(building_def(FishingHut).requires_water);
     // population comes from houses and the keep, not storage buildings
     assert_eq!(building_def(Granary).pop, 0);
@@ -302,7 +360,7 @@ fn build_facing_rides_the_command() {
     let (cx, cy) = inland_block(seed);
     spawn_building(&mut app, 10, 1, BuildingKind::Keep, center(cx + 1, cy + 1));
 
-    cmd(&mut app, PlayerCommand::Build { player_id: 1, kind: BuildingKind::House, pos: center(cx + 5, cy + 1), facing: 3 });
+    cmd(&mut app, PlayerCommand::Build { player_id: 1, kind: BuildingKind::House, pos: center(cx + 5, cy + 1), facing: 3, builders: vec![] });
     step(app.world_mut());
     let world = app.world_mut();
     let mut q = world.query::<(&Pos, &Building)>();
@@ -354,4 +412,80 @@ fn nothing_is_founded_on_a_hillside() {
             .is_ok(),
         "flat inland ground must still take a building"
     );
+}
+
+/// The prereq graph is only real if the COMMAND enforces it. Two genuine
+/// multi-prereq gates, and the one-per-town structure.
+#[test]
+fn the_full_prereq_set_gates_the_build_command() {
+    let seed = 1;
+    let mut app = build_app(seed);
+    spawn_player(&mut app, 1);
+    let (cx, cy) = inland_block(seed);
+    spawn_building(&mut app, 10, 1, BuildingKind::Keep, center(cx + 1, cy + 1));
+    spawn_building(&mut app, 11, 1, BuildingKind::Barracks, center(cx + 5, cy + 1));
+
+    // a Stable needs the forge as well as the hall
+    cmd(&mut app, PlayerCommand::Build { player_id: 1, kind: BuildingKind::Stable, pos: center(cx + 5, cy + 5), facing: 0, builders: vec![] });
+    step(app.world_mut());
+    assert_eq!(building_count(&mut app, BuildingKind::Stable), 0, "a stable without a blacksmith");
+
+    spawn_building(&mut app, 12, 1, BuildingKind::Blacksmith, center(cx + 9, cy + 1));
+    cmd(&mut app, PlayerCommand::Build { player_id: 1, kind: BuildingKind::Stable, pos: center(cx + 5, cy + 5), facing: 0, builders: vec![] });
+    step(app.world_mut());
+    assert_eq!(building_count(&mut app, BuildingKind::Stable), 1, "both prereqs met");
+
+    // one great mosque per town
+    cmd(&mut app, PlayerCommand::Build { player_id: 1, kind: BuildingKind::Mosque, pos: center(cx + 9, cy + 5), facing: 0, builders: vec![] });
+    step(app.world_mut());
+    assert_eq!(building_count(&mut app, BuildingKind::Mosque), 1);
+    cmd(&mut app, PlayerCommand::Build { player_id: 1, kind: BuildingKind::Mosque, pos: center(cx + 1, cy + 9), facing: 0, builders: vec![] });
+    step(app.world_mut());
+    assert_eq!(building_count(&mut app, BuildingKind::Mosque), 1, "a second mosque was raised");
+}
+
+/// The town radius is the ONLY spatial containment rule in the game, and a wall
+/// drag used to walk straight out of it: every segment placed was pushed into
+/// the anchor set, so a 120-tile line reached 115 tiles from the keep for a few
+/// wood a tile. The anchor set is snapshotted once per command.
+#[test]
+fn a_long_wall_drag_cannot_walk_out_of_the_town() {
+    let seed = 1;
+    let mut app = build_app(seed);
+    spawn_player(&mut app, 1);
+    let (cx, cy) = inland_block(seed);
+    let keep = center(cx + 1, cy + 1);
+    spawn_building(&mut app, 10, 1, BuildingKind::Keep, keep);
+
+    // 100 tiles marching away in a straight line, far past TOWN_RADIUS
+    let tiles: Vec<(i32, i32)> = (0..100).map(|i| (cx + 3, cy + 3 + i)).collect();
+    cmd(&mut app, PlayerCommand::PlaceWall { player_id: 1, tiles, builders: vec![] });
+    step(app.world_mut());
+
+    let world = app.world_mut();
+    let mut q = world.query::<(&Pos, &Building)>();
+    let walls: Vec<V2> =
+        q.iter(world).filter(|(_, b)| b.kind == BuildingKind::Wall).map(|(p, _)| p.pos).collect();
+    assert!(!walls.is_empty(), "the drag laid no wall at all");
+    let reach = saladin_sim::TOWN_RADIUS;
+    for w in &walls {
+        let d = saladin_sim::dist(*w, keep);
+        assert!(d <= reach, "a segment crept to {d} from the keep (radius {reach})");
+    }
+    assert!(walls.len() < 100, "the whole line went up, so nothing was contained");
+}
+
+/// A Watchtower is what a Tower BECOMES; it is not on the bar and the command
+/// refuses it outright.
+#[test]
+fn a_watchtower_cannot_be_bought() {
+    let seed = 1;
+    let mut app = build_app(seed);
+    spawn_player(&mut app, 1);
+    let (cx, cy) = inland_block(seed);
+    spawn_building(&mut app, 10, 1, BuildingKind::Keep, center(cx + 1, cy + 1));
+    spawn_building(&mut app, 11, 1, BuildingKind::Tower, center(cx + 5, cy + 1));
+    cmd(&mut app, PlayerCommand::Build { player_id: 1, kind: BuildingKind::Watchtower, pos: center(cx + 5, cy + 5), facing: 0, builders: vec![] });
+    step(app.world_mut());
+    assert_eq!(building_count(&mut app, BuildingKind::Watchtower), 0);
 }

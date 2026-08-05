@@ -142,7 +142,151 @@ pub fn building_mesh(kind: BuildingKind) -> Mesh {
         BuildingKind::FishingHut => build_fishing_hut(),
         BuildingKind::SiegeWorkshop => build_siege_workshop(),
         BuildingKind::Farm => build_farm(),
+        BuildingKind::Storehouse => build_storehouse(),
+        BuildingKind::Mosque => build_mosque(),
     }
+}
+
+// Storehouse: a stone-based warehouse under a covered dock — the outpost you
+// plant AT the quarry. Stone plinth (it holds a town's stone), an open loading
+// dock stacked with sacks, crates and amphorae, and doors wide enough to read
+// as "everything goes in here" rather than "somebody lives here".
+fn build_storehouse() -> Mesh {
+    let stone = srgb(STONE);
+    let stone_dk = srgb(STONE_DARK);
+    let wall = srgb(PLASTER);
+    let wood = srgb(TIMBER);
+    let dark = srgb(TIMBER_DARK);
+    let roof = srgb(0x8b6a3c);
+    let sack = srgb(0xc9b07a);
+    let jar = srgb(0x8a6a48);
+    let team = srgb(TEAM_CLOTH);
+
+    let bz = -0.18; // the hall sits back so the dock has its own ground
+    let mut parts = vec![
+        part(cuboid(1.96, 0.22, 1.5), stone_dk, xyz(0.0, 0.11, bz)),
+        part(cuboid(1.82, 0.34, 1.36), stone, xyz(0.0, 0.39, bz)),
+        part(cuboid(1.74, 0.62, 1.28), wall, xyz(0.0, 0.87, bz)),
+        // shallow pitched roof with an exposed ridge beam
+        part(cuboid(1.98, 0.11, 0.86), roof, rot_x(0.0, 1.28, bz - 0.36, -0.26)),
+        part(cuboid(1.98, 0.11, 0.86), roof, rot_x(0.0, 1.28, bz + 0.36, 0.26)),
+        part(cuboid(2.02, 0.1, 0.13), dark, xyz(0.0, 1.4, bz)),
+        // twin loading doors under a lintel
+        part(cuboid(0.92, 0.66, 0.08), dark, xyz(0.0, 0.72, bz + 0.65)),
+        part(cuboid(0.06, 0.62, 0.1), wood, xyz(0.0, 0.72, bz + 0.69)),
+        part(cuboid(1.08, 0.12, 0.16), wood, xyz(0.0, 1.09, bz + 0.66)),
+    ];
+    // covered dock: an awning on two posts over the open loading front
+    for sx in [-0.82_f32, 0.82] {
+        parts.push(part(cuboid(0.11, 0.86, 0.11), wood, xyz(sx, 0.43, 0.86)));
+    }
+    parts.push(part(cuboid(1.9, 0.09, 0.86), roof, rot_x(0.0, 0.96, 0.7, 0.2)));
+    parts.push(part(cuboid(1.9, 0.07, 0.1), dark, xyz(0.0, 0.88, 0.45)));
+    parts.push(part(cuboid(1.86, 0.08, 0.66), wood, xyz(0.0, 0.04, 0.72)));
+    // goods on the dock: crates one side, grain sacks the other, jars in a row
+    parts.push(part(cuboid(0.34, 0.32, 0.32), dark, xyz(-0.62, 0.24, 0.72)));
+    parts.push(part(cuboid(0.28, 0.26, 0.26), wood, xyz(-0.6, 0.53, 0.7)));
+    for (sx, sz) in [(0.5_f32, 0.62_f32), (0.72, 0.86)] {
+        parts.push(part(sphere(0.19), sack, xyz(sx, 0.2, sz)));
+    }
+    for sz in [-0.62_f32, -0.24] {
+        parts.push(part(frustum(0.11, 0.17, 0.34, 8), jar, xyz(0.96, 0.25, sz)));
+    }
+    // a tally board by the doors: this is where the count is kept
+    parts.push(part(cuboid(0.28, 0.3, 0.03), team, xyz(-0.62, 0.72, 0.44)));
+    pennant(&mut parts, -0.9, 1.38, -0.78, 0.7);
+    merge(parts)
+}
+
+// Mosque: a square prayer hall under a ribbed dome, an arcaded front, and a
+// minaret set OFF the corner so it stands clear of the dome from every yaw
+// (tucked against the hall it reads as an antenna, not a tower).
+fn build_mosque() -> Mesh {
+    let plaster = srgb(0xe0d5b8);
+    let plaster_dark = srgb(0xc4b694);
+    let dome = srgb(TEAM_CLOTH);
+    let trim = srgb(0x8d7a52);
+    let dark = srgb(TIMBER_DARK);
+    let (mx, mz) = (-0.88_f32, 0.88_f32);
+
+    let mut parts = vec![
+        part(cuboid(1.8, 0.18, 1.8), plaster_dark, xyz(0.0, 0.09, 0.0)),
+        part(cuboid(1.55, 1.0, 1.55), plaster, xyz(0.0, 0.68, 0.0)),
+        part(cuboid(1.62, 0.1, 1.62), trim, xyz(0.0, 1.2, 0.0)),
+        // drum + dome + finial
+        part(frustum(0.62, 0.7, 0.26, 12), plaster_dark, xyz(0.0, 1.36, 0.0)),
+        part(sphere(0.62), dome, xyz(0.0, 1.62, 0.0)),
+        part(cyl(0.05, 0.24, 6), trim, xyz(0.0, 2.28, 0.0)),
+        part(sphere(0.09), trim, xyz(0.0, 2.44, 0.0)),
+        // minaret: base, shaft, muezzin's balcony, lantern, cap
+        part(cuboid(0.42, 0.24, 0.42), plaster_dark, xyz(mx, 0.12, mz)),
+        part(cyl(0.15, 2.0, 8), plaster, xyz(mx, 1.22, mz)),
+        part(cyl(0.22, 0.1, 8), trim, xyz(mx, 2.12, mz)),
+        part(cyl(0.19, 0.06, 8), plaster_dark, xyz(mx, 2.2, mz)),
+        part(cyl(0.12, 0.34, 8), plaster, xyz(mx, 2.4, mz)),
+        part(cone(0.17, 0.32, 8), dome, xyz(mx, 2.73, mz)),
+        part(sphere(0.06), trim, xyz(mx, 2.94, mz)),
+    ];
+    for i in 0..4 {
+        let a = (i as f32 / 4.0) * PI * 2.0 + 0.4;
+        arrow_slit(&mut parts, mx + a.cos() * 0.15, 1.7, mz + a.sin() * 0.15, -a);
+    }
+    // arcaded entrance front: three piers under a shaded lintel
+    for sx in [-0.5_f32, 0.0, 0.5] {
+        parts.push(part(cuboid(0.16, 0.66, 0.16), plaster_dark, xyz(sx, 0.44, 0.86)));
+    }
+    parts.push(part(cuboid(1.35, 0.12, 0.3), trim, xyz(0.0, 0.83, 0.86)));
+    parts.push(part(cuboid(0.42, 0.62, 0.06), dark, xyz(0.0, 0.42, 0.79)));
+    for sz in [-0.42_f32, 0.42] {
+        arrow_slit(&mut parts, 0.79, 0.78, sz, 0.0);
+        arrow_slit(&mut parts, -0.79, 0.78, sz, 0.0);
+    }
+    merge(parts)
+}
+
+/// Timber scaffold hung around a construction `Site`. Authored on a UNIT
+/// footprint (1 x 1 in x/z, 1 tall) — the renderer scales it to the building
+/// and cancels the site's own rising Y-squash, so it must not assume a size.
+pub fn scaffold_mesh() -> Mesh {
+    let pole = srgb(TIMBER);
+    let lash = srgb(TIMBER_DARK);
+    let plank = srgb(0xa8874e);
+    let stone = srgb(STONE);
+
+    let mut parts = Vec::new();
+    for (sx, sz) in [(-1.0_f32, -1.0_f32), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)] {
+        parts.push(part(cyl(0.035, 1.06, 5), pole, xyz(sx * 0.6, 0.53, sz * 0.6)));
+    }
+    for y in [0.4_f32, 0.86] {
+        for sz in [-0.6_f32, 0.6] {
+            parts.push(part(cuboid(1.2, 0.04, 0.04), lash, xyz(0.0, y, sz)));
+        }
+        for sx in [-0.6_f32, 0.6] {
+            parts.push(part(cuboid(0.04, 0.04, 1.2), lash, xyz(sx, y, 0.0)));
+        }
+    }
+    // walkway on the upper lift, PERIMETER only — planks across the middle
+    // would roof the site over and hide the very thing that is rising
+    for sz in [-0.6_f32, 0.6] {
+        parts.push(part(cuboid(1.3, 0.03, 0.17), plank, xyz(0.0, 0.9, sz)));
+    }
+    for sx in [-0.6_f32, 0.6] {
+        parts.push(part(cuboid(0.17, 0.03, 1.3), plank, xyz(sx, 0.9, 0.0)));
+    }
+    // ladder leaning on the near face
+    for sx in [-0.13_f32, 0.13] {
+        parts.push(part(cuboid(0.04, 1.0, 0.04), plank, rot_x(sx, 0.48, 0.7, -0.24)));
+    }
+    for i in 0..4 {
+        parts.push(part(cuboid(0.28, 0.03, 0.03), lash, xyz(0.0, 0.15 + i as f32 * 0.23, 0.78 - i as f32 * 0.055)));
+    }
+    // material waiting to be set: dressed blocks and a stack of poles
+    parts.push(part(cuboid(0.24, 0.14, 0.3), stone, xyz(0.74, 0.07, -0.22)));
+    parts.push(part(cuboid(0.2, 0.13, 0.24), stone, xyz(0.72, 0.2, -0.24)));
+    for i in 0..3 {
+        parts.push(part(cyl(0.05, 0.66, 5), pole, rot_z(-0.74, 0.05 + i as f32 * 0.09, 0.3, FRAC_PI_2)));
+    }
+    merge(parts)
 }
 
 // A sown field: tilled furrows under standing grain, fenced at the corners.

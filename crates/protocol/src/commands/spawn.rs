@@ -38,17 +38,22 @@ pub(crate) const DIRS8: [(Fx, Fx); 8] = [
     (saladin_sim::fx!("0.7"), saladin_sim::fx!("-0.7")),
 ];
 
-pub(crate) fn spawn_building(world: &mut World, owner: u64, kind: BuildingKind, pos: V2, match_id: u64) -> u64 {
+pub(crate) fn spawn_building(
+    world: &mut World,
+    owner: u64,
+    kind: BuildingKind,
+    pos: V2,
+    match_id: u64,
+    state: BuildState,
+) -> u64 {
     let mask = tech_mask_of(world, owner);
     let def = effective_building_def(kind, mask);
+    let row = match state {
+        BuildState::Site => Building::site(kind, def.max_hp, pos),
+        _ => Building::new(kind, def.max_hp, pos),
+    };
     let id = world.resource_mut::<NextEntityId>().alloc();
-    world.spawn((
-        GameId(id),
-        Owner(owner),
-        MatchId(match_id),
-        Pos { pos, facing: Fx::ZERO },
-        Building { kind, hp: def.max_hp, cooldown: Fx::ZERO, rally: pos },
-    ));
+    world.spawn((GameId(id), Owner(owner), MatchId(match_id), Pos { pos, facing: Fx::ZERO }, row));
     id
 }
 
@@ -102,6 +107,7 @@ pub(crate) fn spawn_unit(
             routing: false,
             home: pos,
             garrisoned_in: 0,
+            job_site: 0,
             path: vec![],
             path_idx: 0,
         },
@@ -160,7 +166,8 @@ pub(crate) fn found_player(world: &mut World, player_id: u64, name: &str, factio
     let passable = |tx: i32, ty: i32| is_passable(seed, tx, ty) && !occ.contains(&tile_key(tx, ty));
     let base = find_buildable_near(site.x, site.y, keep_fp, passable);
 
-    let keep_id = spawn_building(world, player_id, BuildingKind::Keep, base, match_id);
+    let keep_id =
+        spawn_building(world, player_id, BuildingKind::Keep, base, match_id, BuildState::Complete);
 
     let player_ent_id = world.resource_mut::<NextEntityId>().alloc();
     world.spawn((

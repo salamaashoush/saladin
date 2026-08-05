@@ -47,9 +47,19 @@ pub struct Unit {
     pub routing: bool,
     pub home: V2,
     pub garrisoned_in: u64,
+    /// The building this unit is working on (construction/repair). Separate
+    /// from `target_node` on purpose: `retarget` zeroes the node, and a builder
+    /// must keep its site across a re-order.
+    pub job_site: u64,
     pub path: Vec<V2>,
     pub path_idx: usize,
 }
+
+/// Where a structure is in its life. `Damaged` is derived (`Complete` with
+/// `hp < max_hp`), not a variant: construction and repair are the same loop.
+/// The enum and the construction math live in `saladin_sim` — `operational()`
+/// is the one gate every capability check runs through.
+pub use saladin_sim::{BuildState, QUEUE_CAP, SITE_HP_PCT, site_start_hp};
 
 /// A static structure.
 #[derive(Component, Clone, Copy, Debug, Serialize, Deserialize)]
@@ -58,6 +68,51 @@ pub struct Building {
     pub hp: i32,
     pub cooldown: Fx,
     pub rally: V2,
+    pub state: BuildState,
+    /// Labour banked toward finishing a `Site` or an `Upgrading` structure.
+    pub work: Fx,
+    /// Peasants assigned this tick — recounted from `Unit::job_site`, never
+    /// incremented, so a builder that dies mid-job cannot leak a worker.
+    pub builders: i32,
+    /// What an `Upgrading` structure is becoming; equal to `kind` otherwise.
+    pub target_kind: BuildingKind,
+    /// Pending `UnitKind as u8` production slots, oldest first.
+    pub queue: [u8; QUEUE_CAP],
+    pub queue_len: u8,
+    /// Work banked toward the unit at the head of the queue.
+    pub train_work: Fx,
+}
+
+impl Building {
+    /// A finished structure, standing at full health.
+    pub fn new(kind: BuildingKind, hp: i32, rally: V2) -> Building {
+        Building {
+            kind,
+            hp,
+            cooldown: Fx::ZERO,
+            rally,
+            state: BuildState::Complete,
+            work: Fx::ZERO,
+            builders: 0,
+            target_kind: kind,
+            queue: [0; QUEUE_CAP],
+            queue_len: 0,
+            train_work: Fx::ZERO,
+        }
+    }
+
+    /// A founded but unbuilt structure: a real target from the tick it is sited.
+    pub fn site(kind: BuildingKind, max_hp: i32, rally: V2) -> Building {
+        Building { state: BuildState::Site, ..Building::new(kind, site_start_hp(max_hp), rally) }
+    }
+
+    pub fn complete(&self) -> bool {
+        self.state != BuildState::Site
+    }
+
+    pub fn queued(&self) -> &[u8] {
+        &self.queue[..self.queue_len as usize]
+    }
 }
 
 /// A harvestable resource node (position lives in `Pos`).
@@ -151,4 +206,50 @@ pub struct MatchInfo {
     pub host: u64,
     pub status: MatchStatus,
     pub seed: u32,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Sim code copies a `Building` out of the world (`save::snapshot`, the
+    /// combat snapshot, every `world.get`). A heap field here breaks all three.
+    #[test]
+    fn a_building_row_stays_copy() {
+        fn assert_copy<T: Copy>() {}
+        assert_copy::<Building>();
+    }
+
+    #[test]
+    fn a_founded_site_is_unfinished_and_worth_raiding() {
+        let b = Building::site(BuildingKind::Barracks, 1000, V2::ZERO);
+        assert_eq!(b.state, BuildState::Site);
+        assert!(!b.complete());
+        assert_eq!(b.hp, 100, "a site must be a real, frail target");
+        assert_eq!(b.work, Fx::ZERO);
+        assert_eq!(b.builders, 0);
+        assert_eq!(b.target_kind, BuildingKind::Barracks);
+        assert!(b.queued().is_empty());
+        assert_eq!(site_start_hp(4), 1, "even the frailest site has a hit point");
+    }
+
+    #[test]
+    fn a_finished_building_is_complete() {
+        let b = Building::new(BuildingKind::Keep, 1500, V2::ZERO);
+        assert_eq!(b.state, BuildState::Complete);
+        assert!(b.complete());
+        assert_eq!(b.hp, 1500);
+        assert_eq!(b.target_kind, b.kind);
+        assert_eq!(b.train_work, Fx::ZERO);
+    }
+
+    #[test]
+    fn the_queue_reads_only_its_filled_slots() {
+        let mut b = Building::new(BuildingKind::Barracks, 100, V2::ZERO);
+        b.queue[0] = UnitKind::Spearman as u8;
+        b.queue[1] = UnitKind::Archer as u8;
+        b.queue_len = 2;
+        assert_eq!(b.queued(), &[UnitKind::Spearman as u8, UnitKind::Archer as u8]);
+        assert!(b.queue_len as usize <= QUEUE_CAP);
+    }
 }

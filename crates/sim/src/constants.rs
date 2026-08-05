@@ -28,6 +28,40 @@ pub const HARVEST_TIME: Fx = crate::fx!("1.2");
 /// Fishing-hut work aura: fish nodes within this range of a friendly hut are
 /// harvested at double speed (nets + boats).
 pub const FISHING_HUT_RANGE: Fx = crate::fx!("6");
+/// Granary work aura: friendly fields within this range are worked and regrow
+/// faster — a hub is worthless alone and transformative over a cluster.
+pub const GRANARY_RANGE: Fx = crate::fx!("8");
+/// Mosque morale aura: the ground a standing mosque steadies.
+pub const MOSQUE_MORALE_RANGE: Fx = crate::fx!("14");
+
+// ── construction ────────────────────────────────────────────────────────────
+// Building, repairing and upgrading are ONE loop: a builder adds `work` to the
+// job and `hp` to anything below full. hp is authoritative and additive (work
+// adds, damage subtracts), so a site under fire needs no special case.
+
+/// How close a peasant must stand to a job site to work on it.
+pub const BUILD_RANGE: Fx = crate::fx!("1.4");
+/// Builders past this add nothing — a foundation only has so many edges.
+pub const MAX_BUILDERS: i32 = 8;
+/// Work rate in hundredths per builder count (index == builders, clamped to
+/// MAX_BUILDERS). A table, so the diminishing-returns curve never costs an
+/// `fx_sqrt` in a per-tick loop.
+pub const BUILDER_RATE: [i32; 9] = [0, 100, 175, 235, 285, 325, 355, 375, 385];
+/// A founded site starts at this percentage of the finished structure's health,
+/// so an unguarded build is worth raiding. Integer percent, not a fraction:
+/// 0.10 has no exact fixed-point representation and would floor a 1500 hp keep
+/// site to 149 on some rounding paths.
+pub const SITE_HP_PCT: i32 = 10;
+/// Repairing a structure from zero to full costs this percentage of its build
+/// cost — damage is recoverable, never free.
+pub const REPAIR_COST_PCT: i32 = 50;
+/// Demolishing returns this percentage of the build cost, SCALED by remaining
+/// health: a burnt-out shell is worth what it looks like.
+pub const DEMOLISH_REFUND_PCT: i32 = 50;
+/// How far a builder will look for another job when its own site finishes.
+pub const SITE_REASSIGN_RADIUS: Fx = crate::fx!("14");
+/// Units a production building may hold in its queue.
+pub const QUEUE_CAP: usize = 5;
 
 // Resource node counts per map and per-node yields.
 pub const TREE_COUNT: i32 = 2160;

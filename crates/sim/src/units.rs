@@ -28,6 +28,8 @@ pub struct UnitDef {
     pub morale_aura: Fx,
     pub garrisonable: bool,
     pub ranged: bool,
+    /// Seconds of production this unit takes at its training hall.
+    pub train_time: Fx,
 }
 
 const NO_BONUS: [Fx; 4] = [ONE; 4];
@@ -63,6 +65,7 @@ const UNIT_DEFS: [UnitDef; 10] = [
         morale_aura: crate::fx!("0"),
         garrisonable: false,
         ranged: false,
+        train_time: crate::fx!("6"),
     },
     // Spearman
     UnitDef {
@@ -87,6 +90,7 @@ const UNIT_DEFS: [UnitDef; 10] = [
         morale_aura: crate::fx!("0"),
         garrisonable: true,
         ranged: false,
+        train_time: crate::fx!("12"),
     },
     // Archer
     UnitDef {
@@ -111,6 +115,7 @@ const UNIT_DEFS: [UnitDef; 10] = [
         morale_aura: crate::fx!("0"),
         garrisonable: true,
         ranged: true,
+        train_time: crate::fx!("12"),
     },
     // Knight
     UnitDef {
@@ -135,6 +140,7 @@ const UNIT_DEFS: [UnitDef; 10] = [
         morale_aura: crate::fx!("0"),
         garrisonable: false,
         ranged: false,
+        train_time: crate::fx!("20"),
     },
     // HorseArcher
     UnitDef {
@@ -159,6 +165,7 @@ const UNIT_DEFS: [UnitDef; 10] = [
         morale_aura: crate::fx!("0"),
         garrisonable: false,
         ranged: true,
+        train_time: crate::fx!("22"),
     },
     // Mamluk
     UnitDef {
@@ -183,6 +190,7 @@ const UNIT_DEFS: [UnitDef; 10] = [
         morale_aura: crate::fx!("0"),
         garrisonable: false,
         ranged: false,
+        train_time: crate::fx!("22"),
     },
     // Crossbowman
     UnitDef {
@@ -207,6 +215,7 @@ const UNIT_DEFS: [UnitDef; 10] = [
         morale_aura: crate::fx!("0"),
         garrisonable: true,
         ranged: true,
+        train_time: crate::fx!("16"),
     },
     // Ram
     UnitDef {
@@ -231,6 +240,7 @@ const UNIT_DEFS: [UnitDef; 10] = [
         morale_aura: crate::fx!("0"),
         garrisonable: false,
         ranged: false,
+        train_time: crate::fx!("24"),
     },
     // Mangonel
     UnitDef {
@@ -255,6 +265,7 @@ const UNIT_DEFS: [UnitDef; 10] = [
         morale_aura: crate::fx!("0"),
         garrisonable: false,
         ranged: false,
+        train_time: crate::fx!("28"),
     },
     // Imam
     UnitDef {
@@ -279,6 +290,7 @@ const UNIT_DEFS: [UnitDef; 10] = [
         morale_aura: crate::fx!("7"),
         garrisonable: true,
         ranged: false,
+        train_time: crate::fx!("18"),
     },
 ];
 

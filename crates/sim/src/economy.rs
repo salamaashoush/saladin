@@ -63,6 +63,15 @@ impl Stockpile {
         self.gold = (self.gold - cost.gold).max(0);
     }
 
+    /// Bank an already-computed sum (a refund the construction rules worked out
+    /// in integer math, so no fraction can round differently on two peers).
+    pub fn credit(&mut self, cost: &ResourceCost) {
+        self.wood += cost.wood;
+        self.stone += cost.stone;
+        self.food += cost.food;
+        self.gold += cost.gold;
+    }
+
     /// Refund `frac` of `cost`, floored per-resource so refunds stay integral.
     pub fn refund(&mut self, cost: &ResourceCost, frac: Fx) {
         let f = |c: i32| (Fx::from_num(c) * frac).floor().to_num::<i32>();
@@ -82,6 +91,26 @@ pub const FOOD_RESERVE_PER_POP: i32 = 6;
 
 pub fn food_low(food: i32, pop: i32) -> bool {
     food < pop * FOOD_RESERVE_PER_POP
+}
+
+/// How close a harvester has to get to work a node, given the span of ground
+/// under it that a walker CANNOT stand on: 0 for an ordinary deposit on open
+/// land, 1 for a school of fish in open water, and the farm's own footprint for
+/// a crop sown at the farm's centre.
+///
+/// Bare `HARVEST_RANGE` is 0.7 and tile centres are 1 apart, so against a node
+/// nobody can stand on it is unsatisfiable by construction: a fishery was never
+/// once netted and a farm never once reaped, and a gatherer sent to either
+/// walked to the same tile forever. The deposit path has always added the
+/// drop-off's footprint (`DEPOSIT_RANGE + half_fp`) for exactly this reason.
+/// The half tile is the step that puts the walker on ground OUTSIDE the span.
+pub fn harvest_reach(blocked_span: i32) -> Fx {
+    if blocked_span <= 0 {
+        return crate::constants::HARVEST_RANGE;
+    }
+    crate::constants::HARVEST_RANGE
+        + Fx::from_num(blocked_span) / Fx::from_num(2)
+        + crate::fx!("0.5")
 }
 
 /// Round-robin a resource type to each of `n` idle gatherers over the types
@@ -225,6 +254,23 @@ mod tests {
         assert_eq!(t.gold, 12); // 25 / 2
         assert_eq!(t.spent, 24);
         assert!(!market_sale(100, 1).ok); // less than one lot
+    }
+
+    /// The reach has to cover the nearest tile centre a walker can actually
+    /// occupy, or the node can never be worked at all.
+    #[test]
+    fn a_node_nobody_can_stand_on_is_still_within_reach() {
+        use crate::constants::HARVEST_RANGE;
+        assert_eq!(harvest_reach(0), HARVEST_RANGE, "open ground needs no allowance");
+        assert_eq!(harvest_reach(-1), HARVEST_RANGE);
+        // a school of fish: the closest land tile centre is exactly 1 away, and
+        // a diagonal one 1.415
+        assert!(harvest_reach(1) > crate::fx!("1.42"));
+        // a 2x2 farm's crop sits on the corner four blocked tiles share: the
+        // ring of ground around it runs from 1.59 to 2.13 away
+        assert!(harvest_reach(2) > crate::fx!("2.13"));
+        // and it never becomes a free grab from across the street
+        assert!(harvest_reach(3) < crate::fx!("3"));
     }
 
     #[test]

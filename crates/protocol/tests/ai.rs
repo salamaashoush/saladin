@@ -50,7 +50,7 @@ fn bot_with_blacksmith_starts_research() {
         Owner(1000),
         MatchId(1),
         Pos { pos: smith_pos, facing: ZERO },
-        Building { kind: BuildingKind::Blacksmith, hp: def.max_hp, cooldown: ZERO, rally: smith_pos },
+        Building::new(BuildingKind::Blacksmith, def.max_hp, smith_pos),
     ));
     {
         let world = app.world_mut();
@@ -128,6 +128,7 @@ fn spawn_unit_row(app: &mut App, id: u64, owner: u64, kind: UnitKind, pos: V2, s
             routing: false,
             home: pos,
             garrisoned_in: 0,
+            job_site: 0,
             path: vec![],
             path_idx: 0,
         },
@@ -158,7 +159,7 @@ fn bot_sells_glut_at_its_market_for_gold() {
         Owner(1000),
         MatchId(1),
         Pos { pos: mpos, facing: ZERO },
-        Building { kind: BuildingKind::Market, hp: def.max_hp, cooldown: ZERO, rally: mpos },
+        Building::new(BuildingKind::Market, def.max_hp, mpos),
     ));
     {
         let world = app.world_mut();
@@ -272,4 +273,255 @@ fn dueling_hard_bots_stay_in_lockstep() {
     let ha = a.world().resource::<StateHash>().0;
     let hb = b.world().resource::<StateHash>().0;
     assert_eq!(ha, hb, "bot worlds diverged after 600 ticks");
+}
+
+/// A building system a bot cannot operate is not finished. The bot sites, mans
+/// and RAISES structures through the same commands a human uses — no cheat, no
+/// instant hall — and a site it cannot finish would wedge its own build ladder.
+#[test]
+fn a_bot_raises_the_buildings_it_pays_for() {
+    let mut app = build();
+    cmd(
+        &mut app,
+        PlayerCommand::AddAi {
+            player_id: 1000,
+            host: 1,
+            difficulty: AiDifficulty::Hard,
+            faction: Faction::Crusader,
+            match_id: 1,
+        },
+    );
+    // ten minutes of game time: long enough for the ladder to reach a hall
+    for _ in 0..12_000 {
+        step(app.world_mut());
+    }
+    let world = app.world_mut();
+    let mut q = world.query::<(&Owner, &Building)>();
+    let mine: Vec<&Building> = q.iter(world).filter(|(o, _)| o.0 == 1000).map(|(_, b)| b).collect();
+    let raised = mine.iter().filter(|b| b.complete() && b.kind != BuildingKind::Keep).count();
+    let sites = mine.iter().filter(|b| !b.complete()).count();
+    assert!(raised >= 2, "the bot finished nothing it paid for ({raised} up, {sites} sited)");
+    assert!(
+        mine.iter().any(|b| b.kind == BuildingKind::House || b.kind == BuildingKind::Farm),
+        "the bot never grew its economy: {:?}",
+        mine.iter().map(|b| b.kind).collect::<Vec<_>>()
+    );
+}
+
+/// The bot's view of a structure now carries hp and state. Without both, repair
+/// is literally inexpressible and a hole in the ground counts as a finished
+/// building — so this is the fixture that proves the snapshot widened.
+#[test]
+fn a_bot_mends_what_a_raider_broke() {
+    let mut app = build();
+    cmd(
+        &mut app,
+        PlayerCommand::AddAi {
+            player_id: 1000,
+            host: 1,
+            difficulty: AiDifficulty::Hard,
+            faction: Faction::Crusader,
+            match_id: 1,
+        },
+    );
+    step(app.world_mut());
+    let keep_pos = {
+        let world = app.world_mut();
+        let mut q = world.query::<(&Pos, &Building)>();
+        q.iter(world).find(|(_, b)| b.kind == BuildingKind::Keep).map(|(p, _)| p.pos).unwrap()
+    };
+    let at = V2::new(keep_pos.x + Fx::from_num(5), keep_pos.y);
+    let def = building_def(BuildingKind::Barracks);
+    let wrecked = def.max_hp / 5;
+    app.world_mut().spawn((
+        GameId(5000),
+        Owner(1000),
+        MatchId(1),
+        Pos { pos: at, facing: ZERO },
+        Building { hp: wrecked, ..Building::new(BuildingKind::Barracks, def.max_hp, at) },
+    ));
+    {
+        let world = app.world_mut();
+        let mut q = world.query::<&mut Player>();
+        for mut p in q.iter_mut(world) {
+            p.stock = Stockpile { wood: 4000, stone: 4000, food: 4000, gold: 4000 };
+        }
+    }
+
+    let mut best = wrecked;
+    let mut crewed = false;
+    for _ in 0..3000 {
+        step(app.world_mut());
+        let world = app.world_mut();
+        let mut q = world.query::<(&GameId, &Building)>();
+        if let Some((_, b)) = q.iter(world).find(|(g, _)| g.0 == 5000) {
+            best = best.max(b.hp);
+        }
+        // Masonry ALSO raises a standing building's health, so healing alone
+        // would not prove a repair: the proof is a peasant put on the job.
+        let mut uq = world.query::<&Unit>();
+        crewed |= uq.iter(world).any(|u| u.job_site == 5000);
+        if crewed && best >= def.max_hp {
+            break;
+        }
+    }
+    assert!(crewed, "the bot never sent a single hand to its wrecked barracks");
+    assert!(
+        best > wrecked,
+        "the bot crewed the barracks but it never healed ({wrecked} -> {best} of {})",
+        def.max_hp
+    );
+}
+
+/// Tower -> Watchtower is a decision, not a second purchase. A bot that cannot
+/// take it simply never owns a heavy tower, because the Watchtower is off the
+/// build bar entirely.
+///
+/// The fixture holds the bot at its tower cap under sustained pressure, which is
+/// exactly the state the defense rung is written for: with nowhere left to plant
+/// a picket, the only way to harden the line is to RAISE the one already
+/// standing on the ground it is defending.
+#[test]
+fn a_bot_raises_its_tower_into_a_watchtower() {
+    let mut app = build();
+    cmd(
+        &mut app,
+        PlayerCommand::AddAi {
+            player_id: 1000,
+            host: 1,
+            difficulty: AiDifficulty::Easy,
+            faction: Faction::Crusader,
+            match_id: 1,
+        },
+    );
+    step(app.world_mut());
+    let keep_pos = {
+        let world = app.world_mut();
+        let mut q = world.query::<(&Pos, &Building)>();
+        q.iter(world).find(|(_, b)| b.kind == BuildingKind::Keep).map(|(p, _)| p.pos).unwrap()
+    };
+    // an Easy bot caps at ONE tower, so the defense rung has only the upgrade
+    // left the moment that tower stands
+    let def = building_def(BuildingKind::Tower);
+    let at = V2::new(keep_pos.x + Fx::from_num(6), keep_pos.y + Fx::from_num(2));
+    app.world_mut().spawn((
+        GameId(5000),
+        Owner(1000),
+        MatchId(1),
+        Pos { pos: at, facing: ZERO },
+        Building::new(BuildingKind::Tower, def.max_hp, at),
+    ));
+    // a raiding party parked just inside threat range and out of tower reach
+    let camp = V2::new(keep_pos.x + Fx::from_num(20), keep_pos.y);
+    for i in 0..4u64 {
+        spawn_unit_row(
+            &mut app,
+            6000 + i,
+            1001,
+            UnitKind::Spearman,
+            V2::new(camp.x + Fx::from_num(i as i32), camp.y),
+            Stance::Defensive,
+        );
+    }
+    {
+        let world = app.world_mut();
+        let mut q = world.query::<&mut Player>();
+        for mut p in q.iter_mut(world) {
+            p.stock = Stockpile { wood: 6000, stone: 6000, food: 6000, gold: 6000 };
+        }
+    }
+
+    let mut reached = false;
+    for _ in 0..8000 {
+        step(app.world_mut());
+        // the siege never lifts: the raiders are a standing threat, not a fight
+        let world = app.world_mut();
+        let mut q = world.query::<(&GameId, &mut Unit)>();
+        for (g, mut u) in q.iter_mut(world) {
+            if (6000..6004).contains(&g.0) {
+                u.hp = unit_def(UnitKind::Spearman).max_hp;
+            }
+        }
+        let mut q = world.query::<(&GameId, &Building)>();
+        if q.iter(world).any(|(g, b)| g.0 == 5000 && b.kind == BuildingKind::Watchtower) {
+            reached = true;
+            break;
+        }
+    }
+    assert!(reached, "the bot never upgraded a tower, so it can never own a watchtower");
+    // the upgrade happened IN PLACE: same row, same id, same owner
+    let world = app.world_mut();
+    let mut q = world.query::<(&GameId, &Owner, &Building)>();
+    let (_, o, b) = q.iter(world).find(|(g, _, _)| g.0 == 5000).expect("the tower kept its id");
+    assert_eq!(o.0, 1000, "the upgrade changed hands");
+    assert_eq!(b.kind, BuildingKind::Watchtower);
+    assert_eq!(b.state, saladin_sim::BuildState::Complete);
+}
+
+/// The Storehouse is the whole answer to a town that cannot grow past a 28-tile
+/// disc. A bot that never plants one leaves every quarry and ore belt on the map
+/// as decoration.
+#[test]
+fn a_hard_bot_expands_with_a_storehouse() {
+    let mut app = build();
+    cmd(
+        &mut app,
+        PlayerCommand::AddAi {
+            player_id: 1000,
+            host: 1,
+            difficulty: AiDifficulty::Hard,
+            faction: Faction::Crusader,
+            match_id: 1,
+        },
+    );
+    step(app.world_mut());
+    {
+        let world = app.world_mut();
+        let mut q = world.query::<&mut Player>();
+        for mut p in q.iter_mut(world) {
+            p.stock = Stockpile { wood: 6000, stone: 6000, food: 6000, gold: 6000 };
+        }
+    }
+    let mut sited = false;
+    for _ in 0..12_000 {
+        step(app.world_mut());
+        let world = app.world_mut();
+        let mut q = world.query::<(&Owner, &Building)>();
+        if q.iter(world).any(|(o, b)| o.0 == 1000 && b.kind == BuildingKind::Storehouse) {
+            sited = true;
+            break;
+        }
+    }
+    assert!(sited, "a Hard bot never planted an outpost, so its town can never leave the disc");
+}
+
+/// Two bots playing the WHOLE new lifecycle against each other — siting, manning,
+/// finishing, queueing, repairing — with the desync detector reading every tick.
+/// This is the one that would catch an ECS-iteration-order slip in any of it.
+#[test]
+fn dueling_bots_stay_in_lockstep_through_the_whole_lifecycle() {
+    let run = || {
+        let mut app = build();
+        for (id, faction) in [(1000, Faction::Ayyubid), (1001, Faction::Crusader)] {
+            cmd(
+                &mut app,
+                PlayerCommand::AddAi { player_id: id, host: 1, difficulty: AiDifficulty::Hard, faction, match_id: 1 },
+            );
+        }
+        app
+    };
+    let mut a = run();
+    let mut b = run();
+    for i in 0..3000 {
+        step(a.world_mut());
+        step(b.world_mut());
+        let ha = a.world().resource::<StateHash>().0;
+        let hb = b.world().resource::<StateHash>().0;
+        assert_eq!(ha, hb, "bot worlds diverged at tick {i}");
+    }
+    // and the run actually exercised construction rather than idling
+    let world = a.world_mut();
+    let mut q = world.query::<&Building>();
+    let raised = q.iter(world).filter(|b| b.complete() && b.kind != BuildingKind::Keep).count();
+    assert!(raised >= 2, "the bots raised nothing in 3000 ticks, so lockstep proved little");
 }

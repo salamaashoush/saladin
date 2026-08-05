@@ -56,7 +56,7 @@ fn spawn_keep(app: &mut App, id: u64, owner: u64, pos: V2) {
         Owner(owner),
         MatchId(1),
         Pos { pos, facing: ZERO },
-        Building { kind: BuildingKind::Keep, hp: def.max_hp, cooldown: ZERO, rally: pos },
+        Building::new(BuildingKind::Keep, def.max_hp, pos),
     ));
 }
 
@@ -95,6 +95,7 @@ fn spawn_peasant(app: &mut App, id: u64, owner: u64, pos: V2, state: GatherState
             routing: false,
             home: pos,
             garrisoned_in: 0,
+            job_site: 0,
             path: vec![],
             path_idx: 0,
         },
@@ -361,7 +362,7 @@ fn fishing_hut_speeds_nearby_fish() {
         Owner(1),
         MatchId(1),
         Pos { pos: land, facing: ZERO },
-        Building { kind: BuildingKind::FishingHut, hp: hdef.max_hp, cooldown: ZERO, rally: land },
+        Building::new(BuildingKind::FishingHut, hdef.max_hp, land),
     ));
 
     // 16 sim steps = 4 gather ticks: 4 * 0.2 = 0.8 < 1.2 unboosted,
@@ -406,7 +407,7 @@ fn fishing_hut_regenerates_fish() {
         Owner(1),
         MatchId(1),
         Pos { pos: land, facing: ZERO },
-        Building { kind: BuildingKind::FishingHut, hp: hdef.max_hp, cooldown: ZERO, rally: land },
+        Building::new(BuildingKind::FishingHut, hdef.max_hp, land),
     ));
     // half-fished school in reach; a far-away one as control (also on water)
     app.world_mut().spawn((
@@ -425,4 +426,189 @@ fn fishing_hut_regenerates_fish() {
     let mut q = world.query::<(&GameId, &ResourceNode)>();
     let school = q.iter(world).find(|(g, _)| g.0 == 20).expect("school alive").1.remaining;
     assert!(school > 50, "school in hut reach must regrow (got {school})");
+}
+
+/// Spawn a finished structure of any kind for a drop-off test.
+fn spawn_hall(app: &mut App, id: u64, owner: u64, kind: BuildingKind, pos: V2) {
+    let def = building_def(kind);
+    app.world_mut().spawn((
+        GameId(id),
+        Owner(owner),
+        MatchId(1),
+        Pos { pos, facing: ZERO },
+        Building::new(kind, def.max_hp, pos),
+    ));
+}
+
+/// A laden peasant standing ON the drop-off, so the test measures the ACCEPTS
+/// rule and not the walk.
+fn laden(app: &mut App, id: u64, owner: u64, pos: V2, carry: ResourceType, amount: i32) {
+    spawn_peasant(app, id, owner, pos, GatherState::ToStockpile, 0, amount, ZERO);
+    let world = app.world_mut();
+    let mut q = world.query::<(&GameId, &mut Unit)>();
+    if let Some((_, mut u)) = q.iter_mut(world).find(|(g, _)| g.0 == id) {
+        u.carry_type = carry;
+    }
+}
+
+fn stock_of(app: &mut App, res: ResourceType) -> i32 {
+    let world = app.world_mut();
+    let mut q = world.query::<&Player>();
+    let s = q.iter(world).next().unwrap().stock;
+    match res {
+        ResourceType::Wood => s.wood,
+        ResourceType::Stone => s.stone,
+        ResourceType::Food => s.food,
+        ResourceType::Gold => s.gold,
+    }
+}
+
+/// `accepts` is a bitmask on the def, so what a structure takes in is a ROW and
+/// not a branch. The Storehouse is the only reason worldgen's quarries and ore
+/// belts are reachable at all; the Farm is food that GROWS, not food you carry
+/// back to.
+#[test]
+fn a_storehouse_takes_stone_and_a_farm_takes_nothing() {
+    let seed = saladin_sim::compose_seed(7, 0);
+    let mut app = build(seed);
+    spawn_player(&mut app, 1);
+    let (cx, cy) = find_land_block(seed);
+    let at = V2::new(Fx::from_num(cx) + Fx::ONE, Fx::from_num(cy) + Fx::ONE);
+
+    spawn_hall(&mut app, 10, 1, BuildingKind::Storehouse, at);
+    laden(&mut app, 20, 1, at, ResourceType::Stone, 9);
+    for _ in 0..8 {
+        step(app.world_mut());
+    }
+    assert_eq!(stock_of(&mut app, ResourceType::Stone), 9, "a storehouse must take stone");
+
+    // the same load offered to a farm: the def accepts nothing, so the carrier
+    // finds no drop-off at all and idles rather than banking
+    let mut app = build(seed);
+    spawn_player(&mut app, 1);
+    spawn_hall(&mut app, 10, 1, BuildingKind::Farm, at);
+    laden(&mut app, 20, 1, at, ResourceType::Stone, 9);
+    for _ in 0..8 {
+        step(app.world_mut());
+    }
+    assert_eq!(stock_of(&mut app, ResourceType::Stone), 0, "a farm is not a warehouse");
+    assert_eq!(unit(&mut app, 20).gather_state, GatherState::Idle, "nowhere to bank = idle");
+}
+
+/// A hole in the ground stores nothing. Until the crew finishes it, a
+/// storehouse site is a raid target and not a drop-off.
+#[test]
+fn a_site_is_not_a_dropoff() {
+    let seed = saladin_sim::compose_seed(7, 0);
+    let mut app = build(seed);
+    spawn_player(&mut app, 1);
+    let (cx, cy) = find_land_block(seed);
+    let at = V2::new(Fx::from_num(cx) + Fx::ONE, Fx::from_num(cy) + Fx::ONE);
+
+    let def = building_def(BuildingKind::Storehouse);
+    app.world_mut().spawn((
+        GameId(10),
+        Owner(1),
+        MatchId(1),
+        Pos { pos: at, facing: ZERO },
+        Building::site(BuildingKind::Storehouse, def.max_hp, at),
+    ));
+    laden(&mut app, 20, 1, at, ResourceType::Stone, 9);
+    for _ in 0..8 {
+        step(app.world_mut());
+    }
+    assert_eq!(stock_of(&mut app, ResourceType::Stone), 0, "a foundation banked a load");
+    assert_eq!(unit(&mut app, 20).gather_state, GatherState::Idle);
+}
+
+/// A fishery is a node on WATER: the closest a peasant can stand is the
+/// neighbouring land tile, one whole tile from the school's centre. Every
+/// fishing test above starts the peasant ALREADY harvesting, so none of them
+/// ever asked whether a walker can reach the net.
+#[test]
+fn a_peasant_can_actually_walk_to_a_fishery() {
+    let seed = 1u32;
+    let mut spot = None;
+    'scan: for ty in 8..280 {
+        for tx in 8..280 {
+            if !is_passable(seed, tx, ty) {
+                continue;
+            }
+            for (dx, dy) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
+                if !is_passable(seed, tx + dx, ty + dy) {
+                    spot = Some((tx, ty, tx + dx, ty + dy));
+                    break 'scan;
+                }
+            }
+        }
+    }
+    let (lx, ly, wx, wy) = spot.expect("seed 1 has a coastline");
+    let c = |t: i32| Fx::from_num(t) + saladin_sim::fx!("0.5");
+    let land = V2::new(c(lx), c(ly));
+    let water = V2::new(c(wx), c(wy));
+
+    let mut app = build(seed);
+    spawn_player(&mut app, 1);
+    spawn_keep(&mut app, 10, 1, land);
+    app.world_mut().spawn((
+        GameId(20),
+        MatchId(1),
+        Pos { pos: water, facing: ZERO },
+        ResourceNode::deposit(ResourceType::Food, 200),
+    ));
+    spawn_peasant(&mut app, 30, 1, land, GatherState::ToResource, 20, 0, ZERO);
+    for _ in 0..400 {
+        step(app.world_mut());
+    }
+    let u = unit(&mut app, 30);
+    assert!(
+        u.gather_state != GatherState::ToResource || u.carrying > 0,
+        "400 ticks walking to a school one tile away and the net never went in"
+    );
+}
+
+/// A node walled in on every side is on the same landmass, so the region filter
+/// waves it through, and the walk to it re-plans to the tile the walker already
+/// stands on. `ToResource` was an ABSORBING state: the gatherer marched at it
+/// for the rest of the match, and the AI's famine bias funnels a whole town onto
+/// one node, so a single walled-in food node froze fourteen peasants and the
+/// economy behind them.
+#[test]
+fn a_walled_in_node_is_given_up_on_not_marched_at_forever() {
+    let seed = 1u32;
+    let (cx, cy) = find_land_block(seed);
+    let mut app = build(seed);
+    spawn_player(&mut app, 1);
+    let c = |t: i32| Fx::from_num(t) + saladin_sim::fx!("0.5");
+    // a node in the middle of the block, sealed by a ring of the player's walls
+    let walled = V2::new(c(cx + 3), c(cy + 3));
+    spawn_keep(&mut app, 10, 1, V2::new(c(cx + 3), c(cy + 12)));
+    spawn_node(&mut app, 20, walled, 500);
+    let wdef = building_def(BuildingKind::Wall);
+    let mut wid = 100;
+    for dx in -1..=1 {
+        for dy in -1..=1 {
+            if dx == 0 && dy == 0 {
+                continue;
+            }
+            let p = V2::new(c(cx + 3 + dx), c(cy + 3 + dy));
+            app.world_mut().spawn((
+                GameId(wid),
+                Owner(1),
+                MatchId(1),
+                Pos { pos: p, facing: ZERO },
+                Building::new(BuildingKind::Wall, wdef.max_hp, p),
+            ));
+            wid += 1;
+        }
+    }
+    // a perfectly ordinary node further out, and a peasant sent at the sealed one
+    spawn_node(&mut app, 21, V2::new(c(cx + 3), c(cy + 9)), 500);
+    spawn_peasant(&mut app, 30, 1, V2::new(c(cx + 3), c(cy + 10)), GatherState::ToResource, 20, 0, ZERO);
+
+    for _ in 0..200 {
+        step(app.world_mut());
+    }
+    assert_ne!(unit(&mut app, 30).target_node, 20, "still marching at the sealed node");
+    assert!(wood(&mut app) > 0, "the gatherer never found honest work");
 }

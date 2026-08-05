@@ -12,7 +12,10 @@ mod unit_cmds;
 
 pub use spawn::scatter_world_nodes;
 
-pub(crate) use build_cmds::{build, train};
+pub(crate) use build_cmds::{
+    assign_builders, build_context, build_with, finish_building, repair, spawn_trained, train,
+    upgrade_building,
+};
 pub(crate) use economy_cmds::{market_buy_cmd, market_trade, start_research};
 pub(crate) use garrison_cmds::{garrison, ungarrison};
 pub(crate) use unit_cmds::{assign_idle_gatherers, path_to};
@@ -21,6 +24,10 @@ pub(crate) use unit_cmds::{assign_idle_gatherers, path_to};
 /// every client applies the same ordered batch each tick and re-simulates. The
 /// network layer fills `CommandQueue` for tick T with all peers' inputs in a
 /// deterministic order before the sim runs.
+///
+/// bincode encodes the VARIANT INDEX, so new variants are APPENDED. Inserting
+/// one in the middle silently renumbers every later variant — a Pause would
+/// decode as garbage rather than fail. Any change here bumps PROTOCOL_VERSION.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub enum PlayerCommand {
     Join { player_id: u64, name: String, faction: Faction, match_id: u64 },
@@ -28,20 +35,29 @@ pub enum PlayerCommand {
     Move { player_id: u64, unit: u64, target: V2 },
     SetStance { player_id: u64, unit: u64, stance: Stance },
     Train { player_id: u64, kind: UnitKind },
-    Build { player_id: u64, kind: BuildingKind, pos: V2, facing: u8 },
+    /// Found a construction site. `builders` are the peasants sent to raise it
+    /// (the client fills them from the selection, the bot from its spare hands).
+    Build { player_id: u64, kind: BuildingKind, pos: V2, facing: u8, builders: Vec<u64> },
     Gather { player_id: u64, unit: u64, node: u64 },
     Attack { player_id: u64, unit: u64, target: u64 },
     SetRally { player_id: u64, building: u64, target: V2 },
     Garrison { player_id: u64, unit: u64, building: u64 },
     Ungarrison { player_id: u64, building: u64 },
     Demolish { player_id: u64, building: u64 },
-    PlaceWall { player_id: u64, tiles: Vec<(i32, i32)> },
+    PlaceWall { player_id: u64, tiles: Vec<(i32, i32)>, builders: Vec<u64> },
     MarketTrade { player_id: u64, res: ResourceType, amount: i32 },
     MarketBuy { player_id: u64, res: ResourceType, amount: i32 },
     StartResearch { player_id: u64, building: u64, tech: u8 },
     AutoGather { player_id: u64 },
     Pause { player_id: u64 },
     Resume { player_id: u64 },
+    /// Put a peasant to work on a structure. ONE command covers founding
+    /// labour, repair and upgrade labour — they are the same loop.
+    Repair { player_id: u64, unit: u64, building: u64 },
+    CancelSite { player_id: u64, building: u64 },
+    UpgradeBuilding { player_id: u64, building: u64 },
+    TrainAt { player_id: u64, building: u64, kind: UnitKind },
+    CancelTrain { player_id: u64, building: u64 },
 }
 
 #[derive(Resource, Default)]
@@ -51,6 +67,7 @@ pub struct CommandQueue(pub Vec<PlayerCommand>);
 /// it can spawn, query and pay in one deterministic, single-threaded pass —
 /// exactly the property lockstep needs.
 pub fn apply_commands(world: &mut World) {
+    world.resource_mut::<crate::CommandFeedback>().0.clear();
     let cmds = std::mem::take(&mut world.resource_mut::<CommandQueue>().0);
     for cmd in cmds {
         match cmd {
@@ -69,8 +86,10 @@ pub fn apply_commands(world: &mut World) {
             PlayerCommand::Train { player_id, kind } => {
                 build_cmds::train(world, player_id, kind);
             }
-            PlayerCommand::Build { player_id, kind, pos, facing } => {
-                build_cmds::build(world, player_id, kind, pos, facing);
+            PlayerCommand::Build { player_id, kind, pos, facing, builders } => {
+                if let Err(e) = build_cmds::build(world, player_id, kind, pos, facing, &builders) {
+                    world.resource_mut::<crate::CommandFeedback>().0.push((player_id, e));
+                }
             }
             PlayerCommand::Gather { player_id, unit, node } => {
                 unit_cmds::gather(world, player_id, unit, node)
@@ -90,8 +109,8 @@ pub fn apply_commands(world: &mut World) {
             PlayerCommand::Demolish { player_id, building } => {
                 build_cmds::demolish(world, player_id, building)
             }
-            PlayerCommand::PlaceWall { player_id, tiles } => {
-                build_cmds::place_wall(world, player_id, &tiles)
+            PlayerCommand::PlaceWall { player_id, tiles, builders } => {
+                build_cmds::place_wall(world, player_id, &tiles, &builders)
             }
             PlayerCommand::MarketTrade { player_id, res, amount } => {
                 economy_cmds::market_trade(world, player_id, res, amount)
@@ -109,6 +128,21 @@ pub fn apply_commands(world: &mut World) {
             PlayerCommand::Resume { player_id } => {
                 match_ctl::set_match_status(world, player_id, MatchStatus::Active)
             }
+            PlayerCommand::Repair { player_id, unit, building } => {
+                build_cmds::repair(world, player_id, unit, building);
+            }
+            PlayerCommand::CancelSite { player_id, building } => {
+                build_cmds::cancel_site(world, player_id, building)
+            }
+            PlayerCommand::UpgradeBuilding { player_id, building } => {
+                build_cmds::upgrade_building(world, player_id, building);
+            }
+            PlayerCommand::TrainAt { player_id, building, kind } => {
+                build_cmds::train_at(world, player_id, building, kind);
+            }
+            PlayerCommand::CancelTrain { player_id, building } => {
+                build_cmds::cancel_train(world, player_id, building)
+            }
         }
     }
 }
@@ -120,15 +154,39 @@ pub(crate) fn tech_mask_of(world: &mut World, owner: u64) -> u64 {
     q.iter(world).find(|p| p.player_id == owner).map(|p| p.tech_mask).unwrap_or(0)
 }
 
+/// What the owner can DO, not what stands on the ground: a site under
+/// construction unlocks nothing until it is finished.
 pub(crate) fn owned_building_kinds(world: &mut World, owner: u64) -> HashSet<BuildingKind> {
     let mut q = world.query::<(&Owner, &Building)>();
-    q.iter(world).filter(|(o, _)| o.0 == owner).map(|(_, b)| b.kind).collect()
+    q.iter(world)
+        .filter(|(o, b)| o.0 == owner && operational(b.state))
+        .map(|(_, b)| b.kind)
+        .collect()
 }
 
 pub(crate) fn building_occupancy(world: &mut World, include_passable: bool) -> HashSet<i32> {
-    let mut q = world.query::<(&Pos, &Building)>();
-    let occ: Vec<Occupant> = q.iter(world).map(|(p, b)| Occupant { kind: b.kind, pos: p.pos }).collect();
-    occupancy_set(&occ, include_passable)
+    occupancy_and_gates(world, include_passable).0
+}
+
+/// Occupancy plus the (tile, owner) list of standing gatehouses. A gate is a
+/// door in YOUR line, not a breach in it, so every pathing closure needs both:
+/// the tile is walkable, but only for the owner. Unfinished gates are just a
+/// foundation — they gate nobody.
+pub(crate) fn occupancy_and_gates(
+    world: &mut World,
+    include_passable: bool,
+) -> (HashSet<i32>, Vec<(i32, u64)>) {
+    let mut q = world.query::<(&Pos, &Building, Option<&Owner>)>();
+    let mut occ = Vec::new();
+    let mut gates = Vec::new();
+    for (p, b, owner) in q.iter(world) {
+        occ.push(Occupant { kind: b.kind, pos: p.pos });
+        if building_def(b.kind).passable && operational(b.state) {
+            let key = tile_key(p.pos.x.to_num::<i32>(), p.pos.y.to_num::<i32>());
+            gates.push((key, owner.map(|o| o.0).unwrap_or(0)));
+        }
+    }
+    (occupancy_set(&occ, include_passable), gates)
 }
 
 /// The caller's entity for `id` — only if the caller owns it (the lockstep

@@ -210,6 +210,8 @@ fn main() {
     .init_resource::<input::DemolishDrag>()
     .init_resource::<input::LastClick>()
     .init_resource::<input::GhostRot>()
+    .init_resource::<input::PlaceHint>()
+    .init_resource::<ui::hud::HudRects>()
     .init_resource::<camera::DragPan>()
     .init_resource::<PropGrid>()
     .init_resource::<render::sync::RenderMap>()
@@ -296,6 +298,7 @@ fn main() {
             minimap::minimap_click,
             minimap::sync_blips,
             minimap::draw_view_rect,
+            ui::hud::measure_hud.before(input::pointer_input),
             input::pointer_input,
             input::rotate_ghost,
             input::keyboard_input.run_if(not(ui::text_input::any_input_focused)),
@@ -310,6 +313,7 @@ fn main() {
             render::sync::rebuild_occupancy,
             render::sync::sync_render,
             render::sync::update_wall_arms,
+            render::sync::update_building_lifecycle,
             render::sync::interpolate,
             render::sync::animate_units,
             render::sync::update_tool_visibility,
@@ -340,6 +344,7 @@ fn main() {
             ui::hud::update_resource_bar,
             ui::hud::update_bottom_bar,
             ui::hud::watch_toasts,
+            ui::hud::watch_refusals,
             ui::hud::build_mode_hint,
             ui::hud::tick_toasts,
             ui::hud::render_toasts,
@@ -494,13 +499,21 @@ fn setup_world(world: &mut World) {
     #[cfg(not(target_arch = "wasm32"))]
     if cfg.load && !multiplayer {
         world.resource_mut::<MenuConfig>().load = false;
-        if let Some(save) =
-            std::fs::read(save_path()).ok().as_deref().and_then(saladin_protocol::save::from_bytes)
-        {
-            saladin_protocol::save::restore(world, save);
-            return;
-        }
-        eprintln!("save file missing/corrupt — starting a fresh skirmish");
+        // a refusal is deliberate: the save format carries a version and a
+        // stale file is rejected rather than half-decoded. Say so on screen —
+        // swallowing it silently started a fresh match that looked like a bug.
+        let why = match std::fs::read(save_path()) {
+            Ok(bytes) => match saladin_protocol::save::from_bytes(&bytes) {
+                Some(save) => {
+                    saladin_protocol::save::restore(world, save);
+                    return;
+                }
+                None => "Saved game is from an older build - starting fresh.",
+            },
+            Err(_) => "No saved game found - starting fresh.",
+        };
+        eprintln!("{why}");
+        world.resource_mut::<ui::hud::Toasts>().0.push((why.into(), 4.0));
     }
 
     if multiplayer {

@@ -10,23 +10,72 @@ use super::actions::{BuildTab, MARKET_LOT, UiAction};
 use super::assets::UiAssets;
 use super::theme::*;
 use super::widgets::*;
-use crate::input::InputMode;
+use crate::input::{InputMode, PlaceHint};
 use crate::selection::{SelectedBuilding, SelectionInfo};
 use crate::{LocalPlayer, UiFont};
 use bevy::prelude::*;
-use saladin_protocol::{Building, Owner, Player, Research, Unit};
+use bevy::ui::{ComputedNode, UiGlobalTransform};
 use saladin_sim::{
-    BUILD_CATEGORIES, BuildingKind, ResearchProgressRow, ResearchStatus, ResourceType, Stance,
-    building_def, can_host_garrison, food_low, has_prereq, research_panel_state,
-    techs_in_mask, unit_def, upgrade_def,
+    AuraTarget, BUILD_CATEGORIES, BuildState, BuildStatus, BuildingDef, BuildingKind, Fx,
+    ResearchProgressRow, ResearchStatus, ResourceCost, ResourceType, Stance, accepts, building_def,
+    build_panel_state, can_host_garrison, cancel_refund, demolish_refund, food_low,
+    place_error_text, research_panel_state, techs_in_mask, unit_def, upgrade_def,
 };
+use saladin_protocol::{Building, Owner, Player, Research, Unit};
 use std::collections::HashSet;
 
 #[derive(Component)]
 pub struct HudRoot;
 
+/// A panel that eats pointer input. The click-through band used to be a
+/// hardcoded `y > height - 120` against a bar measuring 182 logical px, so 67px
+/// of live panel swallowed nothing — and UI scale moved it in both directions.
+/// The band is now the panels' own measured rects.
+#[derive(Component)]
+pub struct HudBlocker;
+
+/// Logical-pixel rects of every `HudBlocker`, refreshed each frame.
+#[derive(Resource, Default)]
+pub struct HudRects(pub Vec<Rect>);
+
+impl HudRects {
+    pub fn hit(&self, cursor: Vec2) -> bool {
+        self.0.iter().any(|r| r.contains(cursor))
+    }
+}
+
+pub fn measure_hud(
+    mut rects: ResMut<HudRects>,
+    q: Query<(&ComputedNode, &UiGlobalTransform, &InheritedVisibility), With<HudBlocker>>,
+) {
+    rects.0.clear();
+    for (n, t, vis) in &q {
+        if !vis.get() {
+            continue;
+        }
+        let inv = n.inverse_scale_factor();
+        let size = n.size() * inv;
+        if size.x <= 0.0 || size.y <= 0.0 {
+            continue;
+        }
+        rects.0.push(Rect::from_center_size(t.translation * inv, size));
+    }
+}
+
 #[derive(Component)]
 pub struct ResourceText(pub usize); // 0..=7: name,wood,stone,food,gold,peasants,army,pop
+
+/// Command card geometry. The card is a fixed-width column, so every text node
+/// in it gets that exact width (see `wrap_label`).
+///
+/// The inset is a MARGIN on the content, never padding on the panel: an
+/// `ImageNode` fills the node's CONTENT box, so padding would push the
+/// parchment inward and leave the text hugging its own frame.
+const CARD_W: f32 = 250.0;
+const CARD_PAD: f32 = 16.0;
+const CARD_TEXT_W: f32 = CARD_W - CARD_PAD * 2.0;
+const BAR_PAD_X: f32 = 18.0;
+const BAR_PAD_Y: f32 = 14.0;
 
 #[derive(Component)]
 pub struct BottomLeft; // command card container
@@ -42,6 +91,7 @@ pub fn setup_hud(mut commands: Commands, font: Res<UiFont>, assets: Res<UiAssets
     commands
         .spawn((
             HudRoot,
+            HudBlocker,
             Node {
                 position_type: PositionType::Absolute,
                 top: Val::Px(0.0),
@@ -77,36 +127,34 @@ pub fn setup_hud(mut commands: Commands, font: Res<UiFont>, assets: Res<UiAssets
     // bottom bar containers (left card / center build bar; right = minimap viewport)
     commands.spawn((
         HudRoot,
+        HudBlocker,
         BottomLeft,
         Node {
             position_type: PositionType::Absolute,
             bottom: Val::Px(5.0),
             left: Val::Px(5.0),
-            width: Val::Px(210.0),
+            width: Val::Px(CARD_W),
             min_height: Val::Px(150.0),
             flex_direction: FlexDirection::Column,
             justify_content: JustifyContent::Center,
-            padding: UiRect::axes(Val::Px(26.0), Val::Px(24.0)),
-            row_gap: Val::Px(4.0),
             ..default()
         },
         panel_bg(&assets),
     ));
     commands.spawn((
         HudRoot,
+        HudBlocker,
         BottomCenter,
         Node {
             position_type: PositionType::Absolute,
             bottom: Val::Px(5.0),
-            left: Val::Px(220.0),
+            left: Val::Px(CARD_W + 10.0),
             right: Val::Px(172.0),
             min_height: Val::Px(178.0),
             flex_direction: FlexDirection::Row,
             justify_content: JustifyContent::FlexStart,
             align_items: AlignItems::FlexStart,
-            column_gap: Val::Px(16.0),
             overflow: Overflow::clip(),
-            padding: UiRect::axes(Val::Px(26.0), Val::Px(24.0)),
             ..default()
         },
         panel_bg(&assets),
@@ -115,6 +163,7 @@ pub fn setup_hud(mut commands: Commands, font: Res<UiFont>, assets: Res<UiAssets
     // minimap frame (the minimap itself is a camera viewport bottom-right)
     commands.spawn((
         HudRoot,
+        HudBlocker,
         super::assets::MinimapFrame,
         Node {
             position_type: PositionType::Absolute,
@@ -159,7 +208,12 @@ pub fn update_resource_bar(
             soldiers += 1;
         }
     }
-    let cap: i32 = q_buildings.iter().filter(|(o, _)| o.0 == local.0).map(|(_, b)| building_def(b.kind).pop).sum();
+    // a hole in the ground shelters nobody — mirror the sim's pop_room gate
+    let cap: i32 = q_buildings
+        .iter()
+        .filter(|(o, b)| o.0 == local.0 && saladin_sim::operational(b.state))
+        .map(|(_, b)| building_def(b.kind).pop)
+        .sum();
     let starving = food_low(p.stock.food, pop);
 
     for (slot, mut text, mut color) in &mut q_text {
@@ -202,28 +256,51 @@ pub fn update_bottom_bar(
     q_center: Query<Entity, With<BottomCenter>>,
 ) {
     let Some(p) = my_player(&q_players, local.0) else { return };
-    let owned: HashSet<BuildingKind> =
-        q_buildings.iter().filter(|(o, _)| o.0 == local.0).map(|(_, b)| b.kind).collect();
+    // mirror the sim's BuildContext exactly: a SITE counts toward the per-kind
+    // limit but satisfies no prereq, because an unfinished barracks trains
+    // nothing. A build card that disagrees with the command is a UI lie.
+    let mut owned: HashSet<BuildingKind> = HashSet::new();
+    let mut counts = [0i32; 16];
+    for (o, b) in &q_buildings {
+        if o.0 != local.0 {
+            continue;
+        }
+        counts[b.kind as usize] += 1;
+        if saladin_sim::operational(b.state) {
+            owned.insert(b.kind);
+        }
+    }
     let rows: Vec<ResearchProgressRow> = q_research
         .iter()
         .filter(|r| r.owner == local.0)
         .map(|r| ResearchProgressRow { tech: r.tech, progress: r.progress, done: r.done })
         .collect();
 
+    let sb = &*sel_building;
     let key = format!(
-        "{:?}|{:?}|{}|{}|{:?}|{:?}|{:?}|{:?}|{}|{:.2}|{:.2}|{}",
+        "{:?}|{:?}|{}|{}|{:?}|{:?}|{:?}|{:?}|{:?}|{}|{:.2}|{:.2}|{}|{}/{}|{:?}|{:.2}|{}|{:?}|{:.2}|{}|{:?}",
         p.stock,
         info.by_kind,
         info.total,
         info.routing,
-        sel_building.id,
-        sel_building.occupants,
+        sb.id,
+        sb.occupants,
         tab.0,
         *mode,
+        counts,
         owned.len(),
         info.avg_hp,
         info.avg_morale,
         rows.iter().map(|r| format!("{}:{:.2}:{}", r.tech, r.progress.to_num::<f32>(), r.done)).collect::<Vec<_>>().join(","),
+        sb.hp,
+        sb.max_hp,
+        sb.state,
+        sb.work,
+        sb.builders,
+        sb.queue,
+        sb.train_progress,
+        sb.rally.is_some(),
+        sb.upgrade.map(|(k, _)| k),
     );
     if digest.0 == key {
         return;
@@ -235,19 +312,86 @@ pub fn update_bottom_bar(
     commands.entity(left).despawn_related::<Children>();
     commands.entity(center).despawn_related::<Children>();
 
-    build_command_card(&mut commands, left, &font, &assets, &info, &sel_building, p);
+    build_command_card(&mut commands, left, &font, &assets, &info, sb, p);
     build_build_bar(
-        &mut commands,
-        center,
-        &font,
-        &assets,
-        p,
-        &owned,
-        &rows,
-        &sel_building,
-        tab.0,
-        *mode,
+        &mut commands, center, &font, &assets, p, &owned, &counts, &rows, sb, tab.0, *mode,
     );
+}
+
+/// "70W 20S" plus the labour it takes — a price is a time as well as a cost.
+fn price_line(cost: &ResourceCost, secs: Fx) -> String {
+    let c = cost_line(cost);
+    let s = secs.to_num::<i32>();
+    match (c.is_empty(), s > 0) {
+        (true, true) => format!("{s}s"),
+        (false, true) => format!("{c}  {s}s"),
+        (true, false) => "Free".into(),
+        (false, false) => c,
+    }
+}
+
+fn crew_line(builders: i32) -> String {
+    match builders {
+        0 => "no builders".into(),
+        1 => "1 builder".into(),
+        n => format!("{n} builders"),
+    }
+}
+
+/// What this structure DOES, read straight off the def fields. A new role is a
+/// row in BUILDING_DEFS, so it shows up here without touching the HUD.
+fn role_lines(def: &BuildingDef, sel: &SelectedBuilding) -> Vec<String> {
+    let mut out = Vec::new();
+    if def.accepts != 0 {
+        let names: Vec<&str> = [
+            (ResourceType::Wood, "Wood"),
+            (ResourceType::Stone, "Stone"),
+            (ResourceType::Food, "Food"),
+            (ResourceType::Gold, "Gold"),
+        ]
+        .iter()
+        .filter(|(r, _)| accepts(def, *r))
+        .map(|(_, n)| *n)
+        .collect();
+        out.push(format!("Drops off {}", names.join(" ")));
+    }
+    if !def.trains.is_empty() {
+        let names: Vec<&str> = def.trains.iter().map(|k| unit_def(*k).label).collect();
+        out.push(format!("Trains {}", names.join(", ")));
+    }
+    if let Some(a) = def.aura {
+        out.push(match a.target {
+            AuraTarget::Field => "Speeds nearby fields".into(),
+            AuraTarget::WaterFood => "Speeds and restocks nearby fishing".into(),
+        });
+    }
+    if def.hosts_research {
+        out.push("Researches upgrades".into());
+    }
+    if def.enables_trade {
+        out.push("Trades goods for gold".into());
+    }
+    if def.morale_radius > Fx::ZERO {
+        out.push("Steadies nearby troops".into());
+    }
+    if def.attack > 0 {
+        out.push(format!("Fires on raiders at {}", def.range.to_num::<i32>()));
+    }
+    match (def.pop > 0, def.garrison_cap > 0) {
+        (true, true) => {
+            out.push(format!("Houses {}   Garrison {}/{}", def.pop, sel.occupants, sel.garrison_cap))
+        }
+        (true, false) => out.push(format!("Houses {}", def.pop)),
+        (false, true) => out.push(format!("Garrison {}/{}", sel.occupants, sel.garrison_cap)),
+        (false, false) => {}
+    }
+    if let Some(into) = def.upgrades_to {
+        out.push(format!("Becomes a {}", building_def(into).label));
+    }
+    if def.defeat_on_death {
+        out.push("Its fall ends the war".into());
+    }
+    out
 }
 
 fn build_command_card(
@@ -260,9 +404,19 @@ fn build_command_card(
     p: &Player,
 ) {
     commands.entity(left).with_children(|c| {
+      c.spawn((Node {
+          flex_direction: FlexDirection::Column,
+          row_gap: Val::Px(4.0),
+          margin: UiRect::all(Val::Px(CARD_PAD)),
+          ..default()
+      },))
+      .with_children(|c| {
+        let line = |c: &mut ChildSpawnerCommands, t: &str, size: f32, col: Color| {
+            wrap_label(c, font, t, size, col, CARD_TEXT_W);
+        };
         if info.total > 0 {
-            label(c, font, "Selection", FONT_SM, TEXT_DIM);
-            label(c, font, &format!("{} unit{}", info.total, if info.total > 1 { "s" } else { "" }), FONT_MD, TEXT);
+            line(c, "Selection", FONT_SM, TEXT_DIM);
+            line(c, &format!("{} unit{}", info.total, if info.total > 1 { "s" } else { "" }), FONT_MD, TEXT);
             for (kind_idx, &count) in info.by_kind.iter().enumerate() {
                 if count == 0 {
                     continue;
@@ -271,7 +425,7 @@ fn build_command_card(
                 let base = unit_def(kind);
                 let eff = saladin_sim::effective_unit_def(kind, p.tech_mask);
                 let up = if eff.attack != base.attack || eff.max_hp != base.max_hp { " ^" } else { "" };
-                label(c, font, &format!("{}{}  x{}", base.label, up, count), FONT_SM, TEXT);
+                line(c, &format!("{}{}  x{}", base.label, up, count), FONT_SM, TEXT);
             }
             if info.has_combat {
                 c.spawn((Node { flex_direction: FlexDirection::Row, column_gap: Val::Px(2.0), ..default() },))
@@ -293,32 +447,82 @@ fn build_command_card(
                         }
                     });
             }
-            label(c, font, "Health", 12.0, TEXT_DIM);
-            ratio_bar(c, assets, 126.0, info.avg_hp, hp_color(info.avg_hp));
+            line(c, "Health", 12.0, TEXT_DIM);
+            ratio_bar(c, assets, CARD_TEXT_W, info.avg_hp, hp_color(info.avg_hp));
             if info.has_combat {
                 let routing = if info.routing > 0 { format!("Morale   {} routing!", info.routing) } else { "Morale".into() };
-                label(c, font, &routing, 12.0, if info.routing > 0 { WARN } else { TEXT_DIM });
-                ratio_bar(c, assets, 126.0, info.avg_morale, morale_color(info.avg_morale));
+                line(c, &routing, 12.0, if info.routing > 0 { WARN } else { TEXT_DIM });
+                ratio_bar(c, assets, CARD_TEXT_W, info.avg_morale, morale_color(info.avg_morale));
             }
-        } else if let Some(_id) = sel_building.id {
-            let def = building_def(sel_building.kind);
-            label(c, font, def.label, FONT_MD, ACCENT);
-            label(c, font, def.blurb, 11.0, TEXT_DIM);
-            if def.garrison_cap > 0 {
-                label(
-                    c,
-                    font,
-                    &format!("Garrison {}/{}", sel_building.occupants, sel_building.garrison_cap),
-                    FONT_SM,
-                    TEXT,
-                );
-            }
+        } else if sel_building.id.is_some() {
+            building_panel(c, font, assets, sel_building);
         } else {
-            label(c, font, "No selection", FONT_SM, TEXT_DIM);
-            label(c, font, "Drag to select units.", 12.0, TEXT_DIM);
-            label(c, font, "Right-click to order.", 12.0, TEXT_DIM);
+            line(c, "No selection", FONT_SM, TEXT_DIM);
+            line(c, "Drag to select units.", 12.0, TEXT_DIM);
+            line(c, "Right-click to order.", 12.0, TEXT_DIM);
         }
+      });
     });
+}
+
+/// The selected building's own panel: what it is, how it is, what it is doing.
+fn building_panel(
+    c: &mut ChildSpawnerCommands,
+    font: &UiFont,
+    assets: &UiAssets,
+    sel: &SelectedBuilding,
+) {
+    let def = building_def(sel.kind);
+    let line = |c: &mut ChildSpawnerCommands, t: &str, size: f32, col: Color| {
+        wrap_label(c, font, t, size, col, CARD_TEXT_W);
+    };
+    line(c, def.label, FONT_MD, ACCENT);
+    line(c, def.blurb, 11.0, TEXT_DIM);
+    match sel.state {
+        BuildState::Site => line(c, "Under construction", FONT_SM, GOLD),
+        BuildState::Upgrading => {
+            line(c, &format!("Becoming {}", building_def(sel.target_kind).label), FONT_SM, GOLD)
+        }
+        BuildState::Complete if sel.damaged() => line(c, "Damaged", FONT_SM, WARN),
+        BuildState::Complete => {}
+    }
+
+    let hp = (sel.hp as f32 / sel.max_hp.max(1) as f32).clamp(0.0, 1.0);
+    line(c, &format!("Health  {}/{}", sel.hp, sel.max_hp), 12.0, TEXT_DIM);
+    ratio_bar(c, assets, CARD_TEXT_W, hp, hp_color(hp));
+
+    // progress and health answer two different questions, so they are two bars
+    if sel.state != BuildState::Complete {
+        let idle = sel.builders == 0;
+        let pct = (sel.work * 100.0) as i32;
+        line(
+            c,
+            &format!("Building {pct}%  {}", crew_line(sel.builders)),
+            12.0,
+            if idle { WARN } else { TEXT_DIM },
+        );
+        ratio_bar(c, assets, CARD_TEXT_W, sel.work, GOLD);
+    } else if sel.builders > 0 {
+        line(c, &format!("Mending  {}", crew_line(sel.builders)), 12.0, TEXT_DIM);
+    }
+
+    if let Some(k) = sel.queue.first() {
+        let more = sel.queue.len() - 1;
+        let tail = if more > 0 { format!("  +{more}") } else { String::new() };
+        line(c, &format!("Training {}{tail}", unit_def(*k).label), 12.0, TEXT_DIM);
+        ratio_bar(c, assets, CARD_TEXT_W, sel.train_progress, ACCENT);
+    }
+
+    for role in role_lines(def, sel) {
+        line(c, &role, FONT_SM, TEXT);
+    }
+    match sel.rally {
+        Some(r) => {
+            line(c, &format!("Rally {}, {}", r.x.to_num::<i32>(), r.y.to_num::<i32>()), 11.0, GOLD)
+        }
+        None if !def.trains.is_empty() => line(c, "Right-click sets rally", 11.0, TEXT_DIM),
+        None => {}
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -329,6 +533,7 @@ fn build_build_bar(
     assets: &UiAssets,
     p: &Player,
     owned: &HashSet<BuildingKind>,
+    counts: &[i32; 16],
     rows: &[ResearchProgressRow],
     sel_building: &SelectedBuilding,
     tab: usize,
@@ -336,47 +541,24 @@ fn build_build_bar(
 ) {
     let stock = p.stock;
     commands.entity(center).with_children(|c| {
-        if let Some(_id) = sel_building.id {
-            // production group for the selected building
+      c.spawn((Node {
+          flex_direction: FlexDirection::Row,
+          align_items: AlignItems::FlexStart,
+          column_gap: Val::Px(16.0),
+          margin: UiRect::axes(Val::Px(BAR_PAD_X), Val::Px(BAR_PAD_Y)),
+          ..default()
+      },))
+      .with_children(|c| {
+        if sel_building.id.is_some() {
             let bdef = building_def(sel_building.kind);
-            group(c, font, bdef.label, |c, font| {
-                for &kind in bdef.trains {
-                    let u = unit_def(kind);
-                    let locked = !has_prereq(owned, u.requires);
-                    let sub = if locked {
-                        Some(format!("needs {}", building_def(u.requires.unwrap()).label))
-                    } else {
-                        Some(cost_line(&u.cost))
-                    };
-                    tool_button(
-                        c,
-                        font,
-                        assets,
-                        UiAction::Train(kind),
-                        u.label,
-                        sub,
-                        BtnStyle {
-                            disabled: locked || !stock.can_afford(&u.cost),
-                            icon: assets.unit_icon(kind),
-                            ..default()
-                        },
-                    );
-                }
-                if bdef.buildable {
-                    tool_button(
-                        c,
-                        font,
-                        assets,
-                        UiAction::DemolishSelected,
-                        "Demolish",
-                        None,
-                        BtnStyle { tint: TINT_RED, icon: assets.icon("act:demolish"), ..default() },
-                    );
-                }
-            });
+            let live = saladin_sim::operational(sel_building.state);
+            if !bdef.trains.is_empty() {
+                production_group(c, font, assets, bdef, sel_building, &stock, owned, live);
+            }
+            orders_group(c, font, assets, bdef, sel_building, &stock);
             // trade group on the market: sell goods for gold, buy them back
             // at the merchant's spread
-            if sel_building.kind == BuildingKind::Market {
+            if bdef.enables_trade && live {
                 group(c, font, "Sell", |c, font| {
                     for (res, key, name) in [
                         (ResourceType::Wood, "res:wood", "Sell Wood"),
@@ -414,8 +596,8 @@ fn build_build_bar(
                     }
                 });
             }
-            // research panel on the blacksmith
-            if sel_building.kind == BuildingKind::Blacksmith {
+            // research panel wherever research is hosted
+            if bdef.hosts_research && live {
                 let states = research_panel_state(p.tech_mask, rows, &stock, owned);
                 group(c, font, "Research", |c, font| {
                     for r in states {
@@ -440,7 +622,7 @@ fn build_build_bar(
                     }
                 });
             }
-            if can_host_garrison(&bdef) {
+            if can_host_garrison(bdef) {
                 group(c, font, "Garrison", |c, font| {
                     tool_button(
                         c,
@@ -480,26 +662,23 @@ fn build_build_bar(
                         });
                     c.spawn((Node { flex_direction: FlexDirection::Row, column_gap: Val::Px(2.0), ..default() },))
                         .with_children(|c| {
-                            for &kind in BUILD_CATEGORIES[tab.min(BUILD_CATEGORIES.len() - 1)].kinds {
-                                let d = building_def(kind);
-                                let locked = !has_prereq(owned, d.requires);
-                                let sub = if locked {
-                                    Some(format!("needs {}", building_def(d.requires.unwrap()).label))
-                                } else {
-                                    Some(cost_line(&d.cost))
-                                };
-                                let active = mode == InputMode::Build(kind);
+                            // the COST rides on every card, locked or not: a
+                            // player has to be able to learn what a Siege
+                            // Workshop costs before he can build one
+                            for r in build_panel_state(tab, owned, counts, &stock) {
+                                let active = mode == InputMode::Build(r.kind);
                                 tool_button(
                                     c,
                                     font,
                                     assets,
-                                    UiAction::Build(kind),
-                                    d.label,
-                                    sub,
+                                    UiAction::Build(r.kind),
+                                    r.label,
+                                    Some(price_line(&r.cost, r.build_time)),
                                     BtnStyle {
                                         active,
-                                        disabled: !active && (locked || !stock.can_afford(&d.cost)),
-                                        icon: assets.building_icon(kind),
+                                        disabled: !active && r.status != BuildStatus::Available,
+                                        icon: assets.building_icon(r.kind),
+                                        note: r.note,
                                         ..default()
                                     },
                                 );
@@ -547,6 +726,154 @@ fn build_build_bar(
                 }
             });
         }
+      });
+    });
+}
+
+/// Train-at-this-hall cards plus the live queue. Orders are addressed to the
+/// selected building by GameId, so "which barracks" is finally defined.
+#[allow(clippy::too_many_arguments)]
+fn production_group(
+    c: &mut ChildSpawnerCommands,
+    font: &UiFont,
+    assets: &UiAssets,
+    bdef: &BuildingDef,
+    sel: &SelectedBuilding,
+    stock: &saladin_sim::Stockpile,
+    owned: &HashSet<BuildingKind>,
+    live: bool,
+) {
+    let full = sel.queue.len() >= saladin_sim::QUEUE_CAP;
+    group(c, font, "Train", |c, font| {
+        for &kind in bdef.trains {
+            let u = unit_def(kind);
+            let missing = u.requires.filter(|r| !owned.contains(r));
+            let note = match (live, missing, full) {
+                (false, _, _) => Some("Not finished".to_string()),
+                (_, Some(r), _) => Some(format!("Needs {}", building_def(r).label)),
+                (_, None, true) => Some("Queue full".to_string()),
+                _ => None,
+            };
+            tool_button(
+                c,
+                font,
+                assets,
+                UiAction::TrainAt(kind),
+                u.label,
+                Some(price_line(&u.cost, u.train_time)),
+                BtnStyle {
+                    disabled: note.is_some() || !stock.can_afford(&u.cost),
+                    icon: assets.unit_icon(kind),
+                    note,
+                    ..default()
+                },
+            );
+        }
+    });
+    if sel.queue.is_empty() {
+        return;
+    }
+    // only the LAST order can be dropped — that is what the sim does, so that
+    // is the only chip that is a button
+    let last = sel.queue.len() - 1;
+    group(c, font, "Queue", |c, font| {
+        for (i, kind) in sel.queue.iter().enumerate() {
+            let sub = if i == 0 { format!("{}%", (sel.train_progress * 100.0) as i32) } else { String::new() };
+            tool_button(
+                c,
+                font,
+                assets,
+                UiAction::CancelTrain,
+                &sub,
+                None,
+                BtnStyle {
+                    tint: if i == last { TINT_RED } else { TINT_NORMAL },
+                    disabled: i != last,
+                    icon: assets.unit_icon(*kind),
+                    ..BtnStyle::slot()
+                },
+            );
+        }
+    });
+}
+
+/// Send Builders / Upgrade / Cancel / Demolish, each carrying its live price.
+fn orders_group(
+    c: &mut ChildSpawnerCommands,
+    font: &UiFont,
+    assets: &UiAssets,
+    bdef: &BuildingDef,
+    sel: &SelectedBuilding,
+    stock: &saladin_sim::Stockpile,
+) {
+    let anything = sel.wants_work() || sel.upgrade.is_some() || bdef.buildable;
+    if !anything {
+        return;
+    }
+    group(c, font, "Orders", |c, font| {
+        if sel.wants_work() {
+            let sub = if sel.builders > 0 {
+                crew_line(sel.builders)
+            } else if sel.state == BuildState::Complete {
+                "repair it".into()
+            } else {
+                "finish it".into()
+            };
+            tool_button(
+                c,
+                font,
+                assets,
+                UiAction::SendBuilders,
+                "Send Builders",
+                Some(sub),
+                BtnStyle {
+                    tint: TINT_GREEN,
+                    disabled: sel.builders >= saladin_sim::MAX_BUILDERS,
+                    icon: assets.icon("act:builders"),
+                    ..default()
+                },
+            );
+        }
+        if let Some((into, cost)) = sel.upgrade {
+            let time = building_def(sel.kind).upgrade_time;
+            tool_button(
+                c,
+                font,
+                assets,
+                UiAction::UpgradeSelected,
+                building_def(into).label,
+                Some(price_line(&cost, time)),
+                BtnStyle {
+                    disabled: !stock.can_afford(&cost),
+                    icon: assets.icon("act:upgrade"),
+                    note: (!stock.can_afford(&cost)).then(|| "Cannot afford".to_string()),
+                    ..default()
+                },
+            );
+        }
+        if sel.state == BuildState::Site {
+            let back = cancel_refund(&bdef.cost, Fx::from_num(sel.work));
+            tool_button(
+                c,
+                font,
+                assets,
+                UiAction::CancelSite,
+                "Cancel",
+                Some(format!("back {}", cost_line(&back))),
+                BtnStyle { tint: TINT_RED, icon: assets.icon("act:cancel"), ..default() },
+            );
+        } else if bdef.buildable {
+            let back = demolish_refund(&bdef.cost, sel.hp, bdef.max_hp);
+            tool_button(
+                c,
+                font,
+                assets,
+                UiAction::DemolishSelected,
+                "Demolish",
+                Some(format!("back {}", cost_line(&back))),
+                BtnStyle { tint: TINT_RED, icon: assets.icon("act:demolish"), ..default() },
+            );
+        }
     });
 }
 
@@ -579,35 +906,45 @@ fn group(
 #[derive(Component)]
 pub struct ModeHint;
 
+/// What the mode chip says. Ten distinct refusals used to render as one silent
+/// red box; the ghost publishes which one it is and the chip says it out loud.
+fn mode_hint_text(mode: InputMode, refused: Option<saladin_sim::PlaceError>) -> String {
+    match (mode, refused) {
+        (InputMode::Build(_), Some(e)) => format!("{}  -  Esc cancels", place_error_text(e)),
+        (InputMode::Build(BuildingKind::Wall), None) => {
+            "Drag to draw a wall (any direction)  -  Esc cancels".into()
+        }
+        (InputMode::Build(k), None) if building_def(k).min_fertility > saladin_sim::ZERO => {
+            "Green ground is fertile - fields only take on good soil  -  Esc cancels".into()
+        }
+        (InputMode::Build(_), None) => "R rotates the building  -  Esc cancels".into(),
+        (InputMode::Demolish, _) => "Click your buildings to demolish  -  Esc cancels".into(),
+        (InputMode::Normal, _) => String::new(),
+    }
+}
+
 pub fn build_mode_hint(
     mut commands: Commands,
     font: Res<UiFont>,
     assets: Res<UiAssets>,
     mode: Res<InputMode>,
+    hint: Res<PlaceHint>,
     q: Query<Entity, With<ModeHint>>,
     mut shown: Local<String>,
 ) {
-    let text = match *mode {
-        InputMode::Build(k) if k == saladin_sim::BuildingKind::Wall => {
-            "Drag to draw a wall (any direction)  -  Esc cancels"
-        }
-        InputMode::Build(k) if building_def(k).min_fertility > saladin_sim::ZERO => {
-            "Green ground is fertile - fields only take on good soil  -  Esc cancels"
-        }
-        InputMode::Build(_) => "R rotates the building  -  Esc cancels",
-        InputMode::Demolish => "Click your buildings to demolish  -  Esc cancels",
-        InputMode::Normal => "",
-    };
+    let refused = matches!(*mode, InputMode::Build(_)).then(|| hint.0).flatten();
+    let text = mode_hint_text(*mode, refused);
     if *shown == text {
         return;
     }
-    *shown = text.to_string();
+    shown.clone_from(&text);
     for e in &q {
         commands.entity(e).despawn();
     }
     if text.is_empty() {
         return;
     }
+    let color = if refused.is_some() { WARN } else { GOLD };
     commands
         .spawn((
             ModeHint,
@@ -626,7 +963,7 @@ pub fn build_mode_hint(
                 Node { padding: UiRect::axes(Val::Px(14.0), Val::Px(6.0)), ..default() },
                 panel_bg_dark(&assets),
             ))
-            .with_children(|p| label(p, &font, text, FONT_SM, GOLD));
+            .with_children(|p| label(p, &font, &text, FONT_SM, color));
         });
 }
 
@@ -684,6 +1021,37 @@ pub fn render_toasts(
         });
 }
 
+/// Say out loud why the sim threw a Build away. The ghost mirrors `check_build`
+/// locally, so most refusals are visible before the click - but not the ones
+/// only the sim can see: a tile someone else took on the same tick, coin spent
+/// by an earlier command in the same batch. `CommandFeedback` has recorded them
+/// since the command path was rewritten and nothing has ever read it, so those
+/// orders vanished in silence.
+pub fn watch_refusals(
+    local: Res<LocalPlayer>,
+    tick: Res<saladin_protocol::Tick>,
+    feedback: Res<saladin_protocol::CommandFeedback>,
+    mut toasts: ResMut<Toasts>,
+    mut last: Local<u64>,
+) {
+    // the resource lives for one sim tick and the frame rate is higher, so the
+    // tick number is what stops one refusal becoming five toasts
+    if *last == tick.0 || feedback.0.is_empty() {
+        return;
+    }
+    *last = tick.0;
+    let mut said: HashSet<String> = HashSet::new();
+    for (owner, err) in &feedback.0 {
+        if *owner != local.0 {
+            continue;
+        }
+        let text = place_error_text(*err);
+        if said.insert(text.clone()) {
+            toasts.0.push((text, 2.2));
+        }
+    }
+}
+
 /// Fire gameplay toasts off sim state edges (starving start, research done).
 pub fn watch_toasts(
     local: Res<LocalPlayer>,
@@ -705,5 +1073,145 @@ pub fn watch_toasts(
             toasts.0.push((format!("Research complete: {}", upgrade_def(t).label), 2.6));
         }
         *prev_mask = p.tech_mask;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use saladin_sim::{Stockpile, UnitKind};
+
+    fn sel(kind: BuildingKind) -> SelectedBuilding {
+        let d = building_def(kind);
+        SelectedBuilding {
+            id: Some(1),
+            kind,
+            target_kind: kind,
+            garrison_cap: d.garrison_cap,
+            max_hp: d.max_hp.max(1),
+            hp: d.max_hp.max(1),
+            ..default()
+        }
+    }
+
+    /// The card is generated from def FIELDS, so a kind with a capability the
+    /// HUD cannot describe is a role the player is never told about.
+    #[test]
+    fn every_structure_says_what_it_is_for() {
+        for &kind in BuildingKind::ALL {
+            let d = building_def(kind);
+            let lines = role_lines(d, &sel(kind));
+            let has_role = d.accepts != 0
+                || !d.trains.is_empty()
+                || d.aura.is_some()
+                || d.hosts_research
+                || d.enables_trade
+                || d.morale_radius > Fx::ZERO
+                || d.attack > 0
+                || d.pop > 0
+                || d.garrison_cap > 0
+                || d.upgrades_to.is_some()
+                || d.defeat_on_death;
+            assert_eq!(!lines.is_empty(), has_role, "{kind:?} role lines vs def fields");
+        }
+        // role_lines only reports MECHANICS, and a Farm has none of them: no
+        // drop-off, no roster, no aura, no garrison. The blurb is the only thing
+        // standing between its card and a name over a health bar, so the card
+        // renders it and every kind has to carry one.
+        assert!(
+            role_lines(building_def(BuildingKind::Farm), &sel(BuildingKind::Farm)).is_empty(),
+            "the Farm grew a mechanic; this test's premise needs rechecking"
+        );
+        for &kind in BuildingKind::ALL {
+            let b = building_def(kind).blurb;
+            assert!(!b.is_empty(), "{kind:?} has no blurb, so its card says nothing it does");
+            assert!(b.is_ascii(), "{kind:?} blurb is not ASCII: {b:?}");
+        }
+    }
+
+    /// The embedded font has no non-ASCII glyphs and the atlas pre-warm is
+    /// ASCII-only, so one em dash shreds the card.
+    #[test]
+    fn every_generated_card_string_is_ascii_and_fits() {
+        // widest column the card can render before a line wraps
+        const MAX_CHARS: usize = 37;
+        for &kind in BuildingKind::ALL {
+            let d = building_def(kind);
+            let mut strings = role_lines(d, &sel(kind));
+            strings.push(d.blurb.to_string());
+            strings.push(price_line(&d.cost, d.build_time));
+            strings.push(price_line(&d.upgrade_cost, d.upgrade_time));
+            strings.push(crew_line(0));
+            strings.push(crew_line(3));
+            strings.push(format!("Becoming {}", building_def(d.upgrades_to.unwrap_or(kind)).label));
+            for s in strings {
+                assert!(s.is_ascii(), "{kind:?}: {s:?} is not ASCII");
+                assert!(s.len() <= MAX_CHARS * 2, "{kind:?}: {s:?} is unreadably long");
+            }
+        }
+        for &kind in UnitKind::ALL {
+            let u = unit_def(kind);
+            assert!(u.label.is_ascii() && price_line(&u.cost, u.train_time).is_ascii());
+        }
+    }
+
+    /// A locked card keeps its price and gains a reason — never swaps one for
+    /// the other, which is how a player learns what to save up for.
+    #[test]
+    fn a_locked_build_card_still_shows_its_price() {
+        let broke = Stockpile::default();
+        let rows = build_panel_state(3, &HashSet::new(), &[0i32; 16], &broke);
+        assert!(!rows.is_empty());
+        for r in rows {
+            let price = price_line(&r.cost, r.build_time);
+            assert!(!price.is_empty() && price != "Free", "{:?} has no price line", r.kind);
+            if let BuildStatus::Locked { .. } = r.status {
+                assert!(r.note.is_some(), "{:?} is locked with no reason given", r.kind);
+            }
+        }
+    }
+
+    /// Every refusal reaches the player as its own ASCII sentence.
+    #[test]
+    fn every_placement_refusal_is_spoken_aloud() {
+        use saladin_sim::PlaceError::*;
+        let all = [
+            Terrain, Occupied, NeedsWaterside, OutsideTown, NoApproach, PoorSoil, TooSteep,
+            NotBuildable, MissingPrereq(BuildingKind::Barracks), TooMany, CannotAfford,
+        ];
+        let mut seen: HashSet<String> = HashSet::new();
+        for e in all {
+            let t = mode_hint_text(InputMode::Build(BuildingKind::House), Some(e));
+            assert!(t.is_ascii(), "{t:?}");
+            assert!(seen.insert(t.clone()), "{e:?} shares its wording with another refusal: {t}");
+        }
+        // and a valid spot says what the controls are, not what is wrong
+        let ok = mode_hint_text(InputMode::Build(BuildingKind::House), None);
+        assert!(ok.contains("rotates"));
+        assert!(mode_hint_text(InputMode::Normal, None).is_empty());
+    }
+
+    #[test]
+    fn a_price_states_cost_and_time() {
+        let c = ResourceCost::new(70, 20, 0, 0);
+        assert_eq!(price_line(&c, Fx::from_num(16)), "70W 20S  16s");
+        assert_eq!(price_line(&c, Fx::ZERO), "70W 20S");
+        assert_eq!(price_line(&ResourceCost::ZERO, Fx::from_num(3)), "3s");
+        assert_eq!(price_line(&ResourceCost::ZERO, Fx::ZERO), "Free");
+    }
+
+    /// The click-through band is the panels' MEASURED rects. The old hardcoded
+    /// `y > height - 120` left 63 logical px of live build bar passing clicks
+    /// through to the map, and blocked bare map either side of it.
+    #[test]
+    fn the_hud_band_is_exactly_the_panels() {
+        let mut rects = HudRects::default();
+        rects.0.push(Rect::new(0.0, 0.0, 1280.0, 26.0));
+        rects.0.push(Rect::new(260.0, 537.0, 1108.0, 715.0));
+        assert!(rects.hit(Vec2::new(600.0, 545.0)), "the top of the build bar eats clicks");
+        assert!(rects.hit(Vec2::new(600.0, 10.0)), "the resource bar eats clicks");
+        assert!(!rects.hit(Vec2::new(1200.0, 650.0)), "bare map beside the bar does not");
+        assert!(!rects.hit(Vec2::new(120.0, 600.0)), "bare map beside the bar does not");
+        assert!(!rects.hit(Vec2::new(600.0, 500.0)), "map above the bar does not");
     }
 }

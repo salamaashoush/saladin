@@ -127,6 +127,12 @@ pub struct Shot {
 #[derive(Resource, Default)]
 pub struct ShotEvents(pub Vec<Shot>);
 
+/// Why the last batch of commands refused what a player asked for, so the HUD
+/// can say it instead of silently doing nothing. Refilled every tick by
+/// `apply_commands`; never part of the state hash (the `ShotEvents` rule).
+#[derive(Resource, Default)]
+pub struct CommandFeedback(pub Vec<(u64, saladin_sim::PlaceError)>);
+
 /// Deterministic gameplay RNG (train-spawn jitter etc.). Seeded with a fixed
 /// constant so every lockstep client draws the identical stream — commands are
 /// applied in the same order everywhere, so the streams stay aligned.
@@ -184,6 +190,7 @@ impl Plugin for SimPlugin {
             .init_resource::<MatchStatuses>()
             .init_resource::<MatchStats>()
             .init_resource::<ShotEvents>()
+            .init_resource::<CommandFeedback>()
             .init_resource::<CommandQueue>()
             .init_schedule(SimSchedule);
 

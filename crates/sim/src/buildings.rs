@@ -1,7 +1,12 @@
-use crate::buildings_defs::building_def;
-use crate::constants::{TOWN_RADIUS, WORLD_SIZE};
-use crate::enums::BuildingKind;
+use crate::buildings_defs::{BuildingDef, building_def, res_bit};
+use crate::constants::{
+    BUILDER_RATE, DEMOLISH_REFUND_PCT, MAX_BUILDERS, REPAIR_COST_PCT, SITE_HP_PCT, TOWN_RADIUS,
+    WORLD_SIZE,
+};
+use crate::economy::{ResourceCost, Stockpile};
+use crate::enums::{BuildState, BuildingKind, ResourceType};
 use crate::math::{Fx, V2, dist2};
+use crate::tech::has_prereq_all;
 use crate::terrain::{fertility_at, is_buildable_tile, is_passable, is_water_tile};
 use std::collections::HashSet;
 
@@ -94,39 +99,90 @@ pub fn has_passable_approach<P: Fn(i32, i32) -> bool>(footprint: i32, x: Fx, y: 
     false
 }
 
-/// True if any tile orthogonally bordering the footprint is impassable (shore).
-/// Gates water-adjacent buildings (FishingHut).
-pub fn is_water_adjacent<P: Fn(i32, i32) -> bool>(footprint: i32, x: Fx, y: Fx, passable: P) -> bool {
-    let tiles = footprint_tiles(footprint, x, y);
-    let inside: HashSet<i32> = tiles.iter().map(|t| tile_key(t.tx, t.ty)).collect();
-    for t in &tiles {
-        for (dx, dy) in DIRS4 {
-            let (nx, ny) = (t.tx + dx, t.ty + dy);
-            if inside.contains(&tile_key(nx, ny)) {
-                continue;
-            }
-            if !passable(nx, ny) {
-                return true;
-            }
-        }
-    }
-    false
+// ── the construction loop ───────────────────────────────────────────────────
+// Building, repairing and upgrading are ONE loop: work advances the job, hp
+// advances with it. hp is authoritative and ADDITIVE (work adds, damage
+// subtracts) rather than derived from progress, so a site under fire needs no
+// special case and a half-built hall is a real half-health target.
+
+/// A `Site` does nothing at all; an `Upgrading` tower still fires, still counts
+/// toward prereqs and still takes deposits. The single capability choke point.
+pub fn operational(state: BuildState) -> bool {
+    state != BuildState::Site
 }
 
-/// Placeable if every footprint tile is passable and unoccupied (terrain-only
-/// core; the full game rule set is `check_place`).
-pub fn can_place<P, O>(kind: BuildingKind, x: Fx, y: Fx, passable: P, occupied: O) -> bool
-where
-    P: Fn(i32, i32) -> bool,
-    O: Fn(i32, i32) -> bool,
-{
-    let f = building_def(kind).footprint;
-    for t in footprint_tiles(f, x, y) {
-        if !passable(t.tx, t.ty) || occupied(t.tx, t.ty) {
-            return false;
-        }
+/// Work per second from `builders`, with diminishing returns.
+pub fn build_rate(builders: i32) -> Fx {
+    let n = builders.clamp(0, MAX_BUILDERS) as usize;
+    Fx::from_num(BUILDER_RATE[n]) / Fx::from_num(100)
+}
+
+/// Fraction of a `build_time` job that `builders` finish in `dt` seconds.
+pub fn work_step(builders: i32, dt: Fx, build_time: Fx) -> Fx {
+    if build_time <= Fx::ZERO {
+        return Fx::ONE;
     }
-    true
+    build_rate(builders) * dt / build_time
+}
+
+/// Health a founded site starts at — frail enough to be worth raiding.
+pub fn site_start_hp(max_hp: i32) -> i32 {
+    (max_hp * SITE_HP_PCT / 100).max(1)
+}
+
+/// Health that `work_delta` of progress adds. Flooring loses a few hp over a
+/// long build; the caller snaps hp to max_hp when the job completes.
+pub fn hp_step(max_hp: i32, work_delta: Fx) -> i32 {
+    if work_delta <= Fx::ZERO {
+        return 0;
+    }
+    let span = (max_hp - site_start_hp(max_hp)).max(0);
+    (Fx::from_num(span) * work_delta).floor().to_num::<i32>().max(1)
+}
+
+/// `cost * num / den`, floored per resource in integer math so two peers can
+/// never disagree by a rounding bit.
+fn scaled_cost(cost: &ResourceCost, num: i64, den: i64) -> ResourceCost {
+    let f = |c: i32| {
+        if den <= 0 || num <= 0 {
+            return 0;
+        }
+        ((c.max(0) as i64 * num) / den).min(i32::MAX as i64) as i32
+    };
+    ResourceCost::new(f(cost.wood), f(cost.stone), f(cost.food), f(cost.gold))
+}
+
+/// What cancelling an unfinished site hands back: the labour not yet spent.
+pub fn cancel_refund(cost: &ResourceCost, work: Fx) -> ResourceCost {
+    let left = Fx::ONE - work.clamp(Fx::ZERO, Fx::ONE);
+    let f = |c: i32| (Fx::from_num(c.max(0)) * left).floor().to_num::<i32>().max(0);
+    ResourceCost::new(f(cost.wood), f(cost.stone), f(cost.food), f(cost.gold))
+}
+
+/// Demolition returns half the build cost SCALED BY HEALTH — a burnt-out shell
+/// is worth what it looks like, so razing is never a way to launder damage.
+pub fn demolish_refund(cost: &ResourceCost, hp: i32, max_hp: i32) -> ResourceCost {
+    let m = max_hp.max(1) as i64;
+    scaled_cost(cost, DEMOLISH_REFUND_PCT as i64 * hp.clamp(0, max_hp.max(1)) as i64, 100 * m)
+}
+
+/// What healing `hp_added` costs. Full repair from a wreck is REPAIR_COST_PCT
+/// of the build cost, so it never exceeds building anew.
+pub fn repair_charge(cost: &ResourceCost, hp_added: i32, max_hp: i32) -> ResourceCost {
+    let m = max_hp.max(1) as i64;
+    scaled_cost(cost, REPAIR_COST_PCT as i64 * hp_added.clamp(0, max_hp.max(1)) as i64, 100 * m)
+}
+
+/// True when a gatherer may deposit `res` here.
+pub fn accepts(def: &BuildingDef, res: ResourceType) -> bool {
+    def.accepts & res_bit(res) != 0
+}
+
+/// A gate is a door in YOUR line, not a breach in it: `gates` are (tile key,
+/// owner) pairs and only the owner walks through. Gates are 1x1 and few, so a
+/// linear scan beats allocating a per-owner map every pathing tick.
+pub fn gate_blocks(gates: &[(i32, u64)], key: i32, viewer: u64) -> bool {
+    gates.iter().any(|(k, owner)| *k == key && *owner != viewer)
 }
 
 /// Why a placement was refused — the ghost tints red for any of these and the
@@ -150,6 +206,32 @@ pub enum PlaceError {
     /// Hillside too steep, or the ground under the footprint varies more than
     /// one foundation plane can absorb without walls clipping through it.
     TooSteep,
+    /// Not on the build bar at all (the Keep; the Watchtower, which is an
+    /// upgrade of a standing Tower).
+    NotBuildable,
+    /// A prerequisite structure is missing — carries the first one lacking.
+    MissingPrereq(BuildingKind),
+    /// Already at this structure's `max_count`.
+    TooMany,
+    /// The stockpile does not cover the cost.
+    CannotAfford,
+}
+
+/// One ASCII line explaining a refusal, for the ghost and the command card.
+pub fn place_error_text(e: PlaceError) -> String {
+    match e {
+        PlaceError::Terrain => "Cannot build here".into(),
+        PlaceError::Occupied => "Blocked".into(),
+        PlaceError::NeedsWaterside => "Needs a shoreline".into(),
+        PlaceError::OutsideTown => "Outside your town".into(),
+        PlaceError::NoApproach => "No way in".into(),
+        PlaceError::PoorSoil => "Soil too poor to farm".into(),
+        PlaceError::TooSteep => "Ground too steep".into(),
+        PlaceError::NotBuildable => "Cannot be built".into(),
+        PlaceError::MissingPrereq(k) => format!("Requires {}", building_def(k).label),
+        PlaceError::TooMany => "Already built".into(),
+        PlaceError::CannotAfford => "Cannot afford".into(),
+    }
 }
 
 /// Steepest ground a foundation may sit on. A third of the cliff threshold, so
@@ -189,6 +271,30 @@ pub fn soil_quality(seed: u32, footprint: i32, x: Fx, y: Fx) -> Fx {
     sum / Fx::from_num(tiles.len() as i32)
 }
 
+/// Every tile of a footprint must be buildable ground, clear of other work and
+/// no steeper than a foundation can sit on.
+fn check_ground<O: Fn(i32, i32) -> bool>(
+    seed: u32,
+    tiles: &[Tile],
+    occupied: O,
+) -> Result<(), PlaceError> {
+    let half = crate::fx!("0.5");
+    for t in tiles {
+        if !is_buildable_tile(seed, t.tx, t.ty) {
+            return Err(PlaceError::Terrain);
+        }
+        if occupied(t.tx, t.ty) {
+            return Err(PlaceError::Occupied);
+        }
+        if crate::terrain::slope_at(seed, Fx::from_num(t.tx) + half, Fx::from_num(t.ty) + half)
+            > BUILD_SLOPE_MAX
+        {
+            return Err(PlaceError::TooSteep);
+        }
+    }
+    Ok(())
+}
+
 /// The COMPLETE placement rule set, shared by the build command, the wall
 /// drag, the AI planner and the client's ghost preview.
 pub fn check_place<O: Fn(i32, i32) -> bool>(
@@ -201,19 +307,7 @@ pub fn check_place<O: Fn(i32, i32) -> bool>(
 ) -> Result<(), PlaceError> {
     let def = building_def(kind);
     let tiles = footprint_tiles(def.footprint, x, y);
-    for t in &tiles {
-        if !is_buildable_tile(seed, t.tx, t.ty) {
-            return Err(PlaceError::Terrain);
-        }
-        if occupied(t.tx, t.ty) {
-            return Err(PlaceError::Occupied);
-        }
-        if crate::terrain::slope_at(seed, Fx::from_num(t.tx) + crate::fx!("0.5"), Fx::from_num(t.ty) + crate::fx!("0.5"))
-            > BUILD_SLOPE_MAX
-        {
-            return Err(PlaceError::TooSteep);
-        }
-    }
+    check_ground(seed, &tiles, occupied)?;
     if footprint_relief(seed, def.footprint, x, y) > FOUNDATION_RELIEF {
         return Err(PlaceError::TooSteep);
     }
@@ -243,6 +337,39 @@ pub fn check_place<O: Fn(i32, i32) -> bool>(
     }
     if !def.passable && !has_passable_approach(def.footprint, x, y, |tx, ty| is_passable(seed, tx, ty)) {
         return Err(PlaceError::NoApproach);
+    }
+    Ok(())
+}
+
+/// `check_place` plus the rules that used to live in the build COMMAND —
+/// buildability, the full prereq set, the per-kind limit and affordability. The
+/// ghost, the command and the AI all ask this, so a preview can never turn
+/// green on a placement the command will refuse.
+#[allow(clippy::too_many_arguments)]
+pub fn check_build<O: Fn(i32, i32) -> bool>(
+    seed: u32,
+    kind: BuildingKind,
+    x: Fx,
+    y: Fx,
+    occupied: O,
+    own_buildings: &[V2],
+    owned_kinds: &HashSet<BuildingKind>,
+    own_counts: &[i32],
+    stock: &Stockpile,
+) -> Result<(), PlaceError> {
+    let def = building_def(kind);
+    if !def.buildable {
+        return Err(PlaceError::NotBuildable);
+    }
+    if let Some(missing) = has_prereq_all(owned_kinds, def) {
+        return Err(PlaceError::MissingPrereq(missing));
+    }
+    if def.max_count > 0 && own_counts.get(kind as usize).copied().unwrap_or(0) >= def.max_count {
+        return Err(PlaceError::TooMany);
+    }
+    check_place(seed, kind, x, y, occupied, own_buildings)?;
+    if !stock.can_afford(&def.cost) {
+        return Err(PlaceError::CannotAfford);
     }
     Ok(())
 }
@@ -299,12 +426,133 @@ mod tests {
     }
 
     #[test]
-    fn can_place_respects_passable_and_occupied() {
-        let pass = |_: i32, _: i32| true;
-        let none = |_: i32, _: i32| false;
-        assert!(can_place(BuildingKind::House, crate::fx!("20"), crate::fx!("20"), pass, none));
-        let water = |x: i32, _: i32| x < 19; // a wall of water at x>=19
-        assert!(!can_place(BuildingKind::House, crate::fx!("20"), crate::fx!("20"), water, none));
+    fn check_ground_refuses_water_and_other_peoples_walls() {
+        let seed = 1;
+        let site = crate::terrain::find_keep_site(seed, 0, 2);
+        let tiles = footprint_tiles(2, site.x, site.y);
+        assert_eq!(check_ground(seed, &tiles, |_, _| false), Ok(()));
+        assert_eq!(check_ground(seed, &tiles, |_, _| true), Err(PlaceError::Occupied));
+        // out in the ocean there is no ground at all
+        let sea = footprint_tiles(2, crate::fx!("1"), crate::fx!("1"));
+        assert_eq!(check_ground(seed, &sea, |_, _| false), Err(PlaceError::Terrain));
+    }
+
+    #[test]
+    fn builders_help_less_the_more_of_them_there_are() {
+        let mut last = build_rate(0);
+        for n in 1..=MAX_BUILDERS {
+            let r = build_rate(n);
+            assert!(r > last, "{n} builders must beat {}", n - 1);
+            assert!(
+                r - last <= build_rate(n - 1) - build_rate((n - 2).max(0)) || n <= 1,
+                "returns must diminish at {n}"
+            );
+            last = r;
+        }
+        assert_eq!(build_rate(MAX_BUILDERS + 40), build_rate(MAX_BUILDERS), "saturates");
+        assert_eq!(build_rate(-3), build_rate(0));
+    }
+
+    #[test]
+    fn work_and_hp_advance_together() {
+        let t = crate::fx!("25");
+        // one builder finishes a 25 s job in 25 s of steps (fixed-point leaves
+        // the last step short of exactly 1, so it tops out on the next one)
+        let step = work_step(1, crate::fx!("0.2"), t);
+        assert!(step * Fx::from_num(124) < Fx::ONE);
+        assert!(step * Fx::from_num(126) >= Fx::ONE);
+        assert!(work_step(4, crate::fx!("0.2"), t) > step * Fx::from_num(2), "a crew is faster");
+        // no build time == stands on the spot
+        assert_eq!(work_step(0, crate::fx!("0.2"), Fx::ZERO), Fx::ONE);
+        // a site is frail but real, and the build tops it up to full
+        assert_eq!(site_start_hp(1500), 150);
+        assert_eq!(site_start_hp(4), 1, "even the frailest site has a hit point");
+        assert_eq!(hp_step(1000, Fx::ONE), 900);
+        assert_eq!(hp_step(1000, Fx::ZERO), 0);
+        assert!(hp_step(1000, crate::fx!("0.0001")) >= 1, "progress is always visible");
+    }
+
+    #[test]
+    fn refunds_never_pay_more_than_was_spent() {
+        let cost = crate::economy::ResourceCost::new(70, 20, 0, 0);
+        // cancel returns the unspent remainder
+        assert_eq!(cancel_refund(&cost, Fx::ZERO), cost);
+        assert_eq!(cancel_refund(&cost, Fx::ONE), crate::economy::ResourceCost::ZERO);
+        let half = cancel_refund(&cost, crate::fx!("0.5"));
+        assert_eq!((half.wood, half.stone), (35, 10));
+        // demolish scales with what is left standing
+        assert_eq!(demolish_refund(&cost, 500, 500).wood, 35);
+        assert_eq!(demolish_refund(&cost, 1, 500).wood, 0, "a shell is worth a shell");
+        assert_eq!(demolish_refund(&cost, 0, 500), crate::economy::ResourceCost::ZERO);
+        // repair never costs more than the building did
+        for hp in 0..=500 {
+            let c = repair_charge(&cost, hp, 500);
+            assert!(c.wood <= cost.wood && c.stone <= cost.stone, "repair overcharged at {hp}");
+        }
+        assert_eq!(repair_charge(&cost, 500, 500).wood, 35);
+    }
+
+    #[test]
+    fn a_gate_is_a_door_not_a_breach() {
+        let gates = [(tile_key(10, 10), 7u64)];
+        assert!(!gate_blocks(&gates, tile_key(10, 10), 7), "the owner walks through");
+        assert!(gate_blocks(&gates, tile_key(10, 10), 9), "the enemy does not");
+        assert!(!gate_blocks(&gates, tile_key(11, 10), 9), "and only on its own tile");
+    }
+
+    #[test]
+    fn a_site_does_nothing_until_it_is_finished() {
+        assert!(!operational(BuildState::Site));
+        assert!(operational(BuildState::Complete));
+        assert!(operational(BuildState::Upgrading), "an upgrading tower still fires");
+    }
+
+    #[test]
+    fn check_build_refuses_what_the_command_would_refuse() {
+        let seed = 1;
+        let site = crate::terrain::find_keep_site(seed, 0, 2);
+        let free = |_: i32, _: i32| false;
+        let rich = Stockpile { wood: 999, stone: 999, food: 999, gold: 999 };
+        let broke = Stockpile::default();
+        let mut owned: HashSet<BuildingKind> = HashSet::new();
+        owned.insert(BuildingKind::Keep);
+        let go = |kind, owned: &HashSet<BuildingKind>, counts: &[i32], stock: &Stockpile| {
+            check_build(seed, kind, site.x, site.y, free, &[], owned, counts, stock)
+        };
+
+        assert_eq!(
+            go(BuildingKind::Keep, &owned, &[], &rich),
+            Err(PlaceError::NotBuildable),
+            "the keep is not on the bar"
+        );
+        assert_eq!(
+            go(BuildingKind::Stable, &owned, &[], &rich),
+            Err(PlaceError::MissingPrereq(BuildingKind::Barracks))
+        );
+        // a house needs nothing but ground and coin
+        assert_eq!(go(BuildingKind::House, &owned, &[], &rich), Ok(()));
+        assert_eq!(go(BuildingKind::House, &owned, &[], &broke), Err(PlaceError::CannotAfford));
+    }
+
+    #[test]
+    fn every_refusal_reaches_the_player_as_ascii() {
+        let all = [
+            PlaceError::Terrain,
+            PlaceError::Occupied,
+            PlaceError::NeedsWaterside,
+            PlaceError::OutsideTown,
+            PlaceError::NoApproach,
+            PlaceError::PoorSoil,
+            PlaceError::TooSteep,
+            PlaceError::NotBuildable,
+            PlaceError::MissingPrereq(BuildingKind::Barracks),
+            PlaceError::TooMany,
+            PlaceError::CannotAfford,
+        ];
+        for e in all {
+            let t = place_error_text(e);
+            assert!(t.is_ascii() && !t.is_empty(), "{e:?} -> {t:?}");
+        }
     }
 
     #[test]

@@ -3,13 +3,13 @@
 //! red by validity, following the cursor; wall drags show the whole line.
 
 use crate::camera::{GameCamera, pick_ground};
-use crate::input::{GhostRot, InputMode, WallDrag, build_cells, place_valid};
+use crate::input::{GhostRot, InputMode, PlaceHint, WallDrag, build_cells, build_probe};
 use crate::render::sync::{RenderAssets, RenderMaterials};
 use crate::terrain::{HeightField, height_at};
 use crate::LocalPlayer;
 use bevy::prelude::*;
 use saladin_protocol::{Building, GameId, Owner, Player, Pos, ResourceNode, WorldConfig};
-use saladin_sim::{BuildingKind, Occupant, building_def, occupancy_set};
+use saladin_sim::{BuildingKind, Stockpile, building_def, operational};
 
 /// One ghost cell (the root holds nothing; each cell is its own mesh entity).
 #[derive(Component)]
@@ -37,9 +37,13 @@ pub fn update_ghost(
     q_players: Query<&Player>,
     q_cells: Query<Entity, With<GhostCell>>,
     ghost_rot: Res<GhostRot>,
+    mut hint: ResMut<PlaceHint>,
 ) {
     for e in &q_cells {
         commands.entity(e).despawn();
+    }
+    if hint.0.is_some() {
+        hint.0 = None;
     }
     let InputMode::Build(kind) = *mode else { return };
     let Ok(window) = windows.single() else { return };
@@ -48,26 +52,18 @@ pub fn update_ghost(
     let field_ref = field.as_deref();
     let Some(g) = pick_ground(camera, cam_tf, cursor, field_ref) else { return };
 
-    let occ_list: Vec<Occupant> =
-        q_buildings.iter().map(|(p, b, _)| Occupant { kind: b.kind, pos: p.pos }).collect();
-    let mut occ = occupancy_set(&occ_list, true);
-    for p in &q_nodes {
-        occ.insert(saladin_sim::tile_key(p.pos.x.to_num::<i32>(), p.pos.y.to_num::<i32>()));
-    }
-    // own wall tiles are transparent to a composing gate/tower — the ghost
-    // previews exactly what the sim will accept (and absorb)
-    if saladin_sim::composes_with_walls(kind) {
-        for (p, b, o) in &q_buildings {
-            if o.0 == local.0 && b.kind == BuildingKind::Wall {
-                occ.remove(&saladin_sim::tile_key(p.pos.x.to_num::<i32>(), p.pos.y.to_num::<i32>()));
-            }
-        }
-    }
-    let own: Vec<saladin_sim::V2> = q_buildings
-        .iter()
-        .filter(|(_, _, o)| o.0 == local.0)
-        .map(|(p, _, _)| p.pos)
-        .collect();
+    let me = q_players.iter().find(|p| p.player_id == local.0);
+    let stock: Stockpile = me.map(|p| p.stock).unwrap_or_default();
+    // ONE gathering, shared with the command that ships: a preview can never
+    // turn green on a placement `build` will refuse
+    let mut probe = build_probe(
+        kind,
+        local.0,
+        cfg.seed,
+        stock,
+        q_buildings.iter().map(|(p, b, o)| (p.pos, b.kind, o.0, operational(b.state))),
+        q_nodes.iter().map(|p| p.pos),
+    );
 
     // wall pillars are rotationally symmetric; everything else uses R-rotation
     let yaw = if kind == BuildingKind::Wall {
@@ -75,18 +71,25 @@ pub fn update_ghost(
     } else {
         ghost_rot.0 as f32 * std::f32::consts::FRAC_PI_2
     };
-    let faction = q_players
-        .iter()
-        .find(|p| p.player_id == local.0)
-        .map(|p| p.faction)
-        .unwrap_or(saladin_sim::Faction::Ayyubid);
+    let faction = me.map(|p| p.faction).unwrap_or(saladin_sim::Faction::Ayyubid);
+    let def = building_def(kind);
     for (cx, cy) in build_cells(kind, g.x, g.z, wall_drag.0) {
-        let valid = place_valid(kind, cx, cy, cfg.seed, &occ, &own);
+        let verdict = probe.check(kind, cx, cy);
+        if let Err(e) = verdict
+            && hint.0.is_none()
+        {
+            hint.0 = Some(e);
+        }
+        // a dragged wall is paid for tile by tile: the ghost has to show where
+        // the money runs out, not colour the whole run by the first segment
+        if verdict.is_ok() && kind == BuildingKind::Wall {
+            probe.stock.pay(&def.cost);
+        }
         let y = field_ref.map(|f| height_at(f, cx, cy)).unwrap_or(0.0);
         commands.spawn((
             GhostCell,
             Mesh3d(assets.buildings[kind as usize * 2 + faction as usize].clone()),
-            MeshMaterial3d(if valid { rmats.ghost_ok.clone() } else { rmats.ghost_bad.clone() }),
+            MeshMaterial3d(if verdict.is_ok() { rmats.ghost_ok.clone() } else { rmats.ghost_bad.clone() }),
             Transform::from_xyz(cx, y, cy).with_rotation(Quat::from_rotation_y(yaw)),
         ));
     }

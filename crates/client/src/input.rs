@@ -5,12 +5,15 @@
 use crate::camera::{GameCamera, pick_ground};
 use crate::selection::{ControlGroups, Selection};
 use crate::terrain::{HeightField, height_at};
+use crate::ui::hud::HudRects;
 use crate::{LocalInput, LocalPlayer};
 use bevy::prelude::*;
-use saladin_protocol::{Building, GameId, Owner, PlayerCommand, Pos, ResourceNode, Unit};
+use saladin_protocol::{Building, GameId, Owner, Player, PlayerCommand, Pos, ResourceNode, Unit};
 use saladin_sim::{
-    BuildingKind, Fx, V2, building_def, can_garrison, can_host_garrison,
-    footprint_center, garrison_free_slots, occupancy_set, tile_key, unit_def,
+    BuildingKind, Fx, GatherState, PlaceError, Stockpile, V2, building_def, can_garrison,
+    can_host_garrison,
+    check_build, footprint_center, garrison_free_slots, occupancy_set, operational, tile_key,
+    unit_def,
 };
 use std::collections::HashSet;
 
@@ -37,6 +40,12 @@ pub struct WallDrag(pub Option<(i32, i32)>);
 /// Ghost orientation in quarter turns; R cycles it while placing a building.
 #[derive(Resource, Default, Clone, Copy)]
 pub struct GhostRot(pub u8);
+
+/// Why the ghost under the cursor is red, published by the placement preview so
+/// the mode hint can say it out loud instead of showing one silent red box for
+/// ten different refusals.
+#[derive(Resource, Default, Clone, Copy)]
+pub struct PlaceHint(pub Option<PlaceError>);
 
 #[derive(Resource, Default)]
 pub struct DemolishDrag {
@@ -180,36 +189,80 @@ fn selected_kind(
     q_units.iter().find(|(g, ..)| g.0 == *id).map(|(_, _, _, u)| u.kind)
 }
 
-fn occupied_tiles(q_buildings: &Query<(&GameId, &Owner, &Pos, &Building)>) -> HashSet<i32> {
-    let occ: Vec<saladin_sim::Occupant> =
-        q_buildings.iter().map(|(_, _, p, b)| saladin_sim::Occupant { kind: b.kind, pos: p.pos }).collect();
-    occupancy_set(&occ, true)
-}
-
-/// Tile keys of `me`'s wall segments — transparent to composing defense pieces
-/// (the sim absorbs the segment on build; the ghost must agree).
-pub fn own_wall_keys(
-    q_buildings: &Query<(&GameId, &Owner, &Pos, &Building)>,
-    me: u64,
-) -> HashSet<i32> {
-    q_buildings
-        .iter()
-        .filter(|(_, o, _, b)| o.0 == me && b.kind == BuildingKind::Wall)
-        .map(|(_, _, p, _)| tile_key(p.pos.x.to_num::<i32>(), p.pos.y.to_num::<i32>()))
-        .collect()
-}
-
-/// Client-side placement validity (mirror of the module's gate, for the ghost).
-pub fn place_valid(
-    kind: BuildingKind,
-    cx: f32,
-    cy: f32,
+/// Everything `check_build` needs, gathered once — the client's mirror of the
+/// sim's `BuildContext`. Built HERE and nowhere else so the ghost preview, the
+/// mode hint and the command that ships all answer from one gathering: a
+/// preview can never turn green on a placement the command will refuse.
+///
+/// A SITE counts toward the per-kind limit but satisfies no prereq, because an
+/// unfinished barracks trains nothing.
+pub struct BuildProbe {
+    occ: HashSet<i32>,
+    own: Vec<V2>,
+    owned_kinds: HashSet<BuildingKind>,
+    counts: [i32; 16],
+    pub stock: Stockpile,
     seed: u32,
-    occ: &HashSet<i32>,
-    own: &[saladin_sim::V2],
-) -> bool {
-    let occupied = |tx: i32, ty: i32| occ.contains(&tile_key(tx, ty));
-    saladin_sim::check_place(seed, kind, Fx::from_num(cx), Fx::from_num(cy), occupied, own).is_ok()
+}
+
+impl BuildProbe {
+    pub fn check(&self, kind: BuildingKind, cx: f32, cy: f32) -> Result<(), PlaceError> {
+        let occupied = |tx: i32, ty: i32| self.occ.contains(&tile_key(tx, ty));
+        check_build(
+            self.seed,
+            kind,
+            Fx::from_num(cx),
+            Fx::from_num(cy),
+            occupied,
+            &self.own,
+            &self.owned_kinds,
+            &self.counts,
+            &self.stock,
+        )
+    }
+}
+
+/// `buildings` yields (pos, kind, owner, state-is-operational); `nodes` yields
+/// node positions. Own wall tiles are transparent to a composing gate or tower
+/// — the sim absorbs the segment on build, so the preview must agree.
+pub fn build_probe(
+    kind: BuildingKind,
+    me: u64,
+    seed: u32,
+    stock: Stockpile,
+    buildings: impl Iterator<Item = (V2, BuildingKind, u64, bool)>,
+    nodes: impl Iterator<Item = V2>,
+) -> BuildProbe {
+    let composes = saladin_sim::composes_with_walls(kind);
+    let mut occ_list = Vec::new();
+    let mut own = Vec::new();
+    let mut owned_kinds = HashSet::new();
+    let mut counts = [0i32; 16];
+    let mut own_walls = Vec::new();
+    for (pos, k, owner, live) in buildings {
+        occ_list.push(saladin_sim::Occupant { kind: k, pos });
+        if owner != me {
+            continue;
+        }
+        own.push(pos);
+        counts[k as usize] += 1;
+        if live {
+            owned_kinds.insert(k);
+        }
+        if k == BuildingKind::Wall {
+            own_walls.push(tile_key(pos.x.to_num::<i32>(), pos.y.to_num::<i32>()));
+        }
+    }
+    let mut occ = occupancy_set(&occ_list, true);
+    for p in nodes {
+        occ.insert(tile_key(p.x.to_num::<i32>(), p.y.to_num::<i32>()));
+    }
+    if composes {
+        for k in own_walls {
+            occ.remove(&k);
+        }
+    }
+    BuildProbe { occ, own, owned_kinds, counts, stock, seed }
 }
 
 /// Placement cells under the cursor: one footprint, or the dragged wall line.
@@ -225,6 +278,26 @@ pub fn build_cells(kind: BuildingKind, hx: f32, hz: f32, wall_drag: Option<(i32,
     let def = building_def(kind);
     let c = footprint_center(def.footprint, Fx::from_num(hx), Fx::from_num(hz));
     vec![(c.x.to_num::<f32>(), c.y.to_num::<f32>())]
+}
+
+/// `build_probe` fed from the pointer system's own queries.
+fn probe_from_world(
+    kind: BuildingKind,
+    me: u64,
+    seed: u32,
+    q_players: &Query<&Player>,
+    q_buildings: &Query<(&GameId, &Owner, &Pos, &Building)>,
+    q_nodes: &Query<(&GameId, &Pos, &ResourceNode)>,
+) -> BuildProbe {
+    let stock = q_players.iter().find(|p| p.player_id == me).map(|p| p.stock).unwrap_or_default();
+    build_probe(
+        kind,
+        me,
+        seed,
+        stock,
+        q_buildings.iter().map(|(_, o, p, b)| (p.pos, b.kind, o.0, operational(b.state))),
+        q_nodes.iter().map(|(_, p, _)| p.pos),
+    )
 }
 
 // ── the main pointer system ──────────────────────────────────────────────────
@@ -246,17 +319,19 @@ pub fn pointer_input(
         ResMut<DemolishDrag>,
         ResMut<LastClick>,
     ),
+    hud: Res<HudRects>,
     q_units: Query<(&GameId, &Owner, &Pos, &Unit)>,
     q_buildings: Query<(&GameId, &Owner, &Pos, &Building)>,
     q_nodes: Query<(&GameId, &Pos, &ResourceNode)>,
+    q_players: Query<&Player>,
 ) {
     let me = local.0;
     let Ok(window) = windows.single() else { return };
     let Ok((camera, cam_tf)) = cam.single() else { return };
     let Some(cursor) = window.cursor_position() else { return };
     let field_ref = field.as_deref();
-    // HUD bands: top resource bar + bottom build/command bar swallow clicks.
-    let on_hud = cursor.y < 40.0 || cursor.y > window.height() - 120.0;
+    // the HUD's OWN measured rects, not a guessed band
+    let on_hud = hud.hit(cursor);
 
     // ── demolish mode ─────────────────────────────────────────────────────────
     if *mode == InputMode::Demolish {
@@ -292,19 +367,30 @@ pub fn pointer_input(
             return;
         }
         let ground = pick_ground(camera, cam_tf, cursor, field_ref);
-        if mouse.just_pressed(MouseButton::Left) && !on_hud {
-            if let Some(g) = ground {
-                if kind == BuildingKind::Wall {
-                    wall_drag.0 = Some((g.x.floor() as i32, g.z.floor() as i32));
-                } else {
-                    commit_build(kind, g.x, g.z, None, me, cfg.seed, ghost_rot.0, &q_buildings, &mut input);
-                }
+        if mouse.just_pressed(MouseButton::Left)
+            && !on_hud
+            && let Some(g) = ground
+        {
+            if kind == BuildingKind::Wall {
+                wall_drag.0 = Some((g.x.floor() as i32, g.z.floor() as i32));
+            } else {
+                let crew = selected_builders(&selection, &q_units, me, Vec2::new(g.x, g.z));
+                let probe = probe_from_world(kind, me, cfg.seed, &q_players, &q_buildings, &q_nodes);
+                commit_build(kind, g.x, g.z, None, me, &probe, ghost_rot.0, &crew, &mut input);
             }
         }
-        if mouse.just_released(MouseButton::Left) && kind == BuildingKind::Wall {
-            if let (Some(start), Some(g)) = (wall_drag.0.take(), ground) {
-                commit_build(kind, g.x, g.z, Some(start), me, cfg.seed, ghost_rot.0, &q_buildings, &mut input);
-            }
+        if mouse.just_released(MouseButton::Left)
+            && kind == BuildingKind::Wall
+            && let (Some(start), Some(g)) = (wall_drag.0.take(), ground)
+        {
+            let crew = selected_builders(
+                &selection,
+                &q_units,
+                me,
+                Vec2::new(start.0 as f32 + 0.5, start.1 as f32 + 0.5),
+            );
+            let probe = probe_from_world(kind, me, cfg.seed, &q_players, &q_buildings, &q_nodes);
+            commit_build(kind, g.x, g.z, Some(start), me, &probe, ghost_rot.0, &crew, &mut input);
         }
         return;
     }
@@ -360,8 +446,37 @@ pub fn pointer_input(
                         voice.0.push((k, crate::audio::Bark::Attack));
                     }
                 } else {
-                    let bkind = q_buildings.iter().find(|(g, ..)| g.0 == target).map(|(_, _, _, b)| b.kind);
-                    let host = bkind.map(|k| building_def(k)).filter(|d| can_host_garrison(d));
+                    // hands first: a structure that is unfinished, rising or
+                    // hurt takes the peasants in the selection and puts them on
+                    // it — the same right-click that gathers a tree
+                    let row = q_buildings.iter().find(|(g, ..)| g.0 == target).map(|(_, _, _, b)| *b);
+                    let mask = q_players.iter().find(|p| p.player_id == me).map(|p| p.tech_mask).unwrap_or(0);
+                    let wants_work = row.is_some_and(|b| {
+                        !operational(b.state)
+                            || b.state == saladin_sim::BuildState::Upgrading
+                            || b.hp < saladin_sim::effective_building_def(b.kind, mask).max_hp
+                    });
+                    let mut crew: HashSet<u64> = HashSet::new();
+                    if wants_work {
+                        let mut ids: Vec<u64> = selection.units.iter().copied().collect();
+                        ids.sort_unstable();
+                        for id in ids {
+                            if crew.len() >= saladin_sim::MAX_BUILDERS as usize {
+                                break;
+                            }
+                            if let Some((_, _, _, u)) = q_units.iter().find(|(g, ..)| g.0 == id)
+                                && unit_def(u.kind).carry > 0
+                                && u.garrisoned_in == 0
+                            {
+                                input.0.push(PlayerCommand::Repair { player_id: me, unit: id, building: target });
+                                crew.insert(id);
+                            }
+                        }
+                        if !crew.is_empty() {
+                            voice.0.push((saladin_sim::UnitKind::Peasant, crate::audio::Bark::Ack));
+                        }
+                    }
+                    let host = row.map(|b| building_def(b.kind)).filter(|d| can_host_garrison(d));
                     if let Some(def) = host {
                         let occupants =
                             q_units.iter().filter(|(_, _, _, u)| u.garrisoned_in == target).count() as i32;
@@ -371,20 +486,29 @@ pub fn pointer_input(
                             if free <= 0 {
                                 break;
                             }
-                            if let Some((_, _, _, u)) = q_units.iter().find(|(g, ..)| g.0 == id) {
-                                if can_garrison(unit_def(u.kind)) {
-                                    input.0.push(PlayerCommand::Garrison { player_id: me, unit: id, building: target });
-                                    free -= 1;
-                                    any = true;
-                                }
+                            // a peasant already sent to the hammer is not also
+                            // sent inside — the later order would just win
+                            if crew.contains(&id) {
+                                continue;
+                            }
+                            if let Some((_, _, _, u)) = q_units.iter().find(|(g, ..)| g.0 == id)
+                                && can_garrison(unit_def(u.kind))
+                            {
+                                input.0.push(PlayerCommand::Garrison { player_id: me, unit: id, building: target });
+                                free -= 1;
+                                any = true;
                             }
                         }
-                        if !any {
-                            if let Some((_, _, p, _)) = q_buildings.iter().find(|(g, ..)| g.0 == target) {
-                                command_move(&selection, me, p.pos.x.to_num(), p.pos.y.to_num(), &mut input);
-                            }
+                        if !any
+                            && crew.is_empty()
+                            && let Some((_, _, p, _)) =
+                                q_buildings.iter().find(|(g, ..)| g.0 == target)
+                        {
+                            command_move(&selection, me, p.pos.x.to_num(), p.pos.y.to_num(), &mut input);
                         }
-                    } else if let Some((_, _, p, _)) = q_buildings.iter().find(|(g, ..)| g.0 == target) {
+                    } else if crew.is_empty()
+                        && let Some((_, _, p, _)) = q_buildings.iter().find(|(g, ..)| g.0 == target)
+                    {
                         command_move(&selection, me, p.pos.x.to_num(), p.pos.y.to_num(), &mut input);
                     }
                 }
@@ -529,25 +653,62 @@ pub fn rotate_ghost(
     }
 }
 
+/// The crew a build order ships with: the peasants the player has selected, or
+/// — when none are — the nearest hands not already on a job.
+///
+/// The fallback is not a nicety. A site is paid for in FULL the tick it is
+/// founded and does nothing at all until a hammer reaches it, so an order sent
+/// with an empty crew spends the whole cost on a foundation that never rises
+/// and says so only if the player thinks to click it. The bot already staffs
+/// every site it pays for (`staff_jobs`) and the command card's Send Builders
+/// already picks by the same rule; this is the third caller of one policy, not
+/// a new one. Ids ride in the command, so every peer still agrees.
+fn selected_builders(
+    selection: &Selection,
+    q_units: &Query<(&GameId, &Owner, &Pos, &Unit)>,
+    me: u64,
+    at: Vec2,
+) -> Vec<u64> {
+    let hands = || {
+        q_units.iter().filter(move |(_, o, _, u)| {
+            o.0 == me && u.garrisoned_in == 0 && unit_def(u.kind).carry > 0
+        })
+    };
+    let mut ids: Vec<u64> =
+        hands().filter(|(g, ..)| selection.units.contains(&g.0)).map(|(g, ..)| g.0).collect();
+    if !ids.is_empty() {
+        ids.sort_unstable();
+        ids.truncate(saladin_sim::MAX_BUILDERS as usize);
+        return ids;
+    }
+    let here = V2::new(Fx::from_num(at.x), Fx::from_num(at.y));
+    let mut idle: Vec<(Fx, u64)> = hands()
+        .filter(|(_, _, _, u)| {
+            matches!(u.gather_state, GatherState::Idle | GatherState::ToResource) && u.job_site == 0
+        })
+        .map(|(g, _, p, _)| (saladin_sim::dist2(p.pos, here), g.0))
+        .collect();
+    idle.sort_unstable();
+    idle.truncate(DEFAULT_CREW);
+    idle.into_iter().map(|(_, id)| id).collect()
+}
+
+/// Hands pulled off the fields when a build order names none. Small on purpose:
+/// enough that the site rises, few enough that the economy notices it left.
+const DEFAULT_CREW: usize = 2;
+
+#[allow(clippy::too_many_arguments)]
 fn commit_build(
     kind: BuildingKind,
     hx: f32,
     hz: f32,
     wall_start: Option<(i32, i32)>,
     me: u64,
-    seed: u32,
+    probe: &BuildProbe,
     facing: u8,
-    q_buildings: &Query<(&GameId, &Owner, &Pos, &Building)>,
+    builders: &[u64],
     input: &mut LocalInput,
 ) {
-    let mut occ = occupied_tiles(q_buildings);
-    if saladin_sim::composes_with_walls(kind) {
-        for k in own_wall_keys(q_buildings, me) {
-            occ.remove(&k);
-        }
-    }
-    let own: Vec<V2> =
-        q_buildings.iter().filter(|(_, o, _, _)| o.0 == me).map(|(_, _, p, _)| p.pos).collect();
     let cells = build_cells(kind, hx, hz, wall_start);
     if kind == BuildingKind::Wall {
         // send the whole dragged line — the sim re-validates per segment with
@@ -555,17 +716,22 @@ fn commit_build(
         let tiles: Vec<(i32, i32)> =
             cells.iter().map(|&(cx, cy)| (cx.floor() as i32, cy.floor() as i32)).collect();
         if !tiles.is_empty() {
-            input.0.push(PlayerCommand::PlaceWall { player_id: me, tiles });
+            input.0.push(PlayerCommand::PlaceWall {
+                player_id: me,
+                tiles,
+                builders: builders.to_vec(),
+            });
         }
         return;
     }
     for (cx, cy) in cells {
-        if place_valid(kind, cx, cy, seed, &occ, &own) {
+        if probe.check(kind, cx, cy).is_ok() {
             input.0.push(PlayerCommand::Build {
                 player_id: me,
                 kind,
                 pos: V2::new(Fx::from_num(cx), Fx::from_num(cy)),
                 facing,
+                builders: builders.to_vec(),
             });
         }
     }
@@ -644,7 +810,8 @@ pub fn spawn_drag_box(mut commands: Commands) {
 
 #[cfg(test)]
 mod tests {
-    use super::line_tiles;
+    use super::*;
+    use saladin_sim::Stockpile;
 
     #[test]
     fn wall_lines_go_any_direction_and_stay_connected() {
@@ -664,5 +831,35 @@ mod tests {
     fn wall_line_is_capped() {
         let tiles = line_tiles((0, 0), (500, 500));
         assert!(tiles.len() <= super::MAX_WALL_LEN as usize + 1);
+    }
+
+    /// The ghost asks the SAME gate the command does, from the same gathering:
+    /// a hole in the ground is not a barracks, so it unlocks nothing.
+    #[test]
+    fn a_site_previews_as_locked_until_it_is_finished() {
+        let rich = Stockpile { wood: 999, stone: 999, food: 999, gold: 999 };
+        let at = V2::new(Fx::from_num(10), Fx::from_num(10));
+        let unfinished =
+            build_probe(BuildingKind::Stable, 1, 1, rich, [(at, BuildingKind::Barracks, 1, false)].into_iter(), [].into_iter());
+        assert_eq!(
+            unfinished.check(BuildingKind::Stable, 11.5, 10.5),
+            Err(PlaceError::MissingPrereq(BuildingKind::Barracks)),
+        );
+        // and a finished one gets past the prereq gate (terrain may still say no)
+        let finished =
+            build_probe(BuildingKind::Stable, 1, 1, rich, [(at, BuildingKind::Barracks, 1, true)].into_iter(), [].into_iter());
+        assert_ne!(
+            finished.check(BuildingKind::Stable, 11.5, 10.5),
+            Err(PlaceError::MissingPrereq(BuildingKind::Barracks)),
+        );
+    }
+
+    /// The Watchtower is EARNED on a standing Tower, never bought — the ghost
+    /// must refuse it the same way the command does.
+    #[test]
+    fn the_watchtower_cannot_be_sited() {
+        let rich = Stockpile { wood: 999, stone: 999, food: 999, gold: 999 };
+        let probe = build_probe(BuildingKind::Watchtower, 1, 1, rich, [].into_iter(), [].into_iter());
+        assert_eq!(probe.check(BuildingKind::Watchtower, 10.5, 10.5), Err(PlaceError::NotBuildable));
     }
 }

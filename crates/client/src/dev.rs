@@ -107,7 +107,8 @@ pub fn setup(app: &mut App) {
             app.insert_resource(ui::pause::PauseScreen::Menu);
             app.add_systems(Update, auto_screenshot);
         }
-        Ok("research") | Ok("market") | Ok("keep") | Ok("hut") => {
+        Ok("research") | Ok("market") | Ok("keep") | Ok("hut") | Ok("granary") | Ok("store")
+        | Ok("mosque") | Ok("tower") | Ok("house") | Ok("site") => {
             // conjure + select a building so the screenshot shows its panel
             // (research on the blacksmith / trade on the market)
             app.insert_state(GameState::Playing);
@@ -424,6 +425,7 @@ fn spawn_dev_unit(world: &mut World, owner: u64, kind: saladin_sim::UnitKind, kp
             routing: false,
             home: pos,
             garrisoned_in: 0,
+            job_site: 0,
             path: vec![],
             path_idx: 0,
         },
@@ -463,22 +465,29 @@ pub fn conjure_wall_demo(world: &mut World, me: u64, kp: saladin_sim::V2) {
         )
     };
     let mut q = world.resource_mut::<CommandQueue>();
-    q.0.push(PlayerCommand::PlaceWall { player_id: me, tiles });
+    q.0.push(PlayerCommand::PlaceWall { player_id: me, tiles, builders: vec![] });
     q.0.push(PlayerCommand::Build {
         player_id: me,
         kind: saladin_sim::BuildingKind::Gatehouse,
         pos: center(x0 + 3, z),
         facing: 0,
+        builders: vec![],
     });
     q.0.push(PlayerCommand::Build {
         player_id: me,
         kind: saladin_sim::BuildingKind::Tower,
         pos: center(x0 + 6, z),
         facing: 0,
+        builders: vec![],
     });
 }
 
 // ── screenshot harness systems (moved verbatim from main.rs) ────────────────
+
+/// Rows the harness deliberately leaves unfinished; everything else it founds
+/// gets topped up so the wall-connectivity demo still reads as a wall.
+#[derive(bevy::prelude::Component)]
+pub struct HarnessLifecycle;
 
 /// Screenshot harness only: conjure one of every unit kind in a line beside
 /// the keep so SALADIN_AUTO=units captures all unit models in one shot.
@@ -504,11 +513,18 @@ pub fn auto_spawn_units(world: &mut World, mut stage: Local<u8>) {
                     u.carrying = 25;
                 }
             }
-            // burn the keep so the staged damage smoke/fire shows
-            let mut q = world.query::<&mut saladin_protocol::Building>();
+            // burn the keep so the staged damage smoke/fire shows, and finish
+            // the wall demo the real PlaceWall path founded — it is there to
+            // verify ARM connectivity, which a row of sites cannot show
+            let mut q = world
+                .query_filtered::<&mut saladin_protocol::Building, bevy::prelude::Without<HarnessLifecycle>>();
             for mut b in q.iter_mut(world) {
                 if b.kind == saladin_sim::BuildingKind::Keep {
                     b.hp = saladin_sim::building_def(b.kind).max_hp / 5;
+                } else if b.state == saladin_protocol::BuildState::Site {
+                    b.state = saladin_protocol::BuildState::Complete;
+                    b.work = saladin_sim::Fx::ONE;
+                    b.hp = saladin_sim::building_def(b.kind).max_hp;
                 }
             }
             let victims: Vec<Entity> = {
@@ -693,12 +709,44 @@ pub fn auto_spawn_units(world: &mut World, mut stage: Local<u8>) {
                 Owner(me),
                 MatchId(1),
                 Pos { pos, facing: saladin_sim::Fx::ZERO },
-                saladin_protocol::Building {
-                    kind,
-                    hp: saladin_sim::building_def(kind).max_hp,
-                    cooldown: saladin_sim::Fx::ZERO,
-                    rally: pos,
-                },
+                saladin_protocol::Building::new(kind, saladin_sim::building_def(kind).max_hp, pos),
+            ));
+        }
+        // the LIFECYCLE row: two sites mid-build (one per footprint size, so
+        // the scaffold's scaling is verifiable) and one hall burnt to its
+        // scorch stage. These are the states a screenshot cannot otherwise
+        // reach — nothing else in the harness is ever unfinished or damaged.
+        // Marked so the stage-1 pass that tops up the wall demo leaves them.
+        let lifecycle: [(BuildingKind, saladin_protocol::BuildState, i32); 3] = [
+            (BuildingKind::Barracks, saladin_protocol::BuildState::Site, 30),
+            (BuildingKind::Tower, saladin_protocol::BuildState::Site, 65),
+            (BuildingKind::Market, saladin_protocol::BuildState::Complete, 45),
+        ];
+        for (i, (kind, state, pct)) in lifecycle.into_iter().enumerate() {
+            let def = saladin_sim::building_def(kind);
+            let pos = saladin_sim::V2::new(
+                kp.x - saladin_sim::Fx::from_num(6 + i as i32 * 4),
+                kp.y - saladin_sim::Fx::from_num(22),
+            );
+            let mut b = match state {
+                saladin_protocol::BuildState::Site => {
+                    saladin_protocol::Building::site(kind, def.max_hp, pos)
+                }
+                _ => saladin_protocol::Building::new(kind, def.max_hp, pos),
+            };
+            b.hp = (def.max_hp * pct / 100).max(1);
+            if state == saladin_protocol::BuildState::Site {
+                b.work = saladin_sim::Fx::from_num(pct) / saladin_sim::Fx::from_num(100);
+                b.builders = 3;
+            }
+            let id = world.resource_mut::<NextEntityId>().alloc();
+            world.spawn((
+                GameId(id),
+                Owner(me),
+                MatchId(1),
+                Pos { pos, facing: saladin_sim::Fx::ZERO },
+                b,
+                HarnessLifecycle,
             ));
         }
     }
@@ -737,6 +785,7 @@ pub fn auto_spawn_units(world: &mut World, mut stage: Local<u8>) {
                 routing: false,
                 home: pos,
                 garrisoned_in: 0,
+                job_site: 0,
                 path: vec![],
                 path_idx: 0,
             },
@@ -758,12 +807,20 @@ pub fn arm_farm_mode(mut mode: ResMut<crate::input::InputMode>) {
 pub fn auto_select_building(world: &mut World) {
     use saladin_protocol::{Building, MatchId, NextEntityId, Owner, Pos};
     use saladin_sim::{BuildingKind, building_def};
-    let kind = match std::env::var("SALADIN_AUTO").as_deref() {
+    let mode = std::env::var("SALADIN_AUTO");
+    let kind = match mode.as_deref() {
         Ok("market") => BuildingKind::Market,
         Ok("keep") => BuildingKind::Keep,
         Ok("hut") => BuildingKind::FishingHut,
+        Ok("granary") => BuildingKind::Granary,
+        Ok("store") => BuildingKind::Storehouse,
+        Ok("mosque") => BuildingKind::Mosque,
+        Ok("tower") => BuildingKind::Tower,
+        Ok("house") => BuildingKind::House,
+        Ok("site") => BuildingKind::Barracks,
         _ => BuildingKind::Blacksmith,
     };
+    let as_site = mode.as_deref() == Ok("site");
     let t = world.resource::<Time>().elapsed_secs();
     if t < 3.0 {
         return;
@@ -785,18 +842,24 @@ pub fn auto_select_building(world: &mut World) {
             }
             let Some(kp) = keep else { return };
             let pos = saladin_sim::V2::new(kp.x + saladin_sim::fx!("4"), kp.y + saladin_sim::fx!("2"));
+            let def = building_def(kind);
+            let mut b = if as_site {
+                Building::site(kind, def.max_hp, pos)
+            } else {
+                Building::new(kind, def.max_hp, pos)
+            };
+            if as_site {
+                b.work = saladin_sim::fx!("0.45");
+                b.builders = 2;
+                b.hp = (def.max_hp * 45 / 100).max(1);
+            }
             let id = world.resource_mut::<NextEntityId>().alloc();
             world.spawn((
                 GameId(id),
                 Owner(1),
                 MatchId(1),
                 Pos { pos, facing: saladin_sim::Fx::ZERO },
-                Building {
-                    kind,
-                    hp: building_def(kind).max_hp,
-                    cooldown: saladin_sim::Fx::ZERO,
-                    rally: pos,
-                },
+                b,
             ));
             id
         }
@@ -810,8 +873,10 @@ pub fn auto_select_building(world: &mut World) {
 
 pub fn debug_layout(
     time: Res<Time>,
+    hud_rects: Res<ui::hud::HudRects>,
     mut done: Local<bool>,
     q_bar: Query<(&bevy::ui::ComputedNode, &bevy::ui::UiGlobalTransform), With<ui::hud::BottomCenter>>,
+    q_card: Query<(&bevy::ui::ComputedNode, &bevy::ui::UiGlobalTransform), With<ui::hud::BottomLeft>>,
     q_text: Query<(&bevy::ui::ComputedNode, &bevy::ui::UiGlobalTransform, &Text)>,
     q_btn: Query<(&bevy::ui::ComputedNode, &bevy::ui::UiGlobalTransform, &Children), With<Button>>,
     q_txt_of: Query<&Text>,
@@ -822,6 +887,15 @@ pub fn debug_layout(
     *done = true;
     for (n, t) in &q_bar {
         eprintln!("BAR size={:?} pos={:?} inv_scale={}", n.size(), t.translation, n.inverse_scale_factor());
+    }
+    for r in &hud_rects.0 {
+        eprintln!("HUDRECT {:?} .. {:?}", r.min, r.max);
+    }
+    for (n, t) in &q_card {
+        eprintln!(
+            "CARD size={:?} pos={:?} content={:?} pad={:?}",
+            n.size(), t.translation, n.content_size(), n.padding()
+        );
     }
     for (n, t, txt) in &q_text {
         if txt.0.len() < 24 {

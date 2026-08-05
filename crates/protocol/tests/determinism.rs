@@ -38,6 +38,7 @@ fn spawn_unit(app: &mut App, id: u64, pos: V2, target: V2) {
             routing: false,
             home: pos,
             garrisoned_in: 0,
+            job_site: 0,
             path: vec![target],
             path_idx: 0,
         },
@@ -106,6 +107,7 @@ fn spawn_soldier(app: &mut App, id: u64, owner: u64) {
             routing: false,
             home: pos,
             garrisoned_in: 0,
+            job_site: 0,
             path: vec![],
             path_idx: 0,
         },
@@ -170,7 +172,7 @@ fn peasant_harvests_tree_and_banks_at_keep() {
         Owner(1),
         MatchId(1),
         Pos { pos: keep_pos, facing: ZERO },
-        Building { kind: BuildingKind::Keep, hp: 1500, cooldown: ZERO, rally: keep_pos },
+        Building::new(BuildingKind::Keep, 1500, keep_pos),
     ));
     // a tree east of the keep
     let tree_pos = V2::new(f(cx + 4) + h, f(cy + 1) + h);
@@ -205,6 +207,7 @@ fn peasant_harvests_tree_and_banks_at_keep() {
             routing: false,
             home: pe_pos,
             garrisoned_in: 0,
+            job_site: 0,
             path: vec![],
             path_idx: 0,
         },
@@ -244,6 +247,7 @@ fn spawn_combatant(app: &mut App, id: u64, owner: u64, pos: V2) {
             routing: false,
             home: pos,
             garrisoned_in: 0,
+            job_site: 0,
             path: vec![],
             path_idx: 0,
         },
@@ -371,8 +375,9 @@ fn ai_bot_founds_base_and_trains() {
         assert_eq!(uq.iter(world).count(), 5, "bot starts with 5 peasants");
     }
 
-    // brain ticks (every 20) train more peasants toward the economy target
-    for _ in 0..80 {
+    // brain ticks (every 20) queue more peasants toward the economy target;
+    // a peasant now takes its full training time to walk out of the keep
+    for _ in 0..400 {
         step(app.world_mut());
     }
     let world = app.world_mut();

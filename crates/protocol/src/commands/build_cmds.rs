@@ -1,54 +1,133 @@
 use super::garrison_cmds::eject_all;
-use super::{building_occupancy, clamp_world, find_owned, owned_building_kinds, spawn};
+use super::{building_occupancy, clamp_world, find_owned, spawn};
 use crate::components::*;
 use crate::{PathScratch, SimRng, WorldConfig};
 use bevy_ecs::prelude::*;
 use saladin_sim::*;
+use std::collections::HashSet;
 
+/// Population headroom. Queued units are charged at ENQUEUE, and only
+/// OPERATIONAL structures grant housing — a hole in the ground shelters nobody.
 fn pop_room(world: &mut World, owner: u64) -> bool {
     let mut bq = world.query::<(&Owner, &Building)>();
-    let cap: i32 = bq.iter(world).filter(|(o, _)| o.0 == owner).map(|(_, b)| building_def(b.kind).pop).sum();
+    let (mut cap, mut queued) = (0i32, 0i32);
+    for (o, b) in bq.iter(world) {
+        if o.0 != owner {
+            continue;
+        }
+        if operational(b.state) {
+            cap += building_def(b.kind).pop;
+        }
+        queued += b.queue_len as i32;
+    }
     let mut uq = world.query::<(&Owner, &Unit)>();
     let pop = uq.iter(world).filter(|(o, _)| o.0 == owner).count() as i32;
-    pop < cap
+    pop + queued < cap
 }
 
-/// Train `kind` from the owner's matching production building (afford + prereq +
-/// pop checked). The spawn point is jittered beside the trainer and snapped to
-/// passable ground; a rally point set away from the building sends the fresh
-/// unit marching there. Mirrors the SpacetimeDB `trainFrom`.
+/// Only carriers raise buildings — the same hands that gather.
+fn is_builder(kind: UnitKind) -> bool {
+    unit_def(kind).carry > 0
+}
+
+/// The owner's lowest-`GameId` finished structure that trains `kind`. Raw ECS
+/// iteration order differs between a live world and the same world restored
+/// from a save (restore re-spawns sorted by id), so the pick is by id or it is
+/// a desync waiting for someone to save.
+fn lowest_trainer(world: &mut World, owner: u64, kind: UnitKind) -> Option<u64> {
+    let mut q = world.query::<(&GameId, &Owner, &Building)>();
+    q.iter(world)
+        .filter(|(_, o, b)| {
+            o.0 == owner && operational(b.state) && building_def(b.kind).trains.contains(&kind)
+        })
+        .map(|(g, _, _)| g.0)
+        .min()
+}
+
+/// The legacy "train one of these somewhere" order: forwarded to the owner's
+/// lowest-id operational hall, so production is per-building underneath while
+/// every existing caller keeps working.
 pub(crate) fn train(world: &mut World, owner: u64, kind: UnitKind) -> bool {
+    let Some(building) = lowest_trainer(world, owner, kind) else { return false };
+    train_at(world, owner, building, kind)
+}
+
+/// Queue `kind` at a NAMED building (prereq + pop + cost checked, paid up
+/// front). The unit appears once the construction loop has worked the order
+/// through the queue.
+pub(crate) fn train_at(world: &mut World, owner: u64, building: u64, kind: UnitKind) -> bool {
     let def = unit_def(kind);
-    let owned = owned_building_kinds(world, owner);
+    let owned = super::owned_building_kinds(world, owner);
     if !has_prereq(&owned, def.requires) {
         return false;
     }
-    // find a building that trains this kind, with its position + rally
-    let trainer = {
-        let mut q = world.query::<(&Owner, &Building, &Pos)>();
-        q.iter(world)
-            .find(|(o, b, _)| o.0 == owner && building_def(b.kind).trains.contains(&kind))
-            .map(|(_, b, p)| (b.kind, b.rally, p.pos))
-    };
-    let Some((bkind, rally, bpos)) = trainer else { return false };
-    if !pop_room(world, owner) {
-        return false;
-    }
-    let (paid, match_id) = {
-        let mut q = world.query::<(&mut Player, &MatchId)>();
-        let Some((mut p, m)) = q.iter_mut(world).find(|(p, _)| p.player_id == owner) else { return false };
-        if !p.stock.can_afford(&def.cost) {
-            (false, 0)
-        } else {
-            p.stock.pay(&def.cost);
-            (true, m.0)
+    let Some(be) = find_owned(world, owner, building) else { return false };
+    let room = match world.get::<Building>(be) {
+        Some(b) => {
+            operational(b.state)
+                && building_def(b.kind).trains.contains(&kind)
+                && (b.queue_len as usize) < QUEUE_CAP
         }
+        None => false,
     };
-    if !paid {
+    if !room || !pop_room(world, owner) {
         return false;
     }
-    // jittered spawn beside the building's south edge, snapped onto passable,
-    // unoccupied ground so a hemmed-in trainer never strands its unit.
+    {
+        let mut q = world.query::<&mut Player>();
+        let Some(mut p) = q.iter_mut(world).find(|p| p.player_id == owner) else { return false };
+        if !p.stock.can_afford(&def.cost) {
+            return false;
+        }
+        p.stock.pay(&def.cost);
+    }
+    let Some(mut b) = world.get_mut::<Building>(be) else { return false };
+    let slot = b.queue_len as usize;
+    b.queue[slot] = kind as u8;
+    b.queue_len += 1;
+    true
+}
+
+/// Drop the LAST order in a building's queue and hand its cost back.
+pub(crate) fn cancel_train(world: &mut World, owner: u64, building: u64) {
+    let Some(be) = find_owned(world, owner, building) else { return };
+    let kind = {
+        let Some(mut b) = world.get_mut::<Building>(be) else { return };
+        if b.queue_len == 0 {
+            return;
+        }
+        b.queue_len -= 1;
+        let k = UnitKind::from_u8(b.queue[b.queue_len as usize]);
+        if b.queue_len == 0 {
+            b.train_work = Fx::ZERO;
+        }
+        k
+    };
+    let Some(kind) = kind else { return };
+    let cost = unit_def(kind).cost;
+    let mut q = world.query::<&mut Player>();
+    if let Some(mut p) = q.iter_mut(world).find(|p| p.player_id == owner) {
+        p.stock.credit(&cost);
+    }
+}
+
+/// Turn the head of a building's queue into a real unit: jittered beside the
+/// hall's south edge, snapped onto passable ground, marching to the rally flag
+/// when one was set away from the building. Called by the construction loop
+/// once the order's training time is banked.
+pub(crate) fn spawn_trained(world: &mut World, building: u64) -> bool {
+    let Some(be) = find_by_id(world, building) else { return false };
+    let Some(owner) = world.get::<Owner>(be).map(|o| o.0) else { return false };
+    let Some(match_id) = world.get::<MatchId>(be).map(|m| m.0) else { return false };
+    let Some(bpos) = world.get::<Pos>(be).map(|p| p.pos) else { return false };
+    let (bkind, rally, kind) = {
+        let Some(b) = world.get::<Building>(be) else { return false };
+        if b.queue_len == 0 {
+            return false;
+        }
+        let Some(kind) = UnitKind::from_u8(b.queue[0]) else { return false };
+        (b.kind, b.rally, kind)
+    };
     let fp = building_def(bkind).footprint;
     let (jx, jy) = {
         let mut rng = world.resource_mut::<SimRng>();
@@ -57,13 +136,23 @@ pub(crate) fn train(world: &mut World, owner: u64, kind: UnitKind) -> bool {
     let raw_x = clamp_world(bpos.x + jx);
     let raw_y = clamp_world(bpos.y + Fx::from_num(fp) / Fx::from_num(2) + saladin_sim::fx!("0.8") + jy);
     let seed = world.resource::<WorldConfig>().seed;
-    let occ = building_occupancy(world, false);
-    let passable = |tx: i32, ty: i32| is_passable(seed, tx, ty) && !occ.contains(&tile_key(tx, ty));
+    let (occ, gates) = super::occupancy_and_gates(world, false);
+    let passable = |tx: i32, ty: i32| {
+        let k = tile_key(tx, ty);
+        is_passable(seed, tx, ty) && !occ.contains(&k) && !gate_blocks(&gates, k, owner)
+    };
     let snap = nearest_passable_grid(&passable, raw_x, raw_y);
     let id = spawn::spawn_unit(world, owner, kind, snap, match_id, GatherState::Idle, 0);
     world.resource_mut::<crate::MatchStats>().of(owner).trained += 1;
 
-    // march to the rally point when it was moved off the building
+    if let Some(mut b) = world.get_mut::<Building>(be) {
+        for i in 1..b.queue_len as usize {
+            b.queue[i - 1] = b.queue[i];
+        }
+        b.queue_len -= 1;
+        b.train_work = Fx::ZERO;
+    }
+
     if dist(rally, bpos) > saladin_sim::fx!("1.2") {
         let path = {
             let mut scratch = world.resource_mut::<PathScratch>();
@@ -82,104 +171,143 @@ pub(crate) fn train(world: &mut World, owner: u64, kind: UnitKind) -> bool {
     true
 }
 
+fn find_by_id(world: &mut World, id: u64) -> Option<Entity> {
+    let mut q = world.query::<(Entity, &GameId)>();
+    q.iter(world).find(|(_, g)| g.0 == id).map(|(e, _)| e)
+}
+
 /// Tile keys occupied by resource nodes (no building on a tree/quarry/etc.).
-pub(crate) fn node_occupancy(world: &mut World) -> std::collections::HashSet<i32> {
+pub(crate) fn node_occupancy(world: &mut World) -> HashSet<i32> {
     let mut q = world.query::<(&Pos, &ResourceNode)>();
     q.iter(world)
         .map(|(p, _)| tile_key(p.pos.x.to_num::<i32>(), p.pos.y.to_num::<i32>()))
         .collect()
 }
 
-/// Positions of the owner's standing buildings (town-radius anchor set).
-pub(crate) fn own_building_positions(world: &mut World, owner: u64) -> Vec<V2> {
-    let mut q = world.query::<(&Owner, &Pos, &Building)>();
-    q.iter(world).filter(|(o, _, _)| o.0 == owner).map(|(_, p, _)| p.pos).collect()
+/// Everything a placement decision needs, gathered ONCE. `place_near` probes up
+/// to ~800 spots for a waterside or fertility building; rebuilding building AND
+/// node occupancy per probe walked every node on the map each time.
+pub(crate) struct BuildContext {
+    occ: HashSet<i32>,
+    wall_keys: HashSet<i32>,
+    walls: Vec<(u64, i32)>,
+    own: Vec<V2>,
+    owned_kinds: HashSet<BuildingKind>,
+    counts: [i32; 16],
+    stock: Stockpile,
+    match_id: u64,
 }
 
-/// Place `kind` at `pos` — the full `check_place` rule set (buildable biome,
-/// node/building occupancy, waterside, town radius, approach) + prereq + cost.
-/// `facing` = quarter turns; square footprints make rotation purely visual,
-/// but it rides the command so every client renders the same yaw.
+pub(crate) fn build_context(world: &mut World, owner: u64) -> Option<BuildContext> {
+    let (stock, match_id) = {
+        let mut q = world.query::<(&Player, &MatchId)>();
+        q.iter(world).find(|(p, _)| p.player_id == owner).map(|(p, m)| (p.stock, m.0))?
+    };
+    let mut occ = building_occupancy(world, true);
+    occ.extend(node_occupancy(world));
+    let mut walls = Vec::new();
+    let mut own = Vec::new();
+    let mut owned_kinds = HashSet::new();
+    let mut counts = [0i32; 16];
+    {
+        let mut q = world.query::<(&GameId, &Pos, &Owner, &Building)>();
+        for (g, p, o, b) in q.iter(world) {
+            if o.0 != owner {
+                continue;
+            }
+            own.push(p.pos);
+            counts[b.kind as usize] += 1;
+            if operational(b.state) {
+                owned_kinds.insert(b.kind);
+            }
+            if b.kind == BuildingKind::Wall {
+                walls.push((g.0, tile_key(p.pos.x.to_num::<i32>(), p.pos.y.to_num::<i32>())));
+            }
+        }
+    }
+    let wall_keys = walls.iter().map(|(_, k)| *k).collect();
+    Some(BuildContext { occ, wall_keys, walls, own, owned_kinds, counts, stock, match_id })
+}
+
+/// Found `kind` at `pos` against an already-gathered context — the full
+/// `check_build` rule set (buildable biome, node/building occupancy, waterside,
+/// town radius, approach, prereqs, per-kind limit, cost). The cost is paid in
+/// full up front and a SITE goes up: frail, inert, and worth raiding until a
+/// peasant finishes it. `facing` = quarter turns; square footprints make
+/// rotation purely visual, but it rides the command so every client renders the
+/// same yaw.
 ///
 /// Defense composition: a gate or tower placed on the player's OWN wall tile
 /// absorbs that segment (full refund) instead of being refused — walls are a
 /// canvas the other defense pieces slot into. A gate dropped into a wall run
 /// also auto-orients its passage across the run.
-pub(crate) fn build(world: &mut World, owner: u64, kind: BuildingKind, pos: V2, facing: u8) -> bool {
+///
+/// `ctx` is updated in place on success, so a caller may keep probing.
+pub(crate) fn build_with(
+    world: &mut World,
+    ctx: &mut BuildContext,
+    owner: u64,
+    kind: BuildingKind,
+    pos: V2,
+    facing: u8,
+) -> Result<u64, PlaceError> {
     let def = building_def(kind);
-    if !def.buildable {
-        return false;
-    }
-    let owned = owned_building_kinds(world, owner);
-    if !has_prereq(&owned, def.requires) {
-        return false;
-    }
     let seed = world.resource::<WorldConfig>().seed;
-    let mut occ = building_occupancy(world, true);
-    occ.extend(node_occupancy(world));
-    // own wall segments are transparent to a composing piece
-    let own_walls: Vec<(u64, i32)> = if composes_with_walls(kind) {
-        let mut q = world.query::<(&GameId, &Pos, &Owner, &Building)>();
-        q.iter(world)
-            .filter(|(_, _, o, b)| o.0 == owner && b.kind == BuildingKind::Wall)
-            .map(|(g, p, _, _)| (g.0, tile_key(p.pos.x.to_num::<i32>(), p.pos.y.to_num::<i32>())))
-            .collect()
-    } else {
-        Vec::new()
-    };
-    for (_, k) in &own_walls {
-        occ.remove(k);
+    let composes = composes_with_walls(kind);
+    {
+        let occupied = |tx: i32, ty: i32| {
+            let k = tile_key(tx, ty);
+            ctx.occ.contains(&k) && !(composes && ctx.wall_keys.contains(&k))
+        };
+        check_build(
+            seed,
+            kind,
+            pos.x,
+            pos.y,
+            occupied,
+            &ctx.own,
+            &ctx.owned_kinds,
+            &ctx.counts,
+            &ctx.stock,
+        )?;
     }
-    let own = own_building_positions(world, owner);
-    let occupied = |tx: i32, ty: i32| occ.contains(&tile_key(tx, ty));
-    if check_place(seed, kind, pos.x, pos.y, occupied, &own).is_err() {
-        return false;
-    }
-    let (paid, match_id) = {
-        let mut q = world.query::<(&mut Player, &MatchId)>();
-        let Some((mut p, m)) = q.iter_mut(world).find(|(p, _)| p.player_id == owner) else { return false };
+    {
+        let mut q = world.query::<&mut Player>();
+        let Some(mut p) = q.iter_mut(world).find(|p| p.player_id == owner) else {
+            return Err(PlaceError::CannotAfford);
+        };
         if !p.stock.can_afford(&def.cost) {
-            (false, 0)
-        } else {
-            p.stock.pay(&def.cost);
-            (true, m.0)
+            return Err(PlaceError::CannotAfford);
         }
-    };
-    if !paid {
-        return false;
+        p.stock.pay(&def.cost);
     }
+    ctx.stock.pay(&def.cost);
 
     // absorb the overlapped segment: refund in full, pop any parapet garrison
     let fp: Vec<i32> =
         footprint_tiles(def.footprint, pos.x, pos.y).iter().map(|t| tile_key(t.tx, t.ty)).collect();
     let mut absorbed_run = (false, false); // own wall continues along (x, z)
-    if !own_walls.is_empty() {
+    if composes && !ctx.walls.is_empty() {
         let (tx, ty) = (pos.x.floor().to_num::<i32>(), pos.y.floor().to_num::<i32>());
-        let wall_at = |dx: i32, dy: i32| own_walls.iter().any(|(_, k)| *k == tile_key(tx + dx, ty + dy));
+        let wall_at = |dx: i32, dy: i32| ctx.wall_keys.contains(&tile_key(tx + dx, ty + dy));
         absorbed_run = (wall_at(1, 0) || wall_at(-1, 0), wall_at(0, 1) || wall_at(0, -1));
-        let wall_cost = building_def(BuildingKind::Wall).cost;
-        let absorbed: Vec<u64> =
-            own_walls.iter().filter(|(_, k)| fp.contains(k)).map(|(id, _)| *id).collect();
-        for wid in absorbed {
-            super::garrison_cmds::eject_all(world, wid);
-            if let Some(e) = super::find_owned(world, owner, wid) {
-                world.despawn(e);
-            }
-            let mut q = world.query::<&mut Player>();
-            if let Some(mut p) = q.iter_mut(world).find(|p| p.player_id == owner) {
-                p.stock.refund(&wall_cost, Fx::ONE);
-            }
+        let absorbed: Vec<(u64, i32)> =
+            ctx.walls.iter().filter(|(_, k)| fp.contains(k)).copied().collect();
+        for (wid, wkey) in absorbed {
+            raze_building(world, owner, wid, RazeCause::Absorbed);
+            ctx.walls.retain(|(id, _)| *id != wid);
+            ctx.wall_keys.remove(&wkey);
+            ctx.occ.remove(&wkey);
+            ctx.counts[BuildingKind::Wall as usize] -= 1;
+            ctx.stock.credit(&building_def(BuildingKind::Wall).cost);
         }
     }
 
     let center = footprint_center(def.footprint, pos.x, pos.y);
-    let id = spawn::spawn_building(world, owner, kind, center, match_id);
-    // A farm IS its field: sowing it plants a food node the peasants work, and
-    // how fast that node regrows is the soil's business, not the player's.
-    if def.min_fertility > Fx::ZERO {
-        let soil = saladin_sim::soil_quality(seed, def.footprint, pos.x, pos.y);
-        let regen = Fx::ONE + soil * Fx::from_num(saladin_sim::FARM_REGEN_MAX);
-        spawn::spawn_field(world, owner, id, center, regen.to_num::<i32>().max(1), match_id);
+    let state = if def.build_time > Fx::ZERO { BuildState::Site } else { BuildState::Complete };
+    let id = spawn::spawn_building(world, owner, kind, center, ctx.match_id, state);
+    if state == BuildState::Complete {
+        finish_building(world, id);
     }
     // a gate in a clear X- or Z-run turns its passage across the run; the
     // player's chosen facing wins when the neighborhood is ambiguous
@@ -199,69 +327,268 @@ pub(crate) fn build(world: &mut World, owner: u64, kind: BuildingKind, pos: V2, 
             p.facing = yaw;
         }
     }
+
+    ctx.own.push(center);
+    ctx.counts[kind as usize] += 1;
+    if state != BuildState::Site {
+        ctx.owned_kinds.insert(kind);
+    }
+    for k in fp {
+        ctx.occ.insert(k);
+    }
+    if kind == BuildingKind::Wall {
+        let k = tile_key(pos.x.floor().to_num::<i32>(), pos.y.floor().to_num::<i32>());
+        ctx.walls.push((id, k));
+        ctx.wall_keys.insert(k);
+    }
+    Ok(id)
+}
+
+/// What a structure gains the moment it is finished. A farm IS its field, and
+/// sowing at COMPLETION rather than at siting is what makes completion a real
+/// event: how fast the crop regrows is the soil's business, not the player's.
+pub(crate) fn finish_building(world: &mut World, id: u64) {
+    let Some(e) = find_by_id(world, id) else { return };
+    let Some(kind) = world.get::<Building>(e).map(|b| b.kind) else { return };
+    let def = building_def(kind);
+    if def.min_fertility <= Fx::ZERO {
+        return;
+    }
+    let sown = {
+        let mut q = world.query::<&FieldOf>();
+        q.iter(world).any(|f| f.0 == id)
+    };
+    if sown {
+        return;
+    }
+    let Some(owner) = world.get::<Owner>(e).map(|o| o.0) else { return };
+    let Some(match_id) = world.get::<MatchId>(e).map(|m| m.0) else { return };
+    let Some(pos) = world.get::<Pos>(e).map(|p| p.pos) else { return };
+    let seed = world.resource::<WorldConfig>().seed;
+    let soil = saladin_sim::soil_quality(seed, def.footprint, pos.x, pos.y);
+    let regen = Fx::ONE + soil * Fx::from_num(saladin_sim::FARM_REGEN_MAX);
+    spawn::spawn_field(world, owner, id, pos, regen.to_num::<i32>().max(1), match_id);
+}
+
+/// One-shot placement: gather the context, found one site, put the named
+/// peasants on it.
+pub(crate) fn build(
+    world: &mut World,
+    owner: u64,
+    kind: BuildingKind,
+    pos: V2,
+    facing: u8,
+    builders: &[u64],
+) -> Result<u64, PlaceError> {
+    let Some(mut ctx) = build_context(world, owner) else { return Err(PlaceError::CannotAfford) };
+    let id = build_with(world, &mut ctx, owner, kind, pos, facing)?;
+    assign_builders(world, owner, id, builders);
+    Ok(id)
+}
+
+/// Put `units` to work on `site`. Ownership-checked per unit; one that is not
+/// the caller's, not a carrier, or already sheltered is skipped.
+pub(crate) fn assign_builders(world: &mut World, owner: u64, site: u64, units: &[u64]) {
+    for &u in units {
+        repair(world, owner, u, site);
+    }
+}
+
+/// Send a peasant to work on one of the caller's structures. ONE command covers
+/// founding labour, repair labour and upgrade labour — they are the same loop,
+/// and `job_site` survives the retargeting that clears `target_node`.
+pub(crate) fn repair(world: &mut World, owner: u64, unit: u64, building: u64) -> bool {
+    if find_owned(world, owner, building).is_none() {
+        return false;
+    }
+    let Some(ue) = find_owned(world, owner, unit) else { return false };
+    let ok = match world.get::<Unit>(ue) {
+        Some(u) => u.garrisoned_in == 0 && is_builder(u.kind),
+        None => false,
+    };
+    if !ok {
+        return false;
+    }
+    if let Some(mut u) = world.get_mut::<Unit>(ue) {
+        u.gather_state = GatherState::Constructing;
+        u.job_site = building;
+        u.target_node = 0;
+        u.attack_target = 0;
+        u.has_target = false;
+    }
     true
 }
 
-/// Batched wall placement for a dragged line: places every affordable, valid
-/// Wall tile and skips the rest silently. Occupancy is computed once and stamped
-/// incrementally — O(line), not O(line × buildings). Mirrors `placeWall`.
-pub(crate) fn place_wall(world: &mut World, owner: u64, tiles: &[(i32, i32)]) {
+/// Abandon an unfinished site: the labour already sunk into it is gone, the
+/// rest of the cost comes back, and the crew looks for other work.
+pub(crate) fn cancel_site(world: &mut World, owner: u64, building: u64) {
+    let Some(e) = find_owned(world, owner, building) else { return };
+    if world.get::<Building>(e).is_none_or(|b| b.state != BuildState::Site) {
+        return;
+    }
+    raze_building(world, owner, building, RazeCause::Cancelled);
+}
+
+/// Raise a structure into what it becomes. The entity keeps its GameId, owner,
+/// garrison, rally and facing — which is why `Player::keep` and the defeat
+/// check need no special case, and why the tower keeps FIRING while it rises.
+pub(crate) fn upgrade_building(world: &mut World, owner: u64, building: u64) -> bool {
+    let Some(e) = find_owned(world, owner, building) else { return false };
+    let Some(b) = world.get::<Building>(e).copied() else { return false };
+    if b.state != BuildState::Complete {
+        return false;
+    }
+    let def = building_def(b.kind);
+    let Some(target) = def.upgrades_to else { return false };
+    {
+        let mut q = world.query::<&mut Player>();
+        let Some(mut p) = q.iter_mut(world).find(|p| p.player_id == owner) else { return false };
+        if !p.stock.can_afford(&def.upgrade_cost) {
+            return false;
+        }
+        p.stock.pay(&def.upgrade_cost);
+    }
+    if let Some(mut b) = world.get_mut::<Building>(e) {
+        b.state = BuildState::Upgrading;
+        b.target_kind = target;
+        b.work = Fx::ZERO;
+    }
+    true
+}
+
+/// Batched wall placement for a dragged line: founds every affordable, valid
+/// Wall tile and skips the rest silently.
+///
+/// The anchor set is snapshotted ONCE. Letting each placed segment extend it
+/// turned a 120-tile drag into a 115-tile reach against a TOWN_RADIUS of 28 —
+/// the only spatial containment rule in the game, bought for a few wood a tile.
+pub(crate) fn place_wall(world: &mut World, owner: u64, tiles: &[(i32, i32)], builders: &[u64]) {
+    let Some(mut ctx) = build_context(world, owner) else { return };
     let def = building_def(BuildingKind::Wall);
     let seed = world.resource::<WorldConfig>().seed;
-    let mut occ = building_occupancy(world, true);
-    occ.extend(node_occupancy(world));
-    let mut own = own_building_positions(world, owner);
-    let (mut bal, match_id) = {
-        let mut q = world.query::<(&Player, &MatchId)>();
-        let Some((p, m)) = q.iter(world).find(|(p, _)| p.player_id == owner) else { return };
-        (p.stock, m.0)
-    };
+    let state = if def.build_time > Fx::ZERO { BuildState::Site } else { BuildState::Complete };
+    let anchors = std::mem::take(&mut ctx.own);
+    let mut first = 0u64;
     let mut spent = false;
     for &(tx, ty) in tiles {
-        if !bal.can_afford(&def.cost) {
+        if !ctx.stock.can_afford(&def.cost) {
             break;
         }
         let x = Fx::from_num(tx);
         let y = Fx::from_num(ty);
-        let occupied = |px: i32, py: i32| occ.contains(&tile_key(px, py));
-        if check_place(seed, BuildingKind::Wall, x, y, occupied, &own).is_err() {
+        let occupied = |px: i32, py: i32| ctx.occ.contains(&tile_key(px, py));
+        if check_build(
+            seed,
+            BuildingKind::Wall,
+            x,
+            y,
+            occupied,
+            &anchors,
+            &ctx.owned_kinds,
+            &ctx.counts,
+            &ctx.stock,
+        )
+        .is_err()
+        {
             continue;
         }
         let c = footprint_center(def.footprint, x, y);
-        spawn::spawn_building(world, owner, BuildingKind::Wall, c, match_id);
-        // each placed segment extends the town anchor — drags can snake outward
-        own.push(c);
-        for k in occupancy_set(&[Occupant { kind: BuildingKind::Wall, pos: V2::new(x, y) }], true) {
-            occ.insert(k);
+        let id = spawn::spawn_building(world, owner, BuildingKind::Wall, c, ctx.match_id, state);
+        if first == 0 {
+            first = id;
         }
-        bal.pay(&def.cost);
+        for k in occupancy_set(&[Occupant { kind: BuildingKind::Wall, pos: V2::new(x, y) }], true) {
+            ctx.occ.insert(k);
+        }
+        ctx.counts[BuildingKind::Wall as usize] += 1;
+        ctx.stock.pay(&def.cost);
         spent = true;
     }
     if spent {
         let mut q = world.query::<&mut Player>();
         if let Some(mut p) = q.iter_mut(world).find(|p| p.player_id == owner) {
-            p.stock = bal;
+            p.stock = ctx.stock;
+        }
+    }
+    // the crew starts at the head of the line; finishing one segment hands it
+    // the next one within reach
+    if first != 0 {
+        assign_builders(world, owner, first, builders);
+    }
+}
+
+/// Why a structure left the map. The refund policy is a property of the CAUSE,
+/// so every voluntary route out of the world funnels through one place. A
+/// structure KILLED in combat is razed by the combat loop's own deferred
+/// despawn — it refunds nothing, which is the whole point.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum RazeCause {
+    /// Torn down on purpose: half the cost back, scaled by what still stands.
+    Demolished,
+    /// Overbuilt by a composing defense piece: paid for once, refunded in full.
+    Absorbed,
+    /// A site abandoned before it rose: the unspent remainder comes back.
+    Cancelled,
+}
+
+/// The single exit: refund by cause, hand back the production queue, return the
+/// garrison to the field, release the crew, despawn.
+pub(crate) fn raze_building(world: &mut World, owner: u64, id: u64, cause: RazeCause) {
+    let Some(e) = find_owned(world, owner, id) else { return };
+    let Some(b) = world.get::<Building>(e).copied() else { return };
+    let def = building_def(b.kind);
+    let mut refund = match cause {
+        RazeCause::Demolished => demolish_refund(&def.cost, b.hp, def.max_hp),
+        RazeCause::Absorbed => def.cost,
+        RazeCause::Cancelled => cancel_refund(&def.cost, b.work),
+    };
+    for i in 0..b.queue_len as usize {
+        if let Some(kind) = UnitKind::from_u8(b.queue[i]) {
+            let c = unit_def(kind).cost;
+            refund = ResourceCost::new(
+                refund.wood + c.wood,
+                refund.stone + c.stone,
+                refund.food + c.food,
+                refund.gold + c.gold,
+            );
+        }
+    }
+    if refund != ResourceCost::ZERO {
+        let mut q = world.query::<&mut Player>();
+        if let Some(mut p) = q.iter_mut(world).find(|p| p.player_id == owner) {
+            p.stock.credit(&refund);
+        }
+    }
+    eject_all(world, id);
+    release_crew(world, id);
+    world.despawn(e);
+}
+
+/// Take every builder off `site` — it is finished, gone, or needs no more work.
+pub(crate) fn release_crew(world: &mut World, site: u64) {
+    let mut q = world.query::<&mut Unit>();
+    for mut u in q.iter_mut(world) {
+        if u.job_site == site {
+            u.job_site = 0;
+            if u.gather_state == GatherState::Constructing {
+                u.gather_state = GatherState::Idle;
+                u.has_target = false;
+            }
         }
     }
 }
 
-/// Tear down an owned building (never the Keep): refund half its cost, pop any
-/// sheltered units back to the field, then raze it. Mirrors `demolishBuilding`.
+/// Tear down an owned building (never the Keep): an unfinished site hands back
+/// its unspent remainder, a standing one half its cost scaled by health.
 pub(crate) fn demolish(world: &mut World, owner: u64, building: u64) {
     let Some(e) = find_owned(world, owner, building) else { return };
-    let Some(b) = world.get::<Building>(e) else { return };
+    let Some(b) = world.get::<Building>(e).copied() else { return };
     if b.kind == BuildingKind::Keep {
         return;
     }
-    let def = building_def(b.kind);
-    {
-        let mut q = world.query::<&mut Player>();
-        if let Some(mut p) = q.iter_mut(world).find(|p| p.player_id == owner) {
-            p.stock.refund(&def.cost, saladin_sim::fx!("0.5"));
-        }
-    }
-    eject_all(world, building);
-    world.despawn(e);
+    let cause =
+        if b.state == BuildState::Site { RazeCause::Cancelled } else { RazeCause::Demolished };
+    raze_building(world, owner, building, cause);
 }
 
 /// Move a building's rally flag. Trained units march there on spawn.

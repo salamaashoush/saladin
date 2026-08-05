@@ -1,15 +1,19 @@
-use super::{building_occupancy, clamp_world, find_owned, player_match};
+use super::{clamp_world, find_owned, occupancy_and_gates, player_match};
 use crate::components::*;
 use crate::{PathScratch, WorldConfig};
 use bevy_ecs::prelude::*;
 use saladin_sim::*;
 
-/// A* path from `from` to `to` over terrain + building occupancy. Shared by the
-/// AI brain's army-move / recall logic.
-pub(crate) fn path_to(world: &mut World, from: V2, to: V2) -> Vec<V2> {
+/// A* path from `from` to `to` over terrain + building occupancy, as `viewer`
+/// sees it — a gatehouse is a door for its owner and a wall for everyone else.
+/// Shared by the AI brain's army-move / recall logic.
+pub(crate) fn path_to(world: &mut World, viewer: u64, from: V2, to: V2) -> Vec<V2> {
     let seed = world.resource::<WorldConfig>().seed;
-    let occ = building_occupancy(world, false);
-    let passable = |tx: i32, ty: i32| is_passable(seed, tx, ty) && !occ.contains(&tile_key(tx, ty));
+    let (occ, gates) = occupancy_and_gates(world, false);
+    let passable = |tx: i32, ty: i32| {
+        let k = tile_key(tx, ty);
+        is_passable(seed, tx, ty) && !occ.contains(&k) && !gate_blocks(&gates, k, viewer)
+    };
     let cost = |tx: i32, ty: i32| move_cost_at(seed, tx, ty);
     let mut scratch = world.resource_mut::<PathScratch>();
     scratch.0.find_path_costed(&passable, &cost, from.x, from.y, to.x, to.y, MAX_EXPANSIONS)
@@ -26,8 +30,11 @@ pub(crate) fn move_unit(world: &mut World, owner: u64, unit: u64, target: V2) {
     let from = world.get::<Pos>(e).map(|p| p.pos);
     let Some(from) = from else { return };
     let seed = world.resource::<WorldConfig>().seed;
-    let occ = building_occupancy(world, false);
-    let passable = |tx: i32, ty: i32| is_passable(seed, tx, ty) && !occ.contains(&tile_key(tx, ty));
+    let (occ, gates) = occupancy_and_gates(world, false);
+    let passable = |tx: i32, ty: i32| {
+        let k = tile_key(tx, ty);
+        is_passable(seed, tx, ty) && !occ.contains(&k) && !gate_blocks(&gates, k, owner)
+    };
     let cost = |tx: i32, ty: i32| move_cost_at(seed, tx, ty);
     let path = {
         let mut scratch = world.resource_mut::<PathScratch>();
@@ -36,6 +43,7 @@ pub(crate) fn move_unit(world: &mut World, owner: u64, unit: u64, target: V2) {
     if let Some(mut u) = world.get_mut::<Unit>(e) {
         u.gather_state = GatherState::Idle;
         u.target_node = 0;
+        u.job_site = 0;
         u.attack_target = 0;
         u.home = target;
         if path.is_empty() {
@@ -83,6 +91,7 @@ pub(crate) fn gather(world: &mut World, owner: u64, unit: u64, node: u64) {
     if let Some(mut u) = world.get_mut::<Unit>(e) {
         u.gather_state = GatherState::ToResource;
         u.target_node = node;
+        u.job_site = 0;
         u.attack_target = 0;
         u.has_target = false;
     }
@@ -106,6 +115,7 @@ pub(crate) fn attack(world: &mut World, owner: u64, unit: u64, target: u64) {
         u.attack_target = target;
         u.gather_state = GatherState::Idle;
         u.target_node = 0;
+        u.job_site = 0;
         u.has_target = false;
     }
 }

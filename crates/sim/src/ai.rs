@@ -60,6 +60,20 @@ pub struct PlannerState {
     /// Standing enemy defensive structures (towers/watchtowers) — weigh into
     /// the assault go/no-go alongside their field army.
     pub enemy_towers: i32,
+    /// Unfinished sites by `BuildingKind` index. Build time now EXCEEDS a
+    /// decision window, so without this the ladder re-sites the same hall every
+    /// window until the bot is broke.
+    pub sites_in_flight: [i32; 16],
+    /// Own COMPLETE buildings below the repair threshold.
+    pub damaged: i32,
+    /// Peasants already on a job site.
+    pub builders_busy: i32,
+    pub storehouses: i32,
+    /// Own finished Towers that could become Watchtowers.
+    pub upgradable_towers: i32,
+    /// A worked resource cluster too far from the town to haul from — the
+    /// reason to plant a Storehouse.
+    pub remote_cluster: Option<V2>,
 }
 
 /// Tuning the planner reads — decision QUALITY + cadence, never a handicap.
@@ -95,6 +109,13 @@ pub struct PlannerTuning {
     pub gold_floor: i32,
     /// Wood/stone above this is a glut the market may sell down.
     pub sell_threshold: i32,
+    /// Whether the bot plants forward drop-offs at all.
+    pub wants_expansion: bool,
+    pub storehouse_target: i32,
+    /// Repair anything below this percentage of its health.
+    pub repair_threshold: i32,
+    /// Peasants pulled onto each new job site.
+    pub builders_per_site: i32,
 }
 
 /// Food crisis: the larder is at/under the floor while an army eats from it.
@@ -121,7 +142,13 @@ pub const FIELD_UNITS: [UnitKind; 8] = [
 
 /// The training hall a unit kind needs.
 fn trainer_for(kind: UnitKind) -> BuildingKind {
-    for k in [BuildingKind::Keep, BuildingKind::Barracks, BuildingKind::Stable, BuildingKind::SiegeWorkshop] {
+    for k in [
+        BuildingKind::Keep,
+        BuildingKind::Barracks,
+        BuildingKind::Stable,
+        BuildingKind::SiegeWorkshop,
+        BuildingKind::Mosque,
+    ] {
         if building_def(k).trains.contains(&kind) {
             return k;
         }
@@ -389,22 +416,52 @@ pub fn next_phase(s: &PlannerState, tune: &PlannerTuning) -> AiPhase {
     AiPhase::Military
 }
 
+/// What the executor should DO with the decision. The bot plays the whole
+/// roster through the same commands a human uses.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub enum BuildAction {
+    Build = 0,
+    Train = 1,
+    Upgrade = 2,
+    Repair = 3,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct BuildDecision {
     /// `UnitKind` when `is_unit`, else `BuildingKind` — both as their u8 value.
+    /// For `Upgrade`/`Repair` it names the kind to act ON; the executor picks
+    /// which of its buildings (lowest `GameId` wins, so peers agree).
     pub kind: u8,
     pub is_unit: bool,
     pub trainer: Option<BuildingKind>,
+    pub action: BuildAction,
 }
 
 const fn house() -> BuildDecision {
-    BuildDecision { kind: BuildingKind::House as u8, is_unit: false, trainer: None }
+    BuildDecision {
+        kind: BuildingKind::House as u8,
+        is_unit: false,
+        trainer: None,
+        action: BuildAction::Build,
+    }
 }
 fn train(kind: UnitKind, trainer: BuildingKind) -> BuildDecision {
-    BuildDecision { kind: kind as u8, is_unit: true, trainer: Some(trainer) }
+    BuildDecision {
+        kind: kind as u8,
+        is_unit: true,
+        trainer: Some(trainer),
+        action: BuildAction::Train,
+    }
 }
 fn build(kind: BuildingKind) -> BuildDecision {
-    BuildDecision { kind: kind as u8, is_unit: false, trainer: None }
+    BuildDecision { kind: kind as u8, is_unit: false, trainer: None, action: BuildAction::Build }
+}
+fn upgrade(kind: BuildingKind) -> BuildDecision {
+    BuildDecision { kind: kind as u8, is_unit: false, trainer: None, action: BuildAction::Upgrade }
+}
+fn repair() -> BuildDecision {
+    BuildDecision { kind: 0, is_unit: false, trainer: None, action: BuildAction::Repair }
 }
 
 pub fn count_own_kind(census: &Census, kind: UnitKind) -> i32 {
@@ -416,8 +473,15 @@ fn towers_below_cap(s: &PlannerState, tune: &PlannerTuning) -> bool {
 }
 
 /// The single best macro action to take next. One per call.
+///
+/// Every rung that sites a structure also checks `sites_in_flight`: a build now
+/// takes longer than a decision window, so a ladder that only asked "do I own
+/// one?" would found the same hall every window until the bot went broke. A
+/// rung whose kind is already rising simply falls through to the next.
 pub fn next_build(s: &PlannerState, tune: &PlannerTuning) -> Option<BuildDecision> {
     let has = |k: BuildingKind| s.owned.contains(&k);
+    let rising = |k: BuildingKind| s.sites_in_flight.get(k as usize).copied().unwrap_or(0) > 0;
+    let need = |k: BuildingKind| !has(k) && !rising(k);
     let pop_headroom = s.cap - s.pop;
     let pop_full = pop_headroom <= 0;
     let peasant_goal = dynamic_peasant_target(s, tune);
@@ -440,21 +504,30 @@ pub fn next_build(s: &PlannerState, tune: &PlannerTuning) -> Option<BuildDecisio
         if s.peasants < peasant_goal + tune.reserve_peasants && !pop_full {
             return Some(train(UnitKind::Peasant, BuildingKind::Keep));
         }
-        if pop_full {
+        if pop_full && !rising(BuildingKind::House) {
             return Some(house());
         }
         // A field is the only food that grows back, so a starving bot sows
         // before it does anything else with wood.
-        if s.farmland_near && s.farms < tune.farm_target + 2 && s.wood >= 45 {
+        if s.farmland_near
+            && s.farms + s.sites_in_flight[BuildingKind::Farm as usize] < tune.farm_target + 2
+            && s.wood >= 45
+        {
             return Some(build(BuildingKind::Farm));
         }
-        if tune.wants_fishing && s.shore_near && !has(BuildingKind::FishingHut) {
+        if tune.wants_fishing && s.shore_near && need(BuildingKind::FishingHut) {
             return Some(build(BuildingKind::FishingHut));
         }
-        if has(BuildingKind::Keep) && !has(BuildingKind::Granary) {
+        if s.farms > 0 && need(BuildingKind::Granary) {
             return Some(build(BuildingKind::Granary));
         }
         return None; // next_trade may still buy food with gold
+    }
+
+    // 0a) Fix what is falling down before adding to it — construction and
+    // repair are the same loop, so a bot that can build can mend.
+    if tune.repair_threshold > 0 && s.damaged > 0 {
+        return Some(repair());
     }
 
     // 1) Economy: peasants to the (growing) target.
@@ -463,68 +536,92 @@ pub fn next_build(s: &PlannerState, tune: &PlannerTuning) -> Option<BuildDecisio
     }
 
     // 2) Pop headroom.
-    if pop_headroom <= tune.pop_buffer {
+    if pop_headroom <= tune.pop_buffer && !rising(BuildingKind::House) {
         return Some(house());
     }
 
     // 3) Tech tree, in order. Barracks first.
-    if !has(BuildingKind::Barracks) {
+    if need(BuildingKind::Barracks) {
         return Some(build(BuildingKind::Barracks));
     }
 
     // 3a) Defensive core while teching.
     let tech_complete = (!tune.wants_cavalry || has(BuildingKind::Stable))
         && (!tune.wants_siege || (has(BuildingKind::Blacksmith) && has(BuildingKind::SiegeWorkshop)));
-    if !tech_complete && s.soldiers < tune.core_army && !pop_full {
+    if !tech_complete && has(BuildingKind::Barracks) && s.soldiers < tune.core_army && !pop_full {
         return Some(pick_army());
     }
 
-    // 3b) Economy infrastructure: the Market is the gold engine (cavalry,
-    // siege and tech all cost gold), a Granary shortens food hauls, and a
-    // shoreline Fishing Hut makes food self-sustaining.
-    if s.farmland_near && s.farms < tune.farm_target {
+    // 3b) Economy infrastructure: fields feed, the Granary hubs them, the
+    // Market is the gold engine (cavalry, siege, tech and the Mosque all cost
+    // gold), and a shoreline hut makes food self-sustaining.
+    if s.farmland_near && s.farms + s.sites_in_flight[BuildingKind::Farm as usize] < tune.farm_target
+    {
         return Some(build(BuildingKind::Farm));
     }
-    if tune.wants_market && !has(BuildingKind::Market) {
+    if tune.wants_market && need(BuildingKind::Market) {
         return Some(build(BuildingKind::Market));
     }
-    if tune.wants_fishing && s.shore_near && !has(BuildingKind::FishingHut) {
+    if tune.wants_fishing && s.shore_near && need(BuildingKind::FishingHut) {
         return Some(build(BuildingKind::FishingHut));
     }
-    if !has(BuildingKind::Granary) && s.peasants >= 6 {
+    // a hub with nothing to hub is a wasted 50 wood
+    if s.farms > 0 && need(BuildingKind::Granary) {
         return Some(build(BuildingKind::Granary));
     }
 
-    if tune.wants_cavalry && !has(BuildingKind::Stable) {
-        return Some(build(BuildingKind::Stable));
-    }
-    if tune.wants_siege && !has(BuildingKind::Blacksmith) {
+    if tune.wants_cavalry && need(BuildingKind::Blacksmith) {
         return Some(build(BuildingKind::Blacksmith));
     }
-    if tune.wants_siege && has(BuildingKind::Blacksmith) && !has(BuildingKind::SiegeWorkshop) {
+    if tune.wants_cavalry && has(BuildingKind::Blacksmith) && need(BuildingKind::Stable) {
+        return Some(build(BuildingKind::Stable));
+    }
+    if tune.wants_siege && need(BuildingKind::Blacksmith) {
+        return Some(build(BuildingKind::Blacksmith));
+    }
+    if tune.wants_siege && has(BuildingKind::Blacksmith) && need(BuildingKind::SiegeWorkshop) {
         return Some(build(BuildingKind::SiegeWorkshop));
     }
 
-    // 4) Defense under threat: towers to cap, then upgrade to a Watchtower.
+    // 3c) Expansion: a Storehouse at a worked cluster is the only way a town
+    // reaches past its own radius. It sits BELOW the tech rungs: a cluster the
+    // town cannot legally reach yet must never stall the whole ladder.
+    if tune.wants_expansion
+        && s.remote_cluster.is_some()
+        && s.storehouses + s.sites_in_flight[BuildingKind::Storehouse as usize]
+            < tune.storehouse_target
+    {
+        return Some(build(BuildingKind::Storehouse));
+    }
+
+
+    // 4) Defense under threat: towers to cap, then RAISE one where it already
+    // stands rather than buying a second tower on new ground.
     if s.threat_near_home >= tune.defend_threat {
-        if towers_below_cap(s, tune) {
+        if towers_below_cap(s, tune) && !rising(BuildingKind::Tower) {
             return Some(build(BuildingKind::Tower));
         }
-        if has(BuildingKind::Tower) && !has(BuildingKind::Watchtower) {
-            return Some(build(BuildingKind::Watchtower));
+        if s.upgradable_towers > 0 {
+            return Some(upgrade(BuildingKind::Tower));
         }
     }
 
-    if pop_full {
+    if pop_full && !rising(BuildingKind::House) {
         return Some(house());
     }
 
-    // 5) Imam support once an army forms.
+    // 5) Imam support once an army forms — which needs the mosque that trains
+    // them and steadies the ground they hold.
     if tune.imam_target > 0
         && s.soldiers >= 2
         && count_own_kind(&s.army_composition, UnitKind::Imam) < tune.imam_target
     {
-        return Some(train(UnitKind::Imam, BuildingKind::Keep));
+        if need(BuildingKind::Mosque) {
+            return Some(build(BuildingKind::Mosque));
+        }
+        if has(BuildingKind::Mosque) {
+            return Some(train(UnitKind::Imam, BuildingKind::Mosque));
+        }
     }
 
     // 6) Siege toward target.
@@ -544,13 +641,16 @@ pub fn next_build(s: &PlannerState, tune: &PlannerTuning) -> Option<BuildDecisio
     }
 
     // 7) Army toward the (enemy-tracking) target.
-    if s.soldiers < army_goal {
+    if s.soldiers < army_goal && has(BuildingKind::Barracks) {
         return Some(pick_army());
     }
 
-    // 8) Top up towers with spare wood.
-    if towers_below_cap(s, tune) {
+    // 8) Spare wood: another picket, or raise the one standing.
+    if towers_below_cap(s, tune) && !rising(BuildingKind::Tower) {
         return Some(build(BuildingKind::Tower));
+    }
+    if s.upgradable_towers > 0 {
+        return Some(upgrade(BuildingKind::Tower));
     }
 
     None
@@ -713,6 +813,12 @@ mod tests {
             farmland_near: false,
             farms: 0,
             enemy_towers: 0,
+            sites_in_flight: [0; 16],
+            damaged: 0,
+            builders_busy: 0,
+            storehouses: 0,
+            upgradable_towers: 0,
+            remote_cluster: None,
         }
     }
 
@@ -741,6 +847,10 @@ mod tests {
             farm_target: 0,
             gold_floor: 0,
             sell_threshold: i32::MAX,
+            wants_expansion: false,
+            storehouse_target: 0,
+            repair_threshold: 0,
+            builders_per_site: 1,
         }
     }
 
@@ -902,8 +1012,79 @@ mod tests {
         let d = next_build(&s, &tune).unwrap();
         assert!(!d.is_unit && d.kind == BuildingKind::FishingHut as u8);
         s.owned.insert(BuildingKind::FishingHut);
+        // a hub with nothing to hub is 50 wasted wood
+        let d = next_build(&s, &tune).unwrap();
+        assert!(d.kind != BuildingKind::Granary as u8, "granary with no farm");
+        s.farms = 1;
         let d = next_build(&s, &tune).unwrap();
         assert!(!d.is_unit && d.kind == BuildingKind::Granary as u8);
+    }
+
+    #[test]
+    fn the_ladder_never_re_sites_what_is_already_rising() {
+        let mut owned = HashSet::new();
+        owned.insert(BuildingKind::Keep);
+        let mut s = state(owned);
+        let tune = tuning();
+        // with no barracks the ladder asks for one...
+        let d = next_build(&s, &tune).unwrap();
+        assert_eq!(d.kind, BuildingKind::Barracks as u8);
+        assert_eq!(d.action, BuildAction::Build);
+        // ...and stops asking the moment one is under construction
+        s.sites_in_flight[BuildingKind::Barracks as usize] = 1;
+        for _ in 0..6 {
+            let Some(d) = next_build(&s, &tune) else { break };
+            assert_ne!(d.kind, BuildingKind::Barracks as u8, "founded a second barracks");
+        }
+    }
+
+    #[test]
+    fn a_threatened_tower_is_raised_not_re_bought() {
+        let mut s = state(barracks_only());
+        let mut tune = tuning();
+        tune.max_towers = 1;
+        tune.defend_threat = 2;
+        s.threat_near_home = 5;
+        s.towers = 1;
+        s.upgradable_towers = 1;
+        let d = next_build(&s, &tune).unwrap();
+        assert_eq!(d.action, BuildAction::Upgrade);
+        assert_eq!(d.kind, BuildingKind::Tower as u8);
+        // and a Watchtower is never founded outright
+        assert!(!crate::buildings_defs::building_def(BuildingKind::Watchtower).buildable);
+    }
+
+    #[test]
+    fn damage_is_mended_before_the_town_grows() {
+        let mut s = state(barracks_only());
+        let mut tune = tuning();
+        tune.repair_threshold = 60;
+        s.damaged = 1;
+        assert_eq!(next_build(&s, &tune).unwrap().action, BuildAction::Repair);
+        // an Easy bot with no repair budget carries on as before
+        tune.repair_threshold = 0;
+        assert_ne!(next_build(&s, &tune).unwrap().action, BuildAction::Repair);
+    }
+
+    #[test]
+    fn a_worked_cluster_out_of_reach_earns_a_storehouse() {
+        let mut s = state(barracks_only());
+        let mut tune = tuning();
+        tune.wants_expansion = true;
+        tune.storehouse_target = 1;
+        assert!(
+            next_build(&s, &tune).map(|d| d.kind) != Some(BuildingKind::Storehouse as u8),
+            "nothing remote to serve"
+        );
+        s.remote_cluster = Some(V2::new(crate::fx!("200"), crate::fx!("60")));
+        let d = next_build(&s, &tune).unwrap();
+        assert_eq!(d.kind, BuildingKind::Storehouse as u8);
+        s.storehouses = 1;
+        assert_ne!(
+            next_build(&s, &tune).map(|d| d.kind),
+            Some(BuildingKind::Storehouse as u8),
+            "one is the target"
+        );
     }
 
     #[test]

@@ -1,11 +1,13 @@
 use crate::MatchStatuses;
 use crate::WorldConfig;
-use crate::components::{Building, GameId, MatchId, Owner, Player, Pos, ResourceNode, Unit};
+use crate::components::{
+    Building, FieldOf, GameId, MatchId, Owner, Player, Pos, ResourceNode, Unit,
+};
 use bevy_ecs::prelude::*;
 use bevy_platform::collections::HashMap;
 use saladin_sim::{
-    BuildingKind, ECONOMY_DT, FISH_REGEN_PER_TICK, FISHING_HUT_RANGE, FOOD_YIELD, ResourceType,
-    apply_upkeep, dist, is_passable, unit_def,
+    AuraTarget, ECONOMY_DT, FOOD_YIELD, ResourceType, V2, WorkAura, apply_upkeep, building_def,
+    dist, is_passable, operational, unit_def,
 };
 
 /// Food upkeep — runs every economy tick (2 s). Only COMBAT units draw rations;
@@ -13,38 +15,64 @@ use saladin_sim::{
 /// instead caps army size. A player whose larder runs dry starves and their
 /// soldiers bleed hp until fed; a soldier that hits 0 hp dies. Ported from the
 /// SpacetimeDB `economySystem` reducer.
+#[allow(clippy::too_many_arguments)]
 pub fn economy(
     statuses: Res<MatchStatuses>,
     cfg: Res<WorldConfig>,
     mut commands: Commands,
     mut q_players: Query<(&GameId, &mut Player, &MatchId)>,
     mut q_units: Query<(Entity, &Owner, &mut Unit)>,
-    q_buildings: Query<(&Pos, &Building)>,
-    mut q_nodes: Query<(&Pos, &mut ResourceNode)>,
+    q_buildings: Query<(&GameId, &Pos, &Owner, &Building)>,
+    mut q_nodes: Query<(&Pos, &mut ResourceNode, Option<&FieldOf>)>,
     mut stats: ResMut<crate::MatchStats>,
 ) {
     // Regrowth. A sown field comes back on its own — how fast is the soil's
     // doing — and a fishing hut tends the waters in its reach. Everything else
     // (timber, ore, wild herds) is finite and stays mined out.
     // Additive + clamped, so iteration order can never desync the lockstep.
-    let huts: Vec<saladin_sim::V2> = q_buildings
+    let auras: Vec<(u64, V2, WorkAura)> = q_buildings
         .iter()
-        .filter(|(_, b)| b.kind == BuildingKind::FishingHut)
-        .map(|(p, _)| p.pos)
+        .filter(|(_, _, _, b)| operational(b.state))
+        .filter_map(|(_, p, o, b)| building_def(b.kind).aura.map(|a| (o.0, p.pos, a)))
         .collect();
-    for (np, mut n) in &mut q_nodes {
-        // a sown field grows back to its own capacity
+    // A field belongs to the farm that sowed it, so only that player's granary
+    // may tend it. A wild fishery belongs to nobody: whoever plants the hut
+    // tends the water, and the ground is contested on purpose.
+    let farm_owner: HashMap<u64, u64> =
+        q_buildings.iter().map(|(g, _, o, _)| (g.0, o.0)).collect();
+    let tended = |at: V2, target: AuraTarget, node_owner: Option<u64>| -> i32 {
+        auras
+            .iter()
+            .filter(|(o, p, a)| {
+                a.target == target
+                    && node_owner.is_none_or(|n| n == *o)
+                    && dist(*p, at) <= a.radius
+            })
+            .map(|(_, _, a)| a.regen)
+            .max()
+            .unwrap_or(0)
+    };
+    for (np, mut n, field) in &mut q_nodes {
+        // a sown field grows back to its own capacity, faster under a granary
         if n.regen > 0 && n.remaining < n.cap {
-            n.remaining = (n.remaining + n.regen).min(n.cap);
+            let owner = field.and_then(|f| farm_owner.get(&f.0).copied());
+            let extra = if auras.is_empty() {
+                0
+            } else {
+                tended(np.pos, AuraTarget::Field, Some(owner.unwrap_or(0)))
+            };
+            n.remaining = (n.remaining + n.regen + extra).min(n.cap);
         }
         // a hut restocks the waters in its reach up to a natural school
         if n.res_type == ResourceType::Food
             && n.remaining < FOOD_YIELD
-            && !huts.is_empty()
+            && !auras.is_empty()
             && !is_passable(cfg.seed, np.pos.x.to_num::<i32>(), np.pos.y.to_num::<i32>())
-            && huts.iter().any(|h| dist(*h, np.pos) <= FISHING_HUT_RANGE)
         {
-            n.remaining = (n.remaining + FISH_REGEN_PER_TICK).min(FOOD_YIELD);
+            let regen = tended(np.pos, AuraTarget::WaterFood, None);
+            if regen > 0 {
+                n.remaining = (n.remaining + regen).min(FOOD_YIELD);
+            }
         }
     }
     // Combat-unit entities grouped by owner (read pass).

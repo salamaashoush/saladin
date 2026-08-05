@@ -68,6 +68,8 @@ pub fn building_kind_name(kind: BuildingKind) -> &'static str {
         BuildingKind::SiegeWorkshop => "siege_workshop",
         BuildingKind::Watchtower => "watchtower",
         BuildingKind::Farm => "farm",
+        BuildingKind::Storehouse => "storehouse",
+        BuildingKind::Mosque => "mosque",
     }
 }
 
@@ -85,6 +87,12 @@ pub fn building_mesh(kind: BuildingKind, faction: saladin_sim::Faction) -> Mesh 
     baked("buildings", &format!("{name}_{}", faction_name(faction)))
         .or_else(|| baked("buildings", name))
         .unwrap_or_else(|| super::buildings::building_mesh(kind))
+}
+
+/// Baked construction scaffold, or the procedural fallback. Faction-blind:
+/// timber lashed round a half-built wall looks the same in either army.
+pub fn scaffold_mesh() -> Mesh {
+    baked("buildings", "scaffold").unwrap_or_else(super::buildings::scaffold_mesh)
 }
 
 /// Baked faction wall arm, or the procedural fallback.

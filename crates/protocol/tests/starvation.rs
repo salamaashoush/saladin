@@ -63,6 +63,7 @@ fn spawn_soldier(app: &mut App, id: u64, owner: u64, pos: V2) {
             routing: false,
             home: pos,
             garrisoned_in: 0,
+            job_site: 0,
             path: vec![],
             path_idx: 0,
         },

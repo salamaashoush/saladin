@@ -5,6 +5,7 @@
 
 pub mod ai;
 pub mod biomes;
+pub mod build_panel;
 pub mod buildings;
 pub mod buildings_defs;
 pub mod climate;
@@ -31,7 +32,7 @@ pub mod units;
 pub mod worldgrid;
 
 pub use ai::{
-    AiPhase, AssaultIntel, BuildDecision, Census, FIELD_UNITS, PlannerState, PlannerTuning,
+    AiPhase, AssaultIntel, BuildAction, BuildDecision, Census, FIELD_UNITS, PlannerState, PlannerTuning,
     SquadRole, TacticalTarget, TacticalTuning, ThreatState, TradeDecision, army_power,
     counter_composition, counter_score, count_own_kind, dynamic_army_target,
     dynamic_peasant_target, eats_food, food_crisis, mustered, next_army_kind, next_build,
@@ -65,17 +66,26 @@ pub use terrain::{
     seed_base, seed_bias, seed_preset, start_point,
 };
 pub use buildings::{
-    BUILD_SLOPE_MAX, FOUNDATION_RELIEF, Occupant, PlaceError, Tile, can_place, check_place,
-    composes_with_walls, find_buildable_near, footprint_relief, soil_quality,
-    footprint_center, footprint_tiles, has_passable_approach, is_water_adjacent, occupancy_set,
+    BUILD_SLOPE_MAX, FOUNDATION_RELIEF, Occupant, PlaceError, Tile, accepts, build_rate,
+    cancel_refund, check_build, check_place, composes_with_walls, demolish_refund,
+    find_buildable_near, footprint_relief, soil_quality, gate_blocks, hp_step, operational,
+    place_error_text, repair_charge, site_start_hp, work_step,
+    footprint_center, footprint_tiles, has_passable_approach, occupancy_set,
     tile_key,
 };
-pub use buildings_defs::{BUILD_CATEGORIES, BuildCategory, BuildingDef, building_def};
-pub use combat::{Attacker, CombatAct, DEFENSIVE_LEASH, acquire_target, combat_action, effective_damage};
+pub use buildings_defs::{
+    ACCEPTS_ALL, ACCEPTS_FOOD, BUILD_CATEGORIES, AuraTarget, BuildCategory, BuildingDef, WorkAura,
+    building_def, res_bit,
+};
+pub use combat::{
+    Attacker, CombatAct, DEFENSIVE_LEASH, acquire_target, building_damage, combat_action,
+    effective_damage,
+};
 pub use constants::*;
 pub use economy::{
     FOOD_RESERVE_PER_POP, GATHER_PRIORITY, ResourceCost, Stockpile, TradeResult, UpkeepResult,
-    apply_upkeep, apply_upkeep_default, balanced_gather_types, food_low, market_buy, market_sale,
+    apply_upkeep, apply_upkeep_default, balanced_gather_types, food_low, harvest_reach, market_buy,
+    market_sale,
 };
 pub use elevation::{ELEV_BONUS_MAX, ELEV_BONUS_SPAN, elevation, elevation_at, elevation_range_bonus};
 pub use enums::*;
@@ -88,12 +98,13 @@ pub use morale::{
 };
 pub use presets::{MAP_PRESETS, MapBias, MapPreset, NEUTRAL_BIAS, bias_of, map_preset_by_id, map_preset_by_index};
 pub use spatial::{CELL_COUNT, CELL_SIZE, CELLS_PER_ROW, cell_coords, cell_of, cells_in_radius, surrounding_cells};
+pub use build_panel::{BuildRowState, BuildStatus, build_panel_state, build_row_state};
 pub use research::{
-    ALL_TECHS, ResearchProgressRow, ResearchRowState, ResearchStatus, Tech, UpgradeDef,
+    ALL_TECHS, building_hp_delta, ResearchProgressRow, ResearchRowState, ResearchStatus, Tech, UpgradeDef,
     effective_building_def, effective_unit_def, has_tech, research_panel_state, set_tech, tech_bit,
     techs_in_mask, upgrade_def,
 };
-pub use tech::has_prereq;
+pub use tech::{all_prereqs, has_prereq, has_prereq_all};
 pub use math::{
     Fnv1a, Fx, Located, ONE, StepResult, V2, ZERO, dist, dist2, fx_sqrt, nearest_index,
     nearest_within, step_toward,

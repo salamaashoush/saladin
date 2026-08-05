@@ -6,6 +6,7 @@ use saladin_sim::Fnv1a;
 
 mod ai_brain;
 mod combat;
+mod construction;
 mod economy;
 mod gather;
 mod movement;
@@ -30,6 +31,7 @@ pub fn register(app: &mut App) {
             movement::movement.in_set(SimSet::Movement),
             separation::separation.in_set(SimSet::Movement).run_if(every(2)),
             gather::gather.in_set(SimSet::Gather).run_if(every(4)),
+            construction::construction.in_set(SimSet::Gather).run_if(every(4)),
             combat::combat.in_set(SimSet::Combat).run_if(every(4)),
             reap_orphan_fields.in_set(SimSet::Combat).run_if(every(4)),
             economy::economy.in_set(SimSet::Economy).run_if(every(40)),
@@ -87,26 +89,67 @@ fn maintain_match_statuses(q: Query<&MatchInfo>, mut statuses: ResMut<MatchStatu
 /// its own FNV-1a digest and the digests COMBINE COMMUTATIVELY (a sum of
 /// well-mixed per-row hashes), so no sort or collection is needed — O(N),
 /// zero allocation, independent of ECS iteration order by construction.
+#[allow(clippy::type_complexity)]
 fn state_hash(
     mut hash: ResMut<StateHash>,
-    q: Query<(&GameId, &Pos, Option<&Unit>, Option<&Building>, Option<&ResourceNode>)>,
+    q: Query<(
+        &GameId,
+        Option<&Pos>,
+        Option<&Unit>,
+        Option<&Building>,
+        Option<&ResourceNode>,
+        Option<&Player>,
+        Option<&Research>,
+    )>,
 ) {
     let mut acc: u64 = 0;
-    for (id, pos, unit, bld, node) in &q {
+    for (id, pos, unit, bld, node, player, research) in &q {
         let mut f = Fnv1a::default();
         f.write_u64(id.0);
-        f.write_v2(pos.pos);
+        if let Some(p) = pos {
+            f.write_v2(p.pos);
+        }
         if let Some(u) = unit {
             f.write_u64(u.hp as u64);
             f.write_v2(u.target);
             f.write_u64(u.has_target as u64);
             f.write_u64(u.gather_state as u64);
+            f.write_u64(u.job_site);
         }
         if let Some(b) = bld {
             f.write_u64(b.hp as u64);
+            f.write_u64(b.kind as u64);
+            f.write_u64(b.state as u64);
+            // what an upgrade is becoming, and where its output walks: both are
+            // command-driven sim state, so both are desyncs waiting to happen
+            f.write_u64(b.target_kind as u64);
+            f.write_v2(b.rally);
+            f.write_fx(b.work);
+            f.write_u64(b.builders as u64);
+            f.write_u64(b.queue_len as u64);
+            f.write_fx(b.train_work);
+            for k in b.queued() {
+                f.write_u64(*k as u64);
+            }
         }
         if let Some(n) = node {
             f.write_u64(n.remaining as u64);
+        }
+        // the stockpile, the tech tree and research progress ARE sim state: a
+        // desync in any of them was invisible while this query demanded a Pos
+        if let Some(p) = player {
+            f.write_u64(p.stock.wood as u64);
+            f.write_u64(p.stock.stone as u64);
+            f.write_u64(p.stock.food as u64);
+            f.write_u64(p.stock.gold as u64);
+            f.write_u64(p.tech_mask);
+            f.write_u64(p.hunger as u64);
+            f.write_u64(p.defeated as u64);
+        }
+        if let Some(r) = research {
+            f.write_u64(r.tech as u64);
+            f.write_fx(r.progress);
+            f.write_u64(r.done as u64);
         }
         // golden-ratio mix before the commutative sum so weak per-row deltas
         // can't cancel each other out

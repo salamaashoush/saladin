@@ -14,11 +14,12 @@ use crate::{MatchStatuses, PathScratch, Shot, ShotEvents, WorldConfig};
 use bevy_ecs::prelude::*;
 use bevy_platform::collections::{HashMap, HashSet};
 use saladin_sim::{
-    Attacker, BuildingKind, CELL_COUNT, CELLS_PER_ROW, COMBAT_DT, CombatAct, DEFENSIVE_LEASH, Fx,
+    Attacker, BuildState, BuildingKind, CELL_COUNT, CELLS_PER_ROW, COMBAT_DT, CombatAct,
+    DEFENSIVE_LEASH, Fx,
     GarrisonOccupant, MORALE_MAX, Stance, UnitKind, V2, building_def, cell_of, combat_action, dist,
-    dist2, effective_building_def, effective_damage, effective_unit_def,
+    building_damage, dist2, effective_building_def, effective_damage, effective_unit_def,
     elevation_at, elevation_range_bonus, garrison_fire_power, is_passable, is_routing, morale_after_hit,
-    morale_recover, move_cost_at, nearest_passable_grid, unit_def,
+    morale_recover, move_cost_at, nearest_passable_grid, operational, unit_def,
 };
 
 const DT: Fx = COMBAT_DT;
@@ -59,6 +60,7 @@ struct BSnap {
     owner: u64,
     mtch: u64,
     kind: BuildingKind,
+    state: BuildState,
 }
 
 /// What to write back to a unit after the decide pass.
@@ -258,7 +260,15 @@ pub fn combat(
 
     s.buildings.clear();
     for (ent, g, pos, owner, mid, b) in q_buildings.iter() {
-        s.buildings.push(BSnap { id: g.0, entity: ent, pos: pos.pos, owner: owner.0, mtch: mid.0, kind: b.kind });
+        s.buildings.push(BSnap {
+            id: g.0,
+            entity: ent,
+            pos: pos.pos,
+            owner: owner.0,
+            mtch: mid.0,
+            kind: b.kind,
+            state: b.state,
+        });
     }
     s.buildings.sort_unstable_by_key(|x| x.id);
 
@@ -428,20 +438,21 @@ pub fn combat(
                 out.clear_move = true;
                 continue;
             }
-            // strike
-            let armor = if t_is_unit {
-                let t = &s.units[s.uidx[&target_id] as usize];
-                effective_unit_def(t.kind, mask_of(t.owner)).armor_class
-            } else {
-                let t = &s.buildings[s.bidx[&target_id] as usize];
-                effective_building_def(t.kind, mask_of(t.owner)).armor_class
-            };
+            // strike. A structure takes SIEGE damage through its own
+            // `siege_resist`, so stone works can be made hard against rams
+            // without touching the armor cells units share with them.
             let atk = Attacker {
                 attack: Fx::from_num(def.attack),
                 damage_type: def.damage_type,
                 bonus_vs_armor: def.bonus_vs_armor,
             };
-            let dmg = effective_damage(&atk, armor);
+            let dmg = if t_is_unit {
+                let t = &s.units[s.uidx[&target_id] as usize];
+                effective_damage(&atk, effective_unit_def(t.kind, mask_of(t.owner)).armor_class)
+            } else {
+                let t = &s.buildings[s.bidx[&target_id] as usize];
+                building_damage(&atk, &effective_building_def(t.kind, mask_of(t.owner)))
+            };
             if def.ranged {
                 shots.0.push(Shot { from: a.pos, to: tpos, stone: a.kind == UnitKind::Mangonel });
             }
@@ -460,7 +471,7 @@ pub fn combat(
                 s.bhp[j] = (s.bhp[j] - dmg).max(0);
                 if s.bhp[j] <= 0 {
                     s.bdead[j] = true;
-                    if s.buildings[j].kind == BuildingKind::Keep {
+                    if building_def(s.buildings[j].kind).defeat_on_death {
                         defeated_owners.insert(s.buildings[j].owner);
                     }
                 }
@@ -503,7 +514,8 @@ pub fn combat(
     // ── structure fire: tower self-fire + garrisoned shooters ────────────────
     let mut bcd: Vec<(Entity, Fx)> = Vec::with_capacity(m);
     for (bi, b) in s.buildings.iter().enumerate() {
-        if s.bdead[bi] || !statuses.simulates(b.mtch) {
+        // a foundation has no parapet: an unfinished tower fires nothing
+        if s.bdead[bi] || !operational(b.state) || !statuses.simulates(b.mtch) {
             continue;
         }
         let bdef = effective_building_def(b.kind, mask_of(b.owner));
@@ -627,12 +639,15 @@ pub fn combat(
                 }
             });
         }
+        // the ground a keep or a mosque steadies: `morale_radius` is the rule,
+        // not a hardcoded kind, so a new faith structure is a ROW
         if !support {
             for b in &s.buildings {
-                if b.kind == BuildingKind::Keep
-                    && b.owner == a.owner
-                    && dist2(a.pos, b.pos) <= ALLY_RADIUS * ALLY_RADIUS
-                {
+                if b.owner != a.owner || !operational(b.state) {
+                    continue;
+                }
+                let r = building_def(b.kind).morale_radius;
+                if r > Fx::ZERO && dist2(a.pos, b.pos) <= r * r {
                     support = true;
                     break;
                 }

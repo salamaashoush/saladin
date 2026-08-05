@@ -45,6 +45,29 @@ pub fn label(p: &mut ChildSpawnerCommands, font: &UiFont, text: &str, size: f32,
     ));
 }
 
+/// A label in a fixed-width column. Taffy sizes an auto-height parent from its
+/// children's MAX-CONTENT height — one line — and only then stretches them to
+/// the column width, so a wrapping label makes the panel too short and the text
+/// spills over the border. A definite width makes the first measure the right
+/// one.
+pub fn wrap_label(
+    p: &mut ChildSpawnerCommands,
+    font: &UiFont,
+    text: &str,
+    size: f32,
+    color: Color,
+    width: f32,
+) {
+    p.spawn((Node { width: Val::Px(width), ..default() },)).with_children(|p| {
+        p.spawn((
+            Text::new(text),
+            TextFont { font: font.0.clone().into(), font_size: FontSize::Px(size), font_smoothing: bevy::text::FontSmoothing::None, ..default() },
+            TextColor(color),
+            bevy::text::LineHeight::RelativeToFont(1.3),
+        ));
+    });
+}
+
 /// "12 Wood, 5 Stone" cost line for a button.
 pub fn cost_line(cost: &ResourceCost) -> String {
     let mut parts = Vec::new();
@@ -109,6 +132,10 @@ pub struct BtnStyle {
     /// Uniform card height keeps icon and text-only buttons aligned in a row.
     pub min_height: f32,
     pub icon: Option<Handle<Image>>,
+    /// Third line, under the cost: why the card is locked, or what it becomes.
+    /// The cost line stays put — a price a player cannot read yet is a price he
+    /// cannot plan around.
+    pub note: Option<String>,
 }
 
 impl Default for BtnStyle {
@@ -120,6 +147,7 @@ impl Default for BtnStyle {
             min_width: 86.0,
             min_height: 66.0,
             icon: None,
+            note: None,
         }
     }
 }
@@ -128,6 +156,11 @@ impl BtnStyle {
     /// Compact text chip (tab rows, inline toggles).
     pub fn chip() -> Self {
         BtnStyle { min_width: 64.0, min_height: 30.0, ..default() }
+    }
+
+    /// Icon-sized chip for queue slots.
+    pub fn slot() -> Self {
+        BtnStyle { min_width: 34.0, min_height: 40.0, ..default() }
     }
 }
 
@@ -187,6 +220,9 @@ pub fn tool_button(
         label(p, font, title, FONT_SM, text_color);
         if let Some(sub) = sub {
             label(p, font, &sub, 10.0, if style.disabled { TEXT_DIM } else { GOLD });
+        }
+        if let Some(note) = &style.note {
+            label(p, font, note, 10.0, WARN);
         }
     });
 }

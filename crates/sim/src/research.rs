@@ -142,7 +142,7 @@ const UPGRADE_DEFS: [UpgradeDef; 6] = [
         requires: None,
         applies_to: never,
         delta: NO_DELTA,
-        building_delta: Some(BuildingDelta { max_hp: 150, armor_tier: 1 }),
+        building_delta: Some(BuildingDelta { max_hp: 250, armor_tier: 0 }),
         applies_to_buildings: true,
     },
     // Conscription
@@ -233,8 +233,17 @@ pub fn effective_building_def(kind: BuildingKind, mask: u64) -> BuildingDef {
     if !changed {
         return base;
     }
-    out.armor_class = clamp_tier(tier, ArmorClass::Stone);
+    if tier != base.armor_class as i32 {
+        out.armor_class = clamp_tier(tier, ArmorClass::Stone);
+    }
     out
+}
+
+/// Health a building of `kind` gains when the owner's tech mask moves from
+/// `before` to `after` — what a completed structural tech RETRO-APPLIES to
+/// everything already standing.
+pub fn building_hp_delta(before: u64, after: u64, kind: BuildingKind) -> i32 {
+    effective_building_def(kind, after).max_hp - effective_building_def(kind, before).max_hp
 }
 
 // ── research panel (UI-facing, pure) ─────────────────────────────────────────
@@ -346,9 +355,32 @@ mod tests {
     fn masonry_hardens_buildings_only() {
         let m = set_tech(0, Tech::Masonry);
         let keep = effective_building_def(BuildingKind::Keep, m);
-        assert_eq!(keep.max_hp, 1650); // 1500 + 150
+        assert_eq!(keep.max_hp, 1750); // 1500 + 250
+        assert_eq!(keep.armor_class, building_def(BuildingKind::Keep).armor_class);
         // unit unaffected
         assert_eq!(effective_unit_def(UnitKind::Spearman, m).max_hp, 70);
+    }
+
+    /// The old `+1 armor tier` was a measured NO-OP on every Stone kind and a
+    /// NET DOWNGRADE on the Siege Workshop (Leather -> Mail moves it into a
+    /// column siege hits HARDER). Masonry must help every structure.
+    #[test]
+    fn masonry_helps_every_structure() {
+        use crate::combat::{Attacker, building_damage};
+        let m = set_tech(0, Tech::Masonry);
+        let ram = crate::units::unit_def(UnitKind::Ram);
+        let atk = Attacker::new(Fx::from_num(ram.attack), ram.damage_type);
+        for &k in BuildingKind::ALL {
+            let hits = |d: &BuildingDef| {
+                let per = building_damage(&atk, d);
+                (d.max_hp + per - 1) / per
+            };
+            let before = hits(building_def(k));
+            let after = hits(&effective_building_def(k, m));
+            assert!(after > before, "masonry left {k:?} at {before} hits");
+        }
+        assert_eq!(building_hp_delta(0, m, BuildingKind::Keep), 250);
+        assert_eq!(building_hp_delta(m, m, BuildingKind::Keep), 0);
     }
 
     #[test]

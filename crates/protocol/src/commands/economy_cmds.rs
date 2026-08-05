@@ -4,13 +4,11 @@ use crate::NextEntityId;
 use bevy_ecs::prelude::*;
 use saladin_sim::*;
 
-/// Sell wood, stone or food for gold at the market rate. Requires an owned
-/// Market; the sale rounds down to whole lots so a coin is never minted free.
+/// Sell wood, stone or food for gold at the market rate. Requires a standing
+/// structure whose def `enables_trade`; the sale rounds down to whole lots so a
+/// coin is never minted free.
 pub(crate) fn market_trade(world: &mut World, owner: u64, res: ResourceType, amount: i32) {
-    if res == ResourceType::Gold {
-        return;
-    }
-    if !owned_building_kinds(world, owner).contains(&BuildingKind::Market) {
+    if res == ResourceType::Gold || !trades(world, owner) {
         return;
     }
     let mut q = world.query::<&mut Player>();
@@ -26,10 +24,7 @@ pub(crate) fn market_trade(world: &mut World, owner: u64, res: ResourceType, amo
 /// Buy wood, stone or food with gold at the (worse) buy rate — the reverse
 /// leg of the market, for rescuing a starving army or a stalled build.
 pub(crate) fn market_buy_cmd(world: &mut World, owner: u64, res: ResourceType, amount: i32) {
-    if res == ResourceType::Gold {
-        return;
-    }
-    if !owned_building_kinds(world, owner).contains(&BuildingKind::Market) {
+    if res == ResourceType::Gold || !trades(world, owner) {
         return;
     }
     let mut q = world.query::<&mut Player>();
@@ -42,13 +37,22 @@ pub(crate) fn market_buy_cmd(world: &mut World, owner: u64, res: ResourceType, a
     p.stock.add(res, buy.gained);
 }
 
+/// Does the owner hold a finished structure that opens the market? The flag on
+/// the def is what decides, not a hardcoded `kind == Market`.
+fn trades(world: &mut World, owner: u64) -> bool {
+    owned_building_kinds(world, owner).iter().any(|k| building_def(*k).enables_trade)
+}
+
 /// Begin researching a Blacksmith tech for `owner`. Mirrors `startResearchFor`:
 /// validates the host is an owned Blacksmith, the tech's prereq, no duplicate
 /// (done or in flight), and affordability — then pays and inserts the research
 /// row. Shared by the human command and the AI brain. Returns success.
 pub(crate) fn start_research_at(world: &mut World, owner: u64, building: u64, tech: u8) -> bool {
     let Some(be) = find_owned(world, owner, building) else { return false };
-    if world.get::<Building>(be).is_none_or(|b| b.kind != BuildingKind::Blacksmith) {
+    let hosts = world
+        .get::<Building>(be)
+        .is_some_and(|b| operational(b.state) && building_def(b.kind).hosts_research);
+    if !hosts {
         return false;
     }
     start_research(world, owner, tech)
@@ -64,7 +68,7 @@ pub(crate) fn start_research(world: &mut World, owner: u64, tech: u8) -> bool {
         return false;
     }
     let owned = owned_building_kinds(world, owner);
-    if !owned.contains(&BuildingKind::Blacksmith) {
+    if !owned.iter().any(|k| building_def(*k).hosts_research) {
         return false;
     }
     if !has_prereq(&owned, up.requires) {

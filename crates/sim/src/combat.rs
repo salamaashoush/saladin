@@ -61,6 +61,18 @@ pub fn effective_damage(atk: &Attacker, armor: ArmorClass) -> i32 {
     dealt.max(1)
 }
 
+/// Damage one hit deals to a STRUCTURE. Siege damage is scaled by the
+/// building's own `siege_resist`, which is why stone works can be made hard
+/// against rams without touching the Leather/Mail cells of DAMAGE_MATRIX that
+/// units share — a ram must never become anti-infantry.
+pub fn building_damage(atk: &Attacker, def: &crate::buildings_defs::BuildingDef) -> i32 {
+    let base = effective_damage(atk, def.armor_class);
+    if atk.damage_type != DamageType::Siege {
+        return base;
+    }
+    (Fx::from_num(base) * def.siege_resist).floor().to_num::<i32>().max(1)
+}
+
 /// Auto-acquisition target for a combatant at `pos` with `aggro_range`. Siege
 /// engines (`prefers_buildings`) lock onto the nearest enemy building first,
 /// falling back to units; everyone else picks the nearest enemy unit.
@@ -115,6 +127,25 @@ mod tests {
         a.bonus_vs_armor[ArmorClass::Mail as usize] = crate::fx!("3");
         // 10 * 0.55 * 3 = 16.5 -> 16
         assert_eq!(effective_damage(&a, ArmorClass::Mail), 16);
+    }
+
+    #[test]
+    fn siege_resist_hardens_walls_without_touching_units() {
+        use crate::buildings_defs::building_def;
+        use crate::enums::BuildingKind;
+        let ram = Attacker::new(crate::fx!("40"), DamageType::Siege);
+        // 40 * 2.5 vs stone = 100, then the wall's own resistance
+        let wall = building_def(BuildingKind::Wall);
+        assert_eq!(
+            building_damage(&ram, wall),
+            (crate::fx!("100") * wall.siege_resist).floor().to_num::<i32>()
+        );
+        // a spearman's pierce is untouched by any of it
+        let spear = Attacker::new(crate::fx!("12"), DamageType::Pierce);
+        assert_eq!(building_damage(&spear, wall), effective_damage(&spear, wall.armor_class));
+        // and never below one
+        let pebble = Attacker::new(crate::fx!("1"), DamageType::Siege);
+        assert!(building_damage(&pebble, wall) >= 1);
     }
 
     #[test]
