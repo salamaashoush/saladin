@@ -31,10 +31,20 @@ const ISLAND_SCALE: Fx = crate::fx!("0.015");
 // ridged-multifractal mountain ranges: fold the noise about its midline so
 // crests chain into ranges instead of fbm blobs
 const RIDGE_SCALE: Fx = crate::fx!("0.022");
-const RIDGE_GAIN: Fx = crate::fx!("0.2");
-// terraced hill flanks (low-poly plateau stylization)
+const RIDGE_GAIN: Fx = crate::fx!("0.13");
+// The massif envelope: a very low-frequency dome (wavelength ~110 tiles) that
+// decides WHERE a range has mass. Ridges are multiplied by it, so a crest is
+// texture on a mountain instead of a wall standing on open plain, and the
+// skirt of the dome is the foothill belt.
+const MASSIF_SCALE: Fx = crate::fx!("0.009");
+const MASSIF_GAIN: Fx = crate::fx!("0.36");
+// where the height field starts saturating instead of clipping
+const SOFT_CAP: Fx = crate::fx!("0.88");
+// terraced hill flanks (low-poly plateau stylization) — mesa country only:
+// terracing is exactly what manufactures flat tops with sheer sides, so it is
+// gated OUT of the massifs.
 const TERRACE_LEVELS: Fx = crate::fx!("9");
-const TERRACE_MIX: Fx = crate::fx!("0.55");
+const TERRACE_MIX: Fx = crate::fx!("0.30");
 
 const BASE_MASK: u32 = 0x1FFF_FFFF;
 
@@ -63,6 +73,11 @@ pub fn seed_bias(seed: u32) -> MapBias {
 /// keeps coastlines organic, faded to ocean at the map border so the camera's
 /// backdrop disc always meets open sea.
 const CONT_SCALE: Fx = crate::fx!("0.006");
+
+fn smooth01(t: Fx) -> Fx {
+    let t = t.clamp(Fx::ZERO, Fx::ONE);
+    t * t * (crate::fx!("3") - crate::fx!("2") * t)
+}
 
 fn continent(plates: &Plates, base: u32, x: Fx, y: Fx) -> (Fx, PlateSample) {
     let p = plates.sample(x, y);
@@ -115,11 +130,12 @@ const SPL_ERO: &[(Fx, Fx)] = &[
 const ERO_SCALE: Fx = crate::fx!("0.012");
 
 /// The raw height field. Continentalness (crust + noise) picks the base
-/// elevation, erosion picks how much relief sits on it, and the ridged fold
-/// supplies that relief — but only where the plates are actually building
-/// mountains, so ranges chain along their seam instead of speckling the map.
-/// Domain warp distorts everything organically; terraces stylize hill flanks.
-/// The worldgrid pipeline then erodes, floods and carves this shape.
+/// elevation, the massif envelope decides where a range has MASS, erosion
+/// picks how much relief sits on it, and the ridged fold — multiplied by that
+/// envelope — supplies crests and saddles ON that mass rather than instead of it.
+/// Domain warp distorts everything organically; terraces stylize the mesa
+/// country outside the massifs. The worldgrid pipeline then erodes, floods and
+/// carves this shape.
 pub(crate) fn height_at(plates: &Plates, base: u32, bias: MapBias, x: Fx, y: Fx) -> Fx {
     let island_gain = bias.island_gain;
     let half = crate::fx!("0.5");
@@ -137,7 +153,15 @@ pub(crate) fn height_at(plates: &Plates, base: u32, bias: MapBias, x: Fx, y: Fx)
     let folded = Fx::ONE - (rn * two - Fx::ONE).abs();
     let pv = folded * folded;
 
-    let base_h = spline(SPL_CONT, c);
+    let shelf_h = spline(SPL_CONT, c);
+    // A range has to have MASS before it can have a crest: a broad dome along
+    // the orogenic seam, faded out over water so the ocean ring survives.
+    let mn = fbm((x + wx) * MASSIF_SCALE, (y + wy) * MASSIF_SCALE, base ^ 0x4d55, 3);
+    let land_gate = ((shelf_h - crate::fx!("0.34")) * crate::fx!("6")).clamp(Fx::ZERO, Fx::ONE);
+    let massif = smooth01((mn - crate::fx!("0.44")) * crate::fx!("3.2"))
+        * (crate::fx!("0.35") + smooth01(plate.belt * crate::fx!("2.5")) * crate::fx!("0.65"))
+        * land_gate;
+    let base_h = shelf_h + massif * MASSIF_GAIN * bias.relief_gain;
     // young crust carries alpine relief, shield interiors are worn flat
     let amp = (spline(SPL_ERO, ero) + plate.belt * crate::fx!("0.55")) * bias.relief_gain;
     // land carries the full relief budget; the sea floor stays calm so the
@@ -146,13 +170,15 @@ pub(crate) fn height_at(plates: &Plates, base: u32, bias: MapBias, x: Fx, y: Fx)
     // ridges belong to the orogenic seam; away from it they fade to gentle swell
     let ridge_w = crate::fx!("0.35") + plate.belt * crate::fx!("1.6");
     let mut h = base_h
-        + (detail * crate::fx!("0.8") + pv * RIDGE_GAIN * crate::fx!("4") * ridge_w) * amp * landness;
+        + (detail * crate::fx!("0.8") + pv * massif * RIDGE_GAIN * crate::fx!("4") * ridge_w)
+            * amp
+            * landness;
 
-    // terraced flanks through the hill band — plateaus read as deliberate
-    // low-poly stylization and feed the cliff detector clean step edges
-    let band = ((h - crate::fx!("0.52")) * crate::fx!("8"))
+    // terraced flanks OUTSIDE the massifs: mesa and plateau country only
+    let band = ((h - crate::fx!("0.54")) * crate::fx!("14"))
         .clamp(Fx::ZERO, Fx::ONE)
-        .min(((crate::fx!("0.86") - h) * crate::fx!("8")).clamp(Fx::ZERO, Fx::ONE));
+        .min(((crate::fx!("0.74") - h) * crate::fx!("14")).clamp(Fx::ZERO, Fx::ONE))
+        * (Fx::ONE - massif);
     if band > Fx::ZERO {
         let t = h * TERRACE_LEVELS;
         let fl = t.floor();
@@ -161,7 +187,14 @@ pub(crate) fn height_at(plates: &Plates, base: u32, bias: MapBias, x: Fx, y: Fx)
         let stepped = (fl + s * s) / TERRACE_LEVELS;
         h += (stepped - h) * TERRACE_MIX * band;
     }
-    h = h.clamp(Fx::ZERO, crate::fx!("1.0"));
+    // a hard clamp at the ceiling shears every big massif into a flat mesa top
+    // — saturate smoothly so summits stay summits
+    h = h.max(Fx::ZERO);
+    if h > SOFT_CAP {
+        let over = h - SOFT_CAP;
+        h = SOFT_CAP + over / (Fx::ONE + over * crate::fx!("8"));
+    }
+    h = h.min(Fx::ONE);
 
     if island_gain > Fx::ZERO {
         let mask = fbm(x * ISLAND_SCALE + Fx::from_num(7), y * ISLAND_SCALE + Fx::from_num(13), base ^ 0x15a7, 3);
@@ -320,9 +353,13 @@ pub fn move_cost_grid(seed: u32) -> &'static [Fx] {
             let v: Vec<Fx> = world
                 .biome
                 .iter()
-                .map(|&b| {
+                .zip(world.slope.iter())
+                .map(|(&b, &s)| {
                     let c = crate::biomes::move_cost_mul(b);
-                    if c >= Fx::MAX { Fx::ONE } else { c.max(Fx::ONE) }
+                    let c = if c >= Fx::MAX { Fx::ONE } else { c };
+                    // a climb costs before it is forbidden, so a low saddle is
+                    // the cheap route out of a range with no special case
+                    (c * (Fx::ONE + s * crate::worldgrid::CLIMB_COST)).max(Fx::ONE)
                 })
                 .collect();
             let leaked: &'static [Fx] = Box::leak(v.into_boxed_slice());
@@ -456,18 +493,29 @@ pub fn node_reachable(seed: u32, from: V2, node: V2) -> bool {
     false
 }
 
-/// Render elevation in world units (client mesh only — never feeds the sim).
+/// THE vertical scale of the world, in world units per unit of height field.
+/// One monotone function of the height field and nothing else — a biome label
+/// can never move a vertex, so a label flip can never raise a wall.
+///
 /// Water renders as a flat SEA SURFACE (short shoreline shelf, then constant
 /// level): the sea is a body of water, not a terrain dent — and the backdrop
-/// ocean disc must never poke through inside the map.
-pub fn render_height(h: Fx, emphasis: Fx, elev_gain: Fx) -> Fx {
+/// ocean disc (`environment::OCEAN_Y`) must stay strictly below it.
+///
+/// Above the waterline the curve is cubic: gentle in the lowlands, severe near
+/// a summit, so the same height step reads as a shallow plain low down and a
+/// steep face high up.
+const SURF_A: Fx = crate::fx!("2.5");
+const SURF_B: Fx = crate::fx!("5");
+const SURF_C: Fx = crate::fx!("20");
+
+pub fn surface_height(h: Fx, elev_gain: Fx) -> Fx {
     if h < SEA {
         let shelf = ((SEA - h) / crate::fx!("0.05")).min(Fx::ONE);
-        return crate::fx!("-0.4") * shelf - crate::fx!("0.03");
+        return crate::fx!("-0.2") * shelf - crate::fx!("0.015");
     }
-    let base = (h - SEA) * Fx::from_num(9);
-    let relief = base + base * base * crate::fx!("0.18");
-    relief * emphasis * elev_gain
+    let u = h - SEA;
+    let u2 = u * u;
+    (u * SURF_A + u2 * SURF_B + u2 * u * SURF_C) * elev_gain
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -487,6 +535,19 @@ pub fn fertility_at(seed: u32, x: Fx, y: Fx) -> Fx {
 pub fn ore_at(seed: u32, x: Fx, y: Fx) -> Fx {
     let g = crate::worldgrid::world_grid(seed);
     g.ore[crate::worldgrid::tile_index(x, y)]
+}
+
+/// World-space rise per tile of the meshed surface — what the camera shows as
+/// steepness IS this number, and it is what decides the Cliff/Mountain label.
+pub fn slope_at(seed: u32, x: Fx, y: Fx) -> Fx {
+    let g = crate::worldgrid::world_grid(seed);
+    g.slope[crate::worldgrid::tile_index(x, y)]
+}
+
+/// Orogenic belt weight (0..1) — the rock's identity under a position.
+pub fn belt_at(seed: u32, x: Fx, y: Fx) -> Fx {
+    let g = crate::worldgrid::world_grid(seed);
+    g.belt[crate::worldgrid::tile_index(x, y)]
 }
 
 /// Mean annual temperature (0 cold .. 1 hot) at a world position.
@@ -511,6 +572,10 @@ pub struct NodeSite {
     pub precip: Fx,
     pub temp: Fx,
     pub height: Fx,
+    /// World-space rise per tile — the same number the camera renders as
+    /// steepness and the pathfinder charges for, so a deposit that reads as
+    /// clinging to a scarp really is on one.
+    pub slope: Fx,
     /// The water body this tile borders, if any — a shore's fishery depends on
     /// whether it faces the open sea, a lake or a river.
     pub adjacent_water: Option<Biome>,
@@ -537,6 +602,7 @@ pub fn node_site(seed: u32, x: Fx, y: Fx) -> NodeSite {
         precip: s.moisture,
         temp: temp_at(seed, x, y),
         height: s.height,
+        slope: slope_at(seed, x, y),
         adjacent_water,
     }
 }
@@ -702,10 +768,15 @@ pub fn start_point(seed: u32, slot: usize) -> V2 {
     find_land_near(seed, c.x, c.y)
 }
 
+/// How far the keep scan looks before it loosens the flatness cap.
+const KEEP_SCAN_R: i32 = 70;
+
 /// A safe keep site near the slot's start: every footprint tile passable,
-/// buildable, on the DOMINANT region, with open ground around it (peasants
-/// must reach the deposit edge from all sides — a keep wedged against
-/// cliffs/water strands its economy).
+/// buildable, FLAT, on the DOMINANT region, with open ground around it
+/// (peasants must reach the deposit edge from all sides — a keep wedged
+/// against cliffs/water strands its economy). Of the candidates on the
+/// nearest ring that qualifies, the FLATTEST wins, so a keep never ends up
+/// perched on a crest just because the scan reached it first.
 pub fn find_keep_site(seed: u32, slot: usize, footprint: i32) -> V2 {
     let start = start_point(seed, slot);
     let main = dominant_region(seed);
@@ -715,6 +786,16 @@ pub fn find_keep_site(seed: u32, slot: usize, footprint: i32) -> V2 {
     let fp_hi = footprint / 2 + footprint % 2;
     let sx = start.x.to_num::<i32>();
     let sy = start.y.to_num::<i32>();
+    let flatness = |cx: i32, cy: i32| -> (Fx, Fx) {
+        let c = V2::new(Fx::from_num(cx) + half, Fx::from_num(cy) + half);
+        let mut worst = Fx::ZERO;
+        for dy in fp_lo..fp_hi {
+            for dx in fp_lo..fp_hi {
+                worst = worst.max(slope_at(seed, c.x + Fx::from_num(dx), c.y + Fx::from_num(dy)));
+            }
+        }
+        (worst, crate::buildings::footprint_relief(seed, footprint, c.x, c.y))
+    };
     let ok = |cx: i32, cy: i32| -> bool {
         // footprint entirely on the mainland
         for dy in fp_lo..fp_hi {
@@ -749,16 +830,41 @@ pub fn find_keep_site(seed: u32, slot: usize, footprint: i32) -> V2 {
         }
         open >= 58 // ~72% of the 9x9 block
     };
-    for r in 0..WORLD_SIZE {
-        for dy in -r..=r {
-            for dx in -r..=r {
-                if dx.abs().max(dy.abs()) != r {
-                    continue;
+    // two relaxation steps of the flatness cap, then the terrain-only rules
+    // over the whole map — the fall-through must never be an unchecked tile
+    let caps = [
+        (crate::buildings::BUILD_SLOPE_MAX, crate::buildings::FOUNDATION_RELIEF, KEEP_SCAN_R),
+        (
+            crate::buildings::BUILD_SLOPE_MAX * crate::fx!("1.7"),
+            crate::buildings::FOUNDATION_RELIEF * crate::fx!("1.7"),
+            KEEP_SCAN_R,
+        ),
+        (Fx::MAX, Fx::MAX, WORLD_SIZE),
+    ];
+    for (slope_cap, relief_cap, max_r) in caps {
+        for r in 0..max_r {
+            let mut best: Option<(Fx, i32, i32)> = None;
+            for dy in -r..=r {
+                for dx in -r..=r {
+                    if dx.abs().max(dy.abs()) != r {
+                        continue;
+                    }
+                    let (cx, cy) = (sx + dx, sy + dy);
+                    if !ok(cx, cy) {
+                        continue;
+                    }
+                    let (worst, relief) = flatness(cx, cy);
+                    if worst > slope_cap || relief > relief_cap {
+                        continue;
+                    }
+                    let score = worst + relief;
+                    if best.is_none_or(|(b, _, _)| score < b) {
+                        best = Some((score, cx, cy));
+                    }
                 }
-                let (cx, cy) = (sx + dx, sy + dy);
-                if ok(cx, cy) {
-                    return V2::new(Fx::from_num(cx) + half, Fx::from_num(cy) + half);
-                }
+            }
+            if let Some((_, cx, cy)) = best {
+                return V2::new(Fx::from_num(cx) + half, Fx::from_num(cy) + half);
             }
         }
     }
@@ -823,62 +929,87 @@ pub fn fair_start_nodes(
             };
             let sx = start.x.to_num::<i32>();
             let sy = start.y.to_num::<i32>();
-            'ring: for r in band_lo..(FAIR_RADIUS.to_num::<i32>()) {
-                // walk the ring perimeter starting at a per-(slot, resource)
-                // hashed corner so different kinds land on different sides
-                let perimeter: Vec<(i32, i32)> = {
-                    let mut cells = Vec::with_capacity((8 * r) as usize);
-                    for dx in -r..=r {
-                        cells.push((dx, -r));
-                    }
-                    for dy in (-r + 1)..=r {
-                        cells.push((r, dy));
-                    }
-                    for dx in (-r..r).rev() {
-                        cells.push((dx, r));
-                    }
-                    for dy in ((-r + 1)..r).rev() {
-                        cells.push((-r, dy));
-                    }
-                    let spin = (hash2(slot as i32 * 31 + 7, res_type as i32 * 17 + 3, seed)
-                        * Fx::from_num(cells.len() as i32))
-                    .to_num::<usize>()
-                        % cells.len().max(1);
-                    cells.rotate_left(spin);
-                    cells
-                };
-                for (dx, dy) in perimeter {
-                    {
-                        let (tx, ty) = (sx + dx, sy + dy);
-                        if tx < 3 || ty < 3 || tx >= WORLD_SIZE - 3 || ty >= WORLD_SIZE - 3 {
-                            continue;
+            // Guaranteed stone goes on ground stone could have come from while
+            // any is in reach — otherwise the one deposit every start is owed
+            // is also the one deposit sitting in the middle of a meadow. The
+            // unfiltered second pass is what keeps the guarantee absolute.
+            for pass in 0..2 {
+                if left == 0 {
+                    break;
+                }
+                let rocky_only = pass == 0 && res_type == ResourceType::Stone;
+                'ring: for r in band_lo..(FAIR_RADIUS.to_num::<i32>()) {
+                    // walk the ring perimeter starting at a per-(slot, resource)
+                    // hashed corner so different kinds land on different sides
+                    let perimeter: Vec<(i32, i32)> = {
+                        let mut cells = Vec::with_capacity((8 * r) as usize);
+                        for dx in -r..=r {
+                            cells.push((dx, -r));
                         }
-                        if !is_passable(seed, tx, ty) {
-                            continue;
+                        for dy in (-r + 1)..=r {
+                            cells.push((r, dy));
                         }
-                        let p = V2::new(
-                            Fx::from_num(tx) + crate::fx!("0.5"),
-                            Fx::from_num(ty) + crate::fx!("0.5"),
-                        );
-                        if region_at(seed, p.x, p.y) != region {
-                            continue;
+                        for dx in (-r..r).rev() {
+                            cells.push((dx, r));
                         }
-                        // thin out: accept ~1 tile in 3, hashed per kind
-                        if hash2(tx, ty, mix_seed(seed, res_type as u32 + 77)) > crate::fx!("0.34") {
-                            continue;
+                        for dy in ((-r + 1)..r).rev() {
+                            cells.push((-r, dy));
                         }
-                        // keep clear of already-placed nodes on the same tile
-                        let occupied = existing
-                            .iter()
-                            .chain(extra.iter())
-                            .any(|n| n.pos.x.to_num::<i32>() == tx && n.pos.y.to_num::<i32>() == ty);
-                        if occupied {
-                            continue;
-                        }
-                        extra.push(ScatteredNode { pos: p, res_type, yield_ });
-                        left -= 1;
-                        if left == 0 {
-                            break 'ring;
+                        let spin = (hash2(slot as i32 * 31 + 7, res_type as i32 * 17 + 3, seed)
+                            * Fx::from_num(cells.len() as i32))
+                        .to_num::<usize>()
+                            % cells.len().max(1);
+                        cells.rotate_left(spin);
+                        cells
+                    };
+                    for (dx, dy) in perimeter {
+                        {
+                            let (tx, ty) = (sx + dx, sy + dy);
+                            if tx < 3 || ty < 3 || tx >= WORLD_SIZE - 3 || ty >= WORLD_SIZE - 3 {
+                                continue;
+                            }
+                            // the rings are square, the guarantee is a circle:
+                            // a corner tile of ring 18 is 25 tiles out and does
+                            // not count towards the minimum it was placed for
+                            let (fdx, fdy) = (Fx::from_num(dx), Fx::from_num(dy));
+                            if fdx * fdx + fdy * fdy > r2 {
+                                continue;
+                            }
+                            if !is_passable(seed, tx, ty) {
+                                continue;
+                            }
+                            let p = V2::new(
+                                Fx::from_num(tx) + crate::fx!("0.5"),
+                                Fx::from_num(ty) + crate::fx!("0.5"),
+                            );
+                            if region_at(seed, p.x, p.y) != region {
+                                continue;
+                            }
+                            if rocky_only
+                                && slope_at(seed, p.x, p.y) < crate::content::SCREE_T
+                                && crate::biomes::rock_density(
+                                    sample_terrain(seed, p.x, p.y).biome,
+                                ) == Fx::ZERO
+                            {
+                                continue;
+                            }
+                            // thin out: accept ~1 tile in 3, hashed per kind
+                            if hash2(tx, ty, mix_seed(seed, res_type as u32 + 77)) > crate::fx!("0.34") {
+                                continue;
+                            }
+                            // keep clear of already-placed nodes on the same tile
+                            let occupied = existing
+                                .iter()
+                                .chain(extra.iter())
+                                .any(|n| n.pos.x.to_num::<i32>() == tx && n.pos.y.to_num::<i32>() == ty);
+                            if occupied {
+                                continue;
+                            }
+                            extra.push(ScatteredNode { pos: p, res_type, yield_ });
+                            left -= 1;
+                            if left == 0 {
+                                break 'ring;
+                            }
                         }
                     }
                 }

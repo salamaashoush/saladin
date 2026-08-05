@@ -137,7 +137,7 @@ pub fn fish_node_mesh() -> Mesh {
 /// Baked cosmetic decoration meshes, per-index fallback to the procedural
 /// set (index order = props.rs PROP_* constants).
 pub fn prop_meshes() -> Vec<Mesh> {
-    const NAMES: [&str; 10] = [
+    const NAMES: [&str; 15] = [
         "prop_shrub",
         "prop_dune_grass",
         "prop_rock",
@@ -148,6 +148,11 @@ pub fn prop_meshes() -> Vec<Mesh> {
         "prop_flowers",
         "prop_acacia",
         "prop_olive",
+        "prop_tussock",
+        "prop_fern",
+        "prop_deadfall",
+        "prop_sapling",
+        "prop_pebbles",
     ];
     let mut procedural = super::props::prop_meshes();
     NAMES

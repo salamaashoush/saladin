@@ -1,8 +1,8 @@
 use crate::ai::{PlannerTuning, TacticalTuning};
 use crate::biomes::{game_density, gold_density, motherlode_density, rock_density, tree_density};
 use crate::constants::{
-    FOOD_NODES, FOOD_YIELD, GOLD_NODES, GOLD_YIELD, SPAWN_MARGIN, STONE_NODES, STONE_YIELD,
-    TREE_COUNT, TREE_WOOD, WORLD_SIZE,
+    FOOD_NODES, FOOD_YIELD, GOLD_NODES, GOLD_YIELD, MOTHERLODE_GOLD_NODES, MOTHERLODE_STONE_NODES,
+    PLACER_NODES, SPAWN_MARGIN, STONE_NODES, STONE_YIELD, TREE_COUNT, TREE_WOOD, WORLD_SIZE,
 };
 use crate::biomes::Biome;
 use crate::enums::{Faction, ResourceType};
@@ -33,22 +33,53 @@ pub fn resource_def(r: ResourceType) -> &'static ResourceDef {
 
 // ── where resources actually come from ───────────────────────────────────────
 // A biome label alone puts gold wherever the ground is rocky. These rules read
-// the geology and climate layers instead, so a deposit sits where its formation
-// process would have put it.
+// the geology, climate and RELIEF layers instead, so a deposit sits where its
+// formation process would have put it — and, since `slope` is the same rise the
+// camera draws and the pathfinder charges for, where the eye expects it.
 
-/// Timber: the biome sets the stand, the rain sets how thick it grows.
+/// Above this rise per tile topsoil creeps downhill faster than a stand can
+/// root; timber fades out to nothing by `TIMBER_SLOPE_MAX`. Both track the
+/// client's bare-rock ramp (`terrain::ROCK_LO/HI`, 0.26..0.75) — the last tree
+/// has to be gone before the ground under it renders as a rock face.
+const TIMBER_SLOPE_T: Fx = crate::fx!("0.22");
+pub const TIMBER_SLOPE_MAX: Fx = crate::fx!("0.62");
+/// The rise per tile that reads as a bare scarp face.
+const SCARP_REF: Fx = crate::fx!("0.35");
+/// Where the soil has slid off and left the bedrock quarryable whatever the
+/// biome label says — this is what puts outcrops on the foothill flanks, just
+/// below where the render starts stripping the ground to rock.
+pub(crate) const SCREE_T: Fx = crate::fx!("0.18");
+const SCREE_GAIN: Fx = crate::fx!("1.25");
+/// How hard broken ground puts a herd off it.
+const HERD_SLOPE_PEN: Fx = crate::fx!("2.1");
+const HERD_SLOPE_FLOOR: Fx = crate::fx!("0.12");
+
+/// Timber: the biome sets the stand, the rain sets how thick it grows, the
+/// slope decides whether it grows at all.
 fn timber(s: &NodeSite) -> Fx {
-    tree_density(s.biome) * (crate::fx!("0.55") + s.precip * crate::fx!("0.8"))
+    let taper =
+        ((TIMBER_SLOPE_MAX - s.slope) / (TIMBER_SLOPE_MAX - TIMBER_SLOPE_T)).clamp(Fx::ZERO, Fx::ONE);
+    tree_density(s.biome) * (crate::fx!("0.6") + s.precip * crate::fx!("0.85")) * taper
 }
 
-/// Building stone: exposed rock. Steep, dry, high ground quarries best.
+/// Building stone: exposed rock. Scarps, foothills and mineralized high ground
+/// quarry best; a flat meadow yields almost none.
 fn quarry(s: &NodeSite) -> Fx {
-    rock_density(s.biome) * (crate::fx!("0.75") + s.height * crate::fx!("0.5"))
+    let scarp = (s.slope / SCARP_REF).min(Fx::ONE);
+    let exposed = rock_density(s.biome) + (s.slope - SCREE_T).max(Fx::ZERO) * SCREE_GAIN;
+    exposed
+        * (crate::fx!("0.2")
+            + scarp * crate::fx!("1.05")
+            + s.ore * crate::fx!("0.45")
+            + s.height * crate::fx!("0.25"))
 }
 
-/// Game herds follow the grazing, so fertile open country carries more of them.
+/// Game herds follow the grazing: fertile, watered, and flat enough to stand on.
 fn herds(s: &NodeSite) -> Fx {
-    game_density(s.biome) * (crate::fx!("0.5") + s.fertility * crate::fx!("1.3"))
+    let flat = (Fx::ONE - s.slope * HERD_SLOPE_PEN).max(HERD_SLOPE_FLOOR);
+    game_density(s.biome)
+        * (crate::fx!("0.45") + s.fertility * crate::fx!("1.15") + s.precip * crate::fx!("0.4"))
+        * flat
 }
 
 /// A shore's fishery depends on the water it faces: a lake teems, a river runs
@@ -81,10 +112,12 @@ fn placer(s: &NodeSite) -> Fx {
     (s.ore * crate::fx!("1.1")).min(crate::fx!("0.7"))
 }
 
-/// The exploration prize: rich deposits in the remote high country, and only
-/// where the rock is mineralized enough to hold them.
+/// The exploration prize: rich deposits in the remote high country, where the
+/// rock is both mineralized and broken enough to have exposed them.
 fn motherlode(s: &NodeSite) -> Fx {
-    motherlode_density(s.biome) * (crate::fx!("0.15") + s.ore * crate::fx!("1.6"))
+    let scarp = (s.slope / SCARP_REF).min(Fx::ONE);
+    motherlode_density(s.biome)
+        * (crate::fx!("0.15") + s.ore * crate::fx!("1.4") + scarp * crate::fx!("0.45"))
 }
 
 /// Scatter rules for all node kinds. Food splits between fisheries and herds.
@@ -99,9 +132,9 @@ pub fn node_kinds() -> Vec<ScatterRule> {
         ScatterRule { res_type: ResourceType::Food, count: food_game, yield_: FOOD_YIELD, density: herds, coastal_only: false, clustered: false, patch: (1, 1) },
         ScatterRule { res_type: ResourceType::Food, count: food_fish, yield_: FOOD_YIELD, density: fishery, coastal_only: true, clustered: false, patch: (1, 1) },
         ScatterRule { res_type: ResourceType::Gold, count: GOLD_NODES, yield_: GOLD_YIELD, density: vein, coastal_only: false, clustered: false, patch: (5, 7) },
-        ScatterRule { res_type: ResourceType::Gold, count: 60, yield_: GOLD_YIELD / 2, density: placer, coastal_only: false, clustered: false, patch: (2, 3) },
-        ScatterRule { res_type: ResourceType::Gold, count: 24, yield_: GOLD_YIELD * 2, density: motherlode, coastal_only: false, clustered: false, patch: (6, 8) },
-        ScatterRule { res_type: ResourceType::Stone, count: 20, yield_: STONE_YIELD * 2, density: motherlode, coastal_only: false, clustered: false, patch: (5, 7) },
+        ScatterRule { res_type: ResourceType::Gold, count: PLACER_NODES, yield_: GOLD_YIELD / 2, density: placer, coastal_only: false, clustered: false, patch: (2, 3) },
+        ScatterRule { res_type: ResourceType::Gold, count: MOTHERLODE_GOLD_NODES, yield_: GOLD_YIELD * 2, density: motherlode, coastal_only: false, clustered: false, patch: (6, 8) },
+        ScatterRule { res_type: ResourceType::Stone, count: MOTHERLODE_STONE_NODES, yield_: STONE_YIELD * 2, density: motherlode, coastal_only: false, clustered: false, patch: (5, 7) },
     ]
 }
 

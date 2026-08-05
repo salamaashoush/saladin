@@ -7,7 +7,9 @@ use bevy::input::mouse::{MouseScrollUnit, MouseWheel};
 use bevy::prelude::*;
 use bevy::camera::ScalingMode;
 use bevy::camera::Hdr;
+use bevy::core_pipeline::tonemapping::Tonemapping;
 use bevy::post_process::bloom::Bloom;
+use bevy::render::view::{ColorGrading, ColorGradingGlobal, ColorGradingSection};
 use crate::LocalPlayer;
 use saladin_protocol::{Building, Owner, Pos};
 use saladin_sim::{BuildingKind, WORLD_SIZE};
@@ -126,6 +128,15 @@ pub fn spawn_camera(world: &mut World) {
         // instead of the whole frame blooming into soup
         Hdr,
         Bloom { intensity: 0.09, ..Bloom::OLD_SCHOOL },
+        // Spelled out beside the grading because it is a decision, not a
+        // default: AgX was measured on this scene and comes out FLATTER.
+        Tonemapping::TonyMcMapface,
+        ColorGrading {
+            global: ColorGradingGlobal { post_saturation: 1.14, ..default() },
+            shadows: ColorGradingSection { contrast: 1.10, ..default() },
+            midtones: ColorGradingSection { contrast: 1.18, ..default() },
+            highlights: ColorGradingSection { contrast: 1.06, ..default() },
+        },
         Projection::Orthographic(OrthographicProjection {
             scaling_mode: ScalingMode::FixedVertical { viewport_height: state.view_size * 2.0 },
             // near stays at 0: a negative near pulls geometry BEHIND the camera
@@ -136,7 +147,7 @@ pub fn spawn_camera(world: &mut World) {
         tf,
         GameCamera,
         IsDefaultUiCamera,
-        Msaa::Off,
+        Msaa::Sample4,
     ));
     world.insert_resource(state);
 }

@@ -9,8 +9,9 @@ use saladin_sim::{ResourceType, resource_def};
 
 use std::f32::consts::{FRAC_PI_2, TAU};
 
-/// Index into `prop_meshes()` per decoration kind (must stay in sync with
-/// `vegetation::mesh_index`).
+/// Index into `prop_meshes()`. Order is load-bearing three ways: the
+/// procedural vec below, the `NAMES` array in baked.rs, and the species
+/// tables in vegetation.rs all index by these.
 pub const PROP_SHRUB: usize = 0;
 pub const PROP_DUNE_GRASS: usize = 1;
 pub const PROP_ROCK: usize = 2;
@@ -21,37 +22,168 @@ pub const PROP_PINE: usize = 6;
 pub const PROP_FLOWERS: usize = 7;
 pub const PROP_ACACIA: usize = 8;
 pub const PROP_OLIVE: usize = 9;
+pub const PROP_TUSSOCK: usize = 10;
+pub const PROP_FERN: usize = 11;
+pub const PROP_DEADFALL: usize = 12;
+pub const PROP_SAPLING: usize = 13;
+pub const PROP_PEBBLES: usize = 14;
 
 /// Mesh templates for the vegetation/prop instancer, indexed by placement.
 pub fn prop_meshes() -> Vec<Mesh> {
-    vec![shrub(), dune_grass(), rock(), boulder(), reeds(), palm(), pine(), flowers(), acacia(), olive_prop()]
+    vec![
+        shrub(),
+        dune_grass(),
+        rock(),
+        boulder(),
+        reeds(),
+        palm(),
+        pine(),
+        flowers(),
+        acacia(),
+        olive_prop(),
+        tussock(),
+        fern(),
+        deadfall(),
+        sapling(),
+        pebbles(),
+    ]
+}
+
+/// Coarse meadow grass: a dense fan of blades over a dark base, the filler
+/// that keeps open grassland from reading as painted felt.
+fn tussock() -> Mesh {
+    let blade = lin(0x6f8c3c);
+    let blade_dk = lin(0x56702e);
+    let mut parts = vec![part(squashed(icosahedron(0.13), 0.35), blade_dk, xyz(0.0, 0.03, 0.0))];
+    let n = 9;
+    for i in 0..n {
+        let ang = i as f32 / n as f32 * TAU + (i % 3) as f32 * 0.4;
+        let h = 0.26 + (i % 4) as f32 * 0.09;
+        let lean = 0.3 + (i % 3) as f32 * 0.16;
+        let c = if i % 3 == 0 { blade_dk } else { blade };
+        let tf = Transform::from_xyz(ang.cos() * 0.06, 0.0, ang.sin() * 0.06)
+            * Transform::from_rotation(Quat::from_rotation_y(ang))
+            * Transform::from_rotation(Quat::from_rotation_z(lean))
+            * Transform::from_xyz(0.0, h * 0.5, 0.0)
+            * Transform::from_scale(Vec3::new(0.5, 1.0, 1.0));
+        parts.push(part(cone(0.045, h, 3), c, tf));
+    }
+    merge(parts)
+}
+
+/// Woodland fern: a low rosette of arching fronds, the shade layer under a
+/// broadleaf canopy.
+fn fern() -> Mesh {
+    let frond = lin(0x3f6b2c);
+    let frond_hi = lin(0x4e8034);
+    let mut parts = Vec::new();
+    let n = 7;
+    for i in 0..n {
+        let ang = i as f32 / n as f32 * TAU;
+        let len = 0.34 + (i % 3) as f32 * 0.07;
+        let c = if i % 2 == 0 { frond } else { frond_hi };
+        let tf = Transform::from_xyz(0.0, 0.08, 0.0)
+            * Transform::from_rotation(Quat::from_rotation_y(ang))
+            * Transform::from_rotation(Quat::from_rotation_x(-0.9))
+            * Transform::from_xyz(0.0, 0.0, len * 0.5)
+            * Transform::from_rotation(Quat::from_rotation_x(FRAC_PI_2))
+            * Transform::from_scale(Vec3::new(1.0, 1.0, 0.25));
+        parts.push(part(cone(0.11, len, 3), c, tf));
+    }
+    parts.push(part(squashed(icosahedron(0.09), 0.5), frond, xyz(0.0, 0.06, 0.0)));
+    merge(parts)
+}
+
+/// A fallen trunk gone soft: a long log pitched off the broken stump it snapped
+/// from, mossy on top. Marks the edge of a wood.
+fn deadfall() -> Mesh {
+    let bark = lin(0x5a4530);
+    let bark_dk = lin(0x45341f);
+    let moss = lin(0x4c6b31);
+    merge(vec![
+        part(frustum(0.055, 0.085, 0.95, 7), bark, at_rot(0.0, 0.15, 0.0, Quat::from_rotation_x(FRAC_PI_2 - 0.18))),
+        part(frustum(0.11, 0.15, 0.22, 6), bark_dk, xyz(0.03, 0.11, 0.44)),
+        part(
+            frustum(0.02, 0.032, 0.26, 4),
+            bark_dk,
+            at_rot(0.09, 0.2, -0.12, Quat::from_euler(EulerRot::XYZ, 0.9, 0.0, -0.8)),
+        ),
+        part(squashed(icosahedron(0.09), 0.3), moss, xyz(-0.02, 0.2, 0.12)),
+        part(squashed(icosahedron(0.07), 0.32), moss, xyz(0.03, 0.16, -0.2)),
+    ])
+}
+
+/// A young tree that has not made the canopy yet: whip trunk, two thin side
+/// shoots, a sparse crown.
+fn sapling() -> Mesh {
+    let leaf = lin(0x53853a);
+    let leaf_lo = lin(0x426c2e);
+    merge(vec![
+        part(frustum(0.025, 0.045, 0.6, 5), lin(TRUNK), xyz(0.0, 0.3, 0.0)),
+        part(icosahedron(0.19), leaf, xyz(0.0, 0.68, 0.0)),
+        part(icosahedron(0.12), leaf_lo, xyz(0.15, 0.5, 0.07)),
+        part(icosahedron(0.1), leaf_lo, xyz(-0.13, 0.55, -0.08)),
+    ])
+}
+
+/// Frost-shattered scree: flat chips half-sunk in the debris apron at the
+/// foot of steep ground.
+fn pebbles() -> Mesh {
+    let mut parts = Vec::new();
+    for (i, &(x, z, r)) in [
+        (0.0f32, 0.0f32, 0.13f32),
+        (0.26, 0.12, 0.09),
+        (-0.2, 0.2, 0.08),
+        (0.14, -0.24, 0.07),
+        (-0.28, -0.14, 0.06),
+        (0.34, -0.05, 0.05),
+        (-0.06, 0.32, 0.05),
+    ]
+    .iter()
+    .enumerate()
+    {
+        let c = lin([0x8b8880, 0x7a7770, 0x969289, 0x6f6c66][i % 4]);
+        parts.push(part(
+            dodecahedron(r),
+            c,
+            Transform::from_xyz(x, r * 0.28, z)
+                .with_rotation(Quat::from_euler(EulerRot::XYZ, 0.2 + i as f32 * 0.3, i as f32 * 1.7, 0.15))
+                .with_scale(Vec3::new(1.2, 0.4, 1.0)),
+        ));
+    }
+    merge(parts)
 }
 
 /// Savanna acacia: bare trunk under a wide flat canopy — the silhouette that
 /// tells you a map row is hot and dry from three screens away.
 fn acacia() -> Mesh {
-    let canopy = lin(0x6d7a3c);
-    let canopy_lo = lin(0x57632f);
+    let bark = lin(0x6b5334);
     let mut parts = vec![
-        part(frustum(0.05, 0.11, 1.05, 5), lin(0x6b5334), xyz(0.0, 0.52, 0.0)),
-        part(frustum(0.04, 0.06, 0.5, 4), lin(0x6b5334), at_rot(0.16, 0.95, 0.0, Quat::from_rotation_z(-0.5))),
-        part(frustum(0.04, 0.06, 0.5, 4), lin(0x6b5334), at_rot(-0.16, 0.95, 0.05, Quat::from_rotation_z(0.5))),
+        part(frustum(0.05, 0.12, 1.0, 6), bark, xyz(0.0, 0.5, 0.0)),
+        part(frustum(0.035, 0.06, 0.55, 4), bark, at_rot(0.18, 0.95, 0.02, Quat::from_rotation_z(-0.55))),
+        part(frustum(0.035, 0.06, 0.55, 4), bark, at_rot(-0.18, 0.93, -0.06, Quat::from_rotation_z(0.55))),
+        part(frustum(0.03, 0.05, 0.45, 4), bark, at_rot(0.02, 0.98, 0.2, Quat::from_rotation_x(-0.5))),
     ];
-    for (dx, dz, r, y, c) in
-        [(0.0f32, 0.0f32, 0.62f32, 1.28f32, canopy), (0.34, 0.1, 0.34, 1.2, canopy_lo), (-0.3, -0.12, 0.3, 1.22, canopy_lo)]
-    {
-        parts.push(part(squashed(icosahedron(r), 0.26), c, xyz(dx, y, dz)));
+    for (dx, dz, r, y, sq, c) in [
+        (0.0f32, 0.0f32, 0.5f32, 1.34f32, 0.3f32, 0x6d7a3c),
+        (0.38, 0.14, 0.36, 1.22, 0.28, 0x51602c),
+        (-0.34, -0.16, 0.33, 1.24, 0.3, 0x51602c),
+        (0.1, -0.36, 0.28, 1.3, 0.26, 0x7d8a48),
+        (-0.12, 0.34, 0.26, 1.28, 0.28, 0x7d8a48),
+    ] {
+        parts.push(part(squashed(icosahedron(r), sq), lin(c), xyz(dx, y, dz)));
     }
     merge(parts)
 }
 
 /// Cosmetic olive: the harvestable grove tree at scrub scale.
 fn olive_prop() -> Mesh {
-    let leaf = lin(0x6a7b46);
     merge(vec![
-        part(frustum(0.05, 0.09, 0.34, 5), lin(TRUNK), at_rot(0.03, 0.17, 0.0, Quat::from_rotation_z(0.2))),
-        part(squashed(icosahedron(0.3), 0.66), leaf, xyz(0.0, 0.5, 0.0)),
-        part(squashed(icosahedron(0.19), 0.62), lin(0x55663a), xyz(0.2, 0.44, 0.08)),
+        part(frustum(0.045, 0.085, 0.34, 5), lin(TRUNK), at_rot(0.04, 0.17, 0.0, Quat::from_rotation_z(0.22))),
+        part(frustum(0.035, 0.06, 0.26, 5), lin(TRUNK_DARK), at_rot(-0.08, 0.14, 0.03, Quat::from_rotation_z(-0.3))),
+        part(squashed(icosahedron(0.28), 0.68), lin(0x6a7b46), xyz(0.02, 0.5, 0.0)),
+        part(squashed(icosahedron(0.19), 0.62), lin(0x55663a), xyz(0.21, 0.42, 0.09)),
+        part(squashed(icosahedron(0.16), 0.66), lin(0x77875a), xyz(-0.16, 0.46, -0.1)),
     ])
 }
 

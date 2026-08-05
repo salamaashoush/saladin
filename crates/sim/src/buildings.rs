@@ -147,6 +147,32 @@ pub enum PlaceError {
     NoApproach,
     /// Ground too poor to farm — nothing grows on rock, sand or salt.
     PoorSoil,
+    /// Hillside too steep, or the ground under the footprint varies more than
+    /// one foundation plane can absorb without walls clipping through it.
+    TooSteep,
+}
+
+/// Steepest ground a foundation may sit on. A third of the cliff threshold, so
+/// there is a real band that is walkable but not buildable.
+pub const BUILD_SLOPE_MAX: Fx = crate::fx!("0.35");
+/// How much the ground may rise across a whole footprint. A building has ONE
+/// foundation plane; past this the walls stand in mid-air on the low side.
+pub const FOUNDATION_RELIEF: Fx = crate::fx!("0.60");
+
+/// Rise from the lowest to the highest point of the meshed surface under a
+/// footprint — what a single foundation plane has to hide.
+pub fn footprint_relief(seed: u32, footprint: i32, x: Fx, y: Fx) -> Fx {
+    let g = crate::worldgrid::world_grid(seed);
+    let gain = crate::terrain::seed_bias(seed).elev_gain;
+    let half = crate::fx!("0.5");
+    let (mut lo, mut hi) = (Fx::MAX, Fx::MIN);
+    for t in footprint_tiles(footprint, x, y) {
+        let i = crate::worldgrid::tile_index(Fx::from_num(t.tx) + half, Fx::from_num(t.ty) + half);
+        let s = crate::terrain::surface_height(g.tile_h[i], gain);
+        lo = lo.min(s);
+        hi = hi.max(s);
+    }
+    if hi < lo { Fx::ZERO } else { hi - lo }
 }
 
 /// Mean soil fertility under a footprint — a field is only as good as the
@@ -182,6 +208,14 @@ pub fn check_place<O: Fn(i32, i32) -> bool>(
         if occupied(t.tx, t.ty) {
             return Err(PlaceError::Occupied);
         }
+        if crate::terrain::slope_at(seed, Fx::from_num(t.tx) + crate::fx!("0.5"), Fx::from_num(t.ty) + crate::fx!("0.5"))
+            > BUILD_SLOPE_MAX
+        {
+            return Err(PlaceError::TooSteep);
+        }
+    }
+    if footprint_relief(seed, def.footprint, x, y) > FOUNDATION_RELIEF {
+        return Err(PlaceError::TooSteep);
     }
     if def.min_fertility > Fx::ZERO && soil_quality(seed, def.footprint, x, y) < def.min_fertility {
         return Err(PlaceError::PoorSoil);

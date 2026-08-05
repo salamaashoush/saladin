@@ -142,6 +142,16 @@ pub struct Multiplayer(pub bool);
 #[derive(Component)]
 pub struct MatchScoped;
 
+/// Scatter props by tile so a building can clear the ground it is founded on.
+#[derive(Resource, Default)]
+pub struct PropGrid(pub std::collections::HashMap<i32, Vec<Entity>>);
+
+/// HSV ladder applied to each prop mesh: lush at 0, parched at the end. The
+/// placement's aridity picks its rung, so the dry flank of a ridge comes out
+/// browner than the gully.
+const PROP_TINTS: [(f32, f32, f32); vegetation::TINTS] =
+    [(8.0, 1.12, 0.90), (0.0, 1.0, 1.0), (-10.0, 0.88, 1.07), (-21.0, 0.74, 1.14)];
+
 fn build_net(_connect: Option<String>) -> (Net, u64, bool) {
     let relay = shared_relay(vec![1]);
     (
@@ -201,6 +211,7 @@ fn main() {
     .init_resource::<input::LastClick>()
     .init_resource::<input::GhostRot>()
     .init_resource::<camera::DragPan>()
+    .init_resource::<PropGrid>()
     .init_resource::<render::sync::RenderMap>()
     .init_resource::<render::sync::OccupiedTiles>()
     .init_resource::<ui::actions::BuildTab>()
@@ -558,36 +569,59 @@ fn setup_visuals(
     commands.spawn((Mesh3d(terrain_mesh), MeshMaterial3d(terrain_mat), Transform::IDENTITY, MatchScoped));
     let field = terrain::build_height_field(cfg.seed);
 
-    // vegetation: shared prop meshes, one entity per placement (auto-instanced)
-    let props: Vec<Handle<Mesh>> =
-        render::models::baked::prop_meshes().into_iter().map(|m| meshes.add(m)).collect();
+    // vegetation: TINTS pre-tinted copies of each shared prop mesh, one entity
+    // per placement. Colour variety has to ride the MESH — a per-entity
+    // material would end batching at thousands of props.
+    let mut props: Vec<Handle<Mesh>> = Vec::new();
+    for m in render::models::baked::prop_meshes() {
+        for &(hue, sat, val) in &PROP_TINTS {
+            props.push(meshes.add(render::models::bake_tint(&m, hue, sat, val)));
+        }
+    }
     let prop_mat = materials.add(StandardMaterial {
         base_color: Color::WHITE,
         perceptual_roughness: 0.95,
         ..default()
     });
-    for p in vegetation::vegetation_placements(cfg.seed) {
+    let placements = vegetation::vegetation_placements(cfg.seed);
+    info!("vegetation: {} props on seed {}", placements.len(), cfg.seed);
+    let mut prop_grid = PropGrid::default();
+    for p in placements {
+        use render::models::props::*;
         let y = terrain::height_at(&field, p.x, p.z);
-        // rocks settle into the slope; plants stay upright on it
-        let rocky = p.mesh == render::models::props::PROP_ROCK
-            || p.mesh == render::models::props::PROP_BOULDER;
-        let rot = if rocky {
-            let n = terrain::normal_at(&field, p.x, p.z);
-            Quat::from_rotation_arc(Vec3::Y, Vec3::Y.lerp(n, 0.8).normalize())
-                * Quat::from_rotation_y(p.rot)
-        } else {
-            Quat::from_rotation_y(p.rot)
-        };
+        // stone settles into the slope; plants only half-follow it
+        let rocky = matches!(p.mesh, PROP_ROCK | PROP_BOULDER | PROP_PEBBLES | PROP_DEADFALL);
+        let n = terrain::normal_at(&field, p.x, p.z);
+        let follow = if rocky { 0.8 } else { 0.35 };
+        let tilt = Quat::from_axis_angle(
+            Vec3::new(p.lean_dir.cos(), 0.0, p.lean_dir.sin()),
+            if rocky { 0.0 } else { p.lean },
+        );
+        let rot = Quat::from_rotation_arc(Vec3::Y, Vec3::Y.lerp(n, follow).normalize())
+            * tilt
+            * Quat::from_rotation_y(p.rot);
         let sink = if rocky { 0.04 } else { 0.01 };
-        commands.spawn((
-            Mesh3d(props[p.mesh].clone()),
+        // props that LIE on the ground read as sawn planks under a girth/height
+        // split — the split only makes sense on something standing up
+        let scale = if matches!(p.mesh, PROP_DEADFALL | PROP_PEBBLES) {
+            Vec3::splat(p.scale)
+        } else {
+            Vec3::new(p.scale * p.width, p.scale, p.scale * p.width)
+        };
+        let mut e = commands.spawn((
+            Mesh3d(props[p.mesh * vegetation::TINTS + p.tint].clone()),
             MeshMaterial3d(prop_mat.clone()),
-            Transform::from_xyz(p.x, y - sink, p.z)
-                .with_rotation(rot)
-                .with_scale(Vec3::splat(p.scale)),
+            Transform::from_xyz(p.x, y - sink, p.z).with_rotation(rot).with_scale(scale),
             MatchScoped,
         ));
+        // ground cover adds nothing to a silhouette and is redrawn per cascade
+        if matches!(p.mesh, PROP_FLOWERS | PROP_DUNE_GRASS | PROP_TUSSOCK | PROP_PEBBLES) {
+            e.insert(bevy::light::NotShadowCaster);
+        }
+        let key = saladin_sim::tile_key(p.x as i32, p.z as i32);
+        prop_grid.0.entry(key).or_default().push(e.id());
     }
+    commands.insert_resource(prop_grid);
 
     // ruin landmarks: rare deterministic monuments rewarding exploration
     let landmarks: Vec<Handle<Mesh>> = render::models::baked::landmark_meshes()
@@ -616,7 +650,7 @@ fn setup_visuals(
     // ── living world: shore anchors, glinting sea, wheeling gulls ────────────
     {
         use saladin_sim::{Biome, Fx, is_passable, sample_terrain};
-        let half = Fx::lit("0.5");
+        let half = saladin_sim::fx!("0.5");
         let mut shore: Vec<Vec3> = Vec::new();
         for ty in 1..WORLD_SIZE - 1 {
             for tx in 1..WORLD_SIZE - 1 {
@@ -821,6 +855,7 @@ fn teardown_match(world: &mut World) {
     *world.resource_mut::<selection::ControlGroups>() = default();
     *world.resource_mut::<input::InputMode>() = default();
     *world.resource_mut::<render::sync::RenderMap>() = default();
+    world.resource_mut::<PropGrid>().0.clear();
     *world.resource_mut::<ui::hud::HudDigest>() = default();
     *world.resource_mut::<LocalInput>() = default();
     world.resource_mut::<camera::CameraState>().framed = false;

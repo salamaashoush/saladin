@@ -296,7 +296,7 @@ const ICONS: &[(&str, [&str; 14])] = &[
         ".kSSssssSSSk..",
         ".kSsssssssSk..",
         ".kSsskkssssk..",
-        ".kSsskkssssк..",
+        ".kSsskkssssk..",
         ".kssssssssSk..",
         "..kssssssSk...",
         "...kkkkkkk....",

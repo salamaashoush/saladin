@@ -243,7 +243,7 @@ pub fn follow_camera(
             // bright enough that faces away from the sun shade, not blacken
             AmbientLight {
                 color: Color::srgb_u8(0xc9, 0xbe, 0xa4),
-                brightness: 480.0,
+                brightness: 320.0,
                 ..default()
             },
         ));

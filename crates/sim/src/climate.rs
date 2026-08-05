@@ -49,7 +49,7 @@ pub const CLIMATES: [ClimateArchetype; 8] = [
         humidity: crate::fx!("0.86"),
         aridity: crate::fx!("0.07"),
         target_precip: crate::fx!("0.46"),
-        tree_line: crate::fx!("0.80"),
+        tree_line: crate::fx!("0.65"),
     },
     ClimateArchetype {
         id: "crescent",
@@ -60,7 +60,7 @@ pub const CLIMATES: [ClimateArchetype; 8] = [
         humidity: crate::fx!("0.74"),
         aridity: crate::fx!("0.15"),
         target_precip: crate::fx!("0.32"),
-        tree_line: crate::fx!("0.78"),
+        tree_line: crate::fx!("0.70"),
     },
     ClimateArchetype {
         id: "arabia",
@@ -71,7 +71,7 @@ pub const CLIMATES: [ClimateArchetype; 8] = [
         humidity: crate::fx!("0.52"),
         aridity: crate::fx!("0.32"),
         target_precip: crate::fx!("0.13"),
-        tree_line: crate::fx!("0.86"),
+        tree_line: crate::fx!("0.77"),
     },
     ClimateArchetype {
         id: "anatolia",
@@ -82,7 +82,7 @@ pub const CLIMATES: [ClimateArchetype; 8] = [
         humidity: crate::fx!("0.80"),
         aridity: crate::fx!("0.12"),
         target_precip: crate::fx!("0.47"),
-        tree_line: crate::fx!("0.72"),
+        tree_line: crate::fx!("0.65"),
     },
     ClimateArchetype {
         id: "nile",
@@ -93,7 +93,7 @@ pub const CLIMATES: [ClimateArchetype; 8] = [
         humidity: crate::fx!("0.58"),
         aridity: crate::fx!("0.28"),
         target_precip: crate::fx!("0.24"),
-        tree_line: crate::fx!("0.84"),
+        tree_line: crate::fx!("0.75"),
     },
     ClimateArchetype {
         id: "maghreb",
@@ -104,7 +104,7 @@ pub const CLIMATES: [ClimateArchetype; 8] = [
         humidity: crate::fx!("0.83"),
         aridity: crate::fx!("0.17"),
         target_precip: crate::fx!("0.37"),
-        tree_line: crate::fx!("0.78"),
+        tree_line: crate::fx!("0.70"),
     },
     ClimateArchetype {
         id: "aegean",
@@ -115,7 +115,7 @@ pub const CLIMATES: [ClimateArchetype; 8] = [
         humidity: crate::fx!("0.90"),
         aridity: crate::fx!("0.06"),
         target_precip: crate::fx!("0.52"),
-        tree_line: crate::fx!("0.76"),
+        tree_line: crate::fx!("0.61"),
     },
     ClimateArchetype {
         id: "caucasus",
@@ -126,7 +126,7 @@ pub const CLIMATES: [ClimateArchetype; 8] = [
         humidity: crate::fx!("0.90"),
         aridity: crate::fx!("0.03"),
         target_precip: crate::fx!("0.63"),
-        tree_line: crate::fx!("0.68"),
+        tree_line: crate::fx!("0.61"),
     },
 ];
 
@@ -179,7 +179,7 @@ pub fn sea_level_temp(c: &ClimateArchetype, ty: usize) -> Fx {
 /// Elevation where snow lies year round, in normalized height. Hot latitudes
 /// push it above the peaks; cold ones drop it onto the shoulders.
 pub fn snow_line(c: &ClimateArchetype, ty: usize) -> Fx {
-    crate::fx!("0.78") + sea_level_temp(c, ty) * crate::fx!("0.17")
+    crate::fx!("0.73") + sea_level_temp(c, ty) * crate::fx!("0.16")
 }
 
 /// Dryness of a row before the terrain-aware pass exists — enough to decide
@@ -344,6 +344,32 @@ pub fn build(
 const T_BINS: usize = 8;
 const P_BINS: usize = 8;
 
+// ── ecotone dither ──────────────────────────────────────────────────────────
+// A biome boundary is an exact iso-line of the temperature or precipitation
+// field, and both fields are very smooth, so every boundary comes out a clean
+// drawn arc that no amount of render-side blur can make organic. Offsetting the
+// lookup inputs by a low-frequency spatial noise makes neighbours interdigitate
+// instead. Coarse on purpose: single-tile biome islands read worse than arcs.
+const ECOTONE_SCALE: Fx = crate::fx!("0.09");
+const ECOTONE_AMP: Fx = crate::fx!("0.30");
+/// Amplitude for a boundary that lives in HEIGHT rather than climate units
+/// (tree line, snow line, hill line): land spans a far narrower range than 0..1.
+pub const ECOTONE_H: Fx = crate::fx!("0.022");
+
+const SALT_T: u32 = 0x7a11;
+const SALT_P: u32 = 0x3b29;
+const SALT_H: u32 = 0x5c07;
+
+fn ecotone(x: Fx, y: Fx, base: u32, salt: u32, amp: Fx) -> Fx {
+    (fbm(x * ECOTONE_SCALE, y * ECOTONE_SCALE, base ^ salt, 3) - crate::fx!("0.5")) * amp
+}
+
+/// Ragged offset for a height iso-line, in normalized height. Same wander the
+/// climate axes get, so a tree line breaks up the way a biome edge does.
+pub fn ecotone_h(x: Fx, y: Fx, base: u32) -> Fx {
+    ecotone(x, y, base, SALT_H, ECOTONE_H)
+}
+
 /// Whittaker's biome diagram, discretized: rows are temperature (cold to hot),
 /// columns precipitation (arid to wet). Elevation, slope and standing water are
 /// applied as overrides afterwards.
@@ -364,24 +390,29 @@ fn bin(v: Fx, bins: usize) -> usize {
     (i.max(0) as usize).min(bins - 1)
 }
 
-/// The lowland biome for a (temperature, precipitation) pair.
-pub fn whittaker(temp: Fx, precip: Fx) -> Biome {
-    WHITTAKER[bin(temp, T_BINS)][bin(precip, P_BINS)]
+/// The lowland biome at a tile, from its (temperature, precipitation) pair
+/// dithered by the ecotone noise at that position.
+pub fn whittaker(temp: Fx, precip: Fx, x: Fx, y: Fx, base: u32) -> Biome {
+    let t = temp + ecotone(x, y, base, SALT_T, ECOTONE_AMP);
+    let p = precip + ecotone(x, y, base, SALT_P, ECOTONE_AMP);
+    WHITTAKER[bin(t, T_BINS)][bin(p, P_BINS)]
 }
 
 /// The highland biome for ground above the hill line: climate still decides
 /// whether an upland is cedar forest, bare rock or alpine meadow.
-pub fn highland(temp: Fx, precip: Fx, tree_line: Fx, h: Fx) -> Biome {
-    if h > tree_line {
+pub fn highland(temp: Fx, precip: Fx, tree_line: Fx, h: Fx, x: Fx, y: Fx, base: u32) -> Biome {
+    if h > tree_line + ecotone_h(x, y, base) {
         return Biome::Alpine;
     }
+    let temp = temp + ecotone(x, y, base, SALT_T, ECOTONE_AMP);
+    let precip = precip + ecotone(x, y, base, SALT_P, ECOTONE_AMP);
     if temp < crate::fx!("0.30") {
         if precip > crate::fx!("0.45") { Biome::Pine } else { Biome::Alpine }
-    } else if precip > crate::fx!("0.62") {
+    } else if precip > crate::fx!("0.68") {
         Biome::Pine
-    } else if precip > crate::fx!("0.30") {
+    } else if precip > crate::fx!("0.22") {
         Biome::Hills
-    } else if precip > crate::fx!("0.16") {
+    } else if precip > crate::fx!("0.12") {
         Biome::Scrub
     } else {
         Biome::Hammada
@@ -394,9 +425,51 @@ mod tests {
 
     #[test]
     fn hot_and_dry_is_desert_cold_and_wet_is_conifer() {
-        assert_eq!(whittaker(crate::fx!("0.95"), crate::fx!("0.05")), Biome::Desert);
-        assert_eq!(whittaker(crate::fx!("0.05"), crate::fx!("0.95")), Biome::Pine);
-        assert_eq!(whittaker(crate::fx!("0.5"), crate::fx!("0.95")), Biome::Forest);
+        let lut = |t, p| WHITTAKER[bin(t, T_BINS)][bin(p, P_BINS)];
+        assert_eq!(lut(crate::fx!("0.95"), crate::fx!("0.05")), Biome::Desert);
+        assert_eq!(lut(crate::fx!("0.05"), crate::fx!("0.95")), Biome::Pine);
+        assert_eq!(lut(crate::fx!("0.5"), crate::fx!("0.95")), Biome::Forest);
+        // The dither may move a BOUNDARY; it may never turn one climate into
+        // another, so the corners hold wherever on the map they are sampled.
+        for ty in (0..WORLD_SIZE).step_by(5) {
+            for tx in (0..WORLD_SIZE).step_by(5) {
+                let (x, y) = (Fx::from_num(tx), Fx::from_num(ty));
+                let at = |t, p| whittaker(t, p, x, y, 0x1234);
+                assert_eq!(at(crate::fx!("0.95"), crate::fx!("0.05")), Biome::Desert, "at {tx},{ty}");
+                assert!(
+                    matches!(at(crate::fx!("0.05"), crate::fx!("0.95")), Biome::Pine | Biome::Forest),
+                    "cold and wet grew {:?} at {tx},{ty}",
+                    at(crate::fx!("0.05"), crate::fx!("0.95"))
+                );
+                assert_eq!(at(crate::fx!("0.5"), crate::fx!("0.95")), Biome::Forest, "at {tx},{ty}");
+            }
+        }
+    }
+
+    #[test]
+    fn the_ecotone_dither_wanders_but_never_speckles() {
+        // Two guarantees at once: the offset actually varies across the map
+        // (otherwise boundaries stay clean arcs) and it varies SLOWLY, so a
+        // boundary interlocks over several tiles instead of dissolving into
+        // single-tile islands.
+        let (mut lo, mut hi, mut step) = (Fx::MAX, Fx::MIN, Fx::ZERO);
+        for ty in 0..WORLD_SIZE {
+            for tx in 0..WORLD_SIZE {
+                let (x, y) = (Fx::from_num(tx), Fx::from_num(ty));
+                let v = ecotone(x, y, 0x1234, SALT_T, ECOTONE_AMP);
+                lo = lo.min(v);
+                hi = hi.max(v);
+                if tx > 0 {
+                    let p = ecotone(x - Fx::ONE, y, 0x1234, SALT_T, ECOTONE_AMP);
+                    step = step.max((v - p).abs());
+                }
+            }
+        }
+        assert!(hi - lo > ECOTONE_AMP * crate::fx!("0.5"), "the dither barely moves ({lo}..{hi})");
+        assert!(
+            step * crate::fx!("4") < ECOTONE_AMP,
+            "the dither swings {step} in one tile - that speckles instead of interlocking"
+        );
     }
 
     #[test]

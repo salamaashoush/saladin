@@ -1,8 +1,8 @@
 use crate::math::Fx;
 use serde::{Deserialize, Serialize};
 
-/// One row per biome: render colors, gameplay flags, movement cost, decoration,
-/// and per-resource spawn densities. Single source of truth — `terrain.rs`
+/// One row per biome: render colors, gameplay flags, movement cost and
+/// per-resource spawn densities. Single source of truth — `terrain.rs`
 /// classifies a tile into a `Biome` and reads everything else from here.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[repr(u8)]
@@ -44,22 +44,6 @@ pub enum Biome {
     Alpine = 24,
 }
 
-/// Cosmetic prop kinds the client scatters per biome (client-only dressing).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[repr(u8)]
-pub enum Decoration {
-    None = 0,
-    Shrub = 1,
-    Palm = 2,
-    Rock = 3,
-    DuneGrass = 4,
-    PineCluster = 5,
-    Boulder = 6,
-    Reeds = 7,
-    Acacia = 8,
-    Olive = 9,
-}
-
 #[derive(Clone, Copy, Debug)]
 pub struct Density {
     pub tree: Fx,
@@ -72,12 +56,6 @@ pub struct Density {
 const Z: Fx = crate::fx!("0");
 
 #[derive(Clone, Copy, Debug)]
-pub struct DecoSpec {
-    pub kind: Decoration,
-    pub density: Fx,
-}
-
-#[derive(Clone, Copy, Debug)]
 pub struct BiomeDef {
     pub label: &'static str,
     pub color: u32,
@@ -86,8 +64,6 @@ pub struct BiomeDef {
     pub buildable: bool,
     /// Movement/pathing multiplier; `Fx::MAX` stands in for the impassable ∞.
     pub move_cost_mul: Fx,
-    pub height_emphasis: Fx,
-    pub decoration: DecoSpec,
     pub density: Density,
 }
 
@@ -105,8 +81,6 @@ const BIOME_DEFS: [BiomeDef; 25] = [
         passable: false,
         buildable: false,
         move_cost_mul: Fx::MAX,
-        height_emphasis: crate::fx!("1"),
-        decoration: DecoSpec { kind: Decoration::None, density: Z },
         density: NONE_DENS,
     },
     // ShallowWater
@@ -117,8 +91,6 @@ const BIOME_DEFS: [BiomeDef; 25] = [
         passable: false,
         buildable: false,
         move_cost_mul: Fx::MAX,
-        height_emphasis: crate::fx!("1"),
-        decoration: DecoSpec { kind: Decoration::Reeds, density: crate::fx!("0.05") },
         density: NONE_DENS,
     },
     // Sand
@@ -129,8 +101,6 @@ const BIOME_DEFS: [BiomeDef; 25] = [
         passable: true,
         buildable: true,
         move_cost_mul: crate::fx!("1.1"),
-        height_emphasis: crate::fx!("0.6"),
-        decoration: DecoSpec { kind: Decoration::DuneGrass, density: crate::fx!("0.1") },
         density: d(Z, Z, Z, crate::fx!("0.6"), Z),
     },
     // Desert
@@ -141,8 +111,6 @@ const BIOME_DEFS: [BiomeDef; 25] = [
         passable: true,
         buildable: true,
         move_cost_mul: crate::fx!("1.2"),
-        height_emphasis: crate::fx!("0.7"),
-        decoration: DecoSpec { kind: Decoration::Shrub, density: crate::fx!("0.05") },
         density: NONE_DENS,
     },
     // Dunes
@@ -153,8 +121,6 @@ const BIOME_DEFS: [BiomeDef; 25] = [
         passable: true,
         buildable: true,
         move_cost_mul: crate::fx!("1.5"),
-        height_emphasis: crate::fx!("1.2"),
-        decoration: DecoSpec { kind: Decoration::DuneGrass, density: crate::fx!("0.12") },
         density: NONE_DENS,
     },
     // Steppe
@@ -165,8 +131,6 @@ const BIOME_DEFS: [BiomeDef; 25] = [
         passable: true,
         buildable: true,
         move_cost_mul: crate::fx!("1.0"),
-        height_emphasis: crate::fx!("0.9"),
-        decoration: DecoSpec { kind: Decoration::Shrub, density: crate::fx!("0.1") },
         density: d(crate::fx!("0.06"), crate::fx!("0.12"), crate::fx!("0.28"), crate::fx!("0.1"), Z),
     },
     // Grassland
@@ -177,8 +141,6 @@ const BIOME_DEFS: [BiomeDef; 25] = [
         passable: true,
         buildable: true,
         move_cost_mul: crate::fx!("1.0"),
-        height_emphasis: crate::fx!("0.9"),
-        decoration: DecoSpec { kind: Decoration::Shrub, density: crate::fx!("0.07") },
         density: d(crate::fx!("0.32"), crate::fx!("0.05"), crate::fx!("0.4"), crate::fx!("0.15"), Z),
     },
     // Forest
@@ -189,8 +151,6 @@ const BIOME_DEFS: [BiomeDef; 25] = [
         passable: true,
         buildable: true,
         move_cost_mul: crate::fx!("1.3"),
-        height_emphasis: crate::fx!("1.0"),
-        decoration: DecoSpec { kind: Decoration::Shrub, density: crate::fx!("0.24") },
         density: d(crate::fx!("0.85"), Z, crate::fx!("0.12"), Z, Z),
     },
     // Hills
@@ -201,8 +161,6 @@ const BIOME_DEFS: [BiomeDef; 25] = [
         passable: true,
         buildable: true,
         move_cost_mul: crate::fx!("1.4"),
-        height_emphasis: crate::fx!("1.6"),
-        decoration: DecoSpec { kind: Decoration::Rock, density: crate::fx!("0.16") },
         density: d(Z, crate::fx!("0.55"), Z, Z, crate::fx!("0.18")),
     },
     // Mountain
@@ -213,20 +171,18 @@ const BIOME_DEFS: [BiomeDef; 25] = [
         passable: false,
         buildable: false,
         move_cost_mul: Fx::MAX,
-        height_emphasis: crate::fx!("2.4"),
-        decoration: DecoSpec { kind: Decoration::Boulder, density: crate::fx!("0.14") },
         density: d(Z, crate::fx!("0.4"), Z, Z, crate::fx!("0.35")),
     },
     // Snow
     BiomeDef {
         label: "Snow",
-        color: 0xeef2f5,
-        shade: 0xc7d3dc,
-        passable: false,
+        // Not paper-white: near the top of the tone curve lambert shading has
+        // no room left and a domed massif flattens into a mesa.
+        color: 0xd7e2ec,
+        shade: 0x9fb2c4,
+        passable: true,
         buildable: false,
-        move_cost_mul: Fx::MAX,
-        height_emphasis: crate::fx!("2.6"),
-        decoration: DecoSpec { kind: Decoration::Boulder, density: crate::fx!("0.08") },
+        move_cost_mul: crate::fx!("1.9"),
         density: NONE_DENS,
     },
     // Oasis
@@ -237,8 +193,6 @@ const BIOME_DEFS: [BiomeDef; 25] = [
         passable: true,
         buildable: true,
         move_cost_mul: crate::fx!("1.0"),
-        height_emphasis: crate::fx!("0.7"),
-        decoration: DecoSpec { kind: Decoration::Palm, density: crate::fx!("0.3") },
         density: d(crate::fx!("0.45"), Z, crate::fx!("0.35"), crate::fx!("0.2"), Z),
     },
     // River — carved freshwater channel; impassable except at fords
@@ -249,8 +203,6 @@ const BIOME_DEFS: [BiomeDef; 25] = [
         passable: false,
         buildable: false,
         move_cost_mul: Fx::MAX,
-        height_emphasis: crate::fx!("1"),
-        decoration: DecoSpec { kind: Decoration::Reeds, density: crate::fx!("0.12") },
         density: d(Z, Z, Z, crate::fx!("0.5"), Z),
     },
     // Ford — shallow river crossing: walkable, slow, never buildable (keeps the
@@ -262,8 +214,6 @@ const BIOME_DEFS: [BiomeDef; 25] = [
         passable: true,
         buildable: false,
         move_cost_mul: crate::fx!("1.6"),
-        height_emphasis: crate::fx!("0.5"),
-        decoration: DecoSpec { kind: Decoration::Reeds, density: crate::fx!("0.08") },
         density: NONE_DENS,
     },
     // Cliff — an elevation step too steep to walk; ramps interrupt it
@@ -274,8 +224,6 @@ const BIOME_DEFS: [BiomeDef; 25] = [
         passable: false,
         buildable: false,
         move_cost_mul: Fx::MAX,
-        height_emphasis: crate::fx!("2.2"),
-        decoration: DecoSpec { kind: Decoration::Boulder, density: crate::fx!("0.2") },
         density: d(Z, crate::fx!("0.3"), Z, Z, crate::fx!("0.2")),
     },
     // Lake — fresh water in a closed basin: the inland fishery
@@ -286,8 +234,6 @@ const BIOME_DEFS: [BiomeDef; 25] = [
         passable: false,
         buildable: false,
         move_cost_mul: Fx::MAX,
-        height_emphasis: crate::fx!("1"),
-        decoration: DecoSpec { kind: Decoration::Reeds, density: crate::fx!("0.06") },
         density: d(Z, Z, Z, crate::fx!("0.9"), Z),
     },
     // Marsh — wadeable but ruinous ground: no foundations hold here
@@ -298,8 +244,6 @@ const BIOME_DEFS: [BiomeDef; 25] = [
         passable: true,
         buildable: false,
         move_cost_mul: crate::fx!("2.0"),
-        height_emphasis: crate::fx!("0.5"),
-        decoration: DecoSpec { kind: Decoration::Reeds, density: crate::fx!("0.35") },
         density: d(crate::fx!("0.05"), Z, crate::fx!("0.2"), crate::fx!("0.35"), Z),
     },
     // Wadi — a dry channel: the desert's road, and where placer gold settles
@@ -310,8 +254,6 @@ const BIOME_DEFS: [BiomeDef; 25] = [
         passable: true,
         buildable: false,
         move_cost_mul: crate::fx!("0.9"),
-        height_emphasis: crate::fx!("0.45"),
-        decoration: DecoSpec { kind: Decoration::DuneGrass, density: crate::fx!("0.08") },
         density: d(Z, crate::fx!("0.1"), crate::fx!("0.08"), Z, crate::fx!("0.3")),
     },
     // SaltFlat — evaporite pan: dead flat, dead empty, quick to cross
@@ -322,8 +264,6 @@ const BIOME_DEFS: [BiomeDef; 25] = [
         passable: true,
         buildable: true,
         move_cost_mul: crate::fx!("0.85"),
-        height_emphasis: crate::fx!("0.3"),
-        decoration: DecoSpec { kind: Decoration::None, density: Z },
         density: NONE_DENS,
     },
     // Hammada — stone desert: the quarry belt of an arid map
@@ -334,8 +274,6 @@ const BIOME_DEFS: [BiomeDef; 25] = [
         passable: true,
         buildable: true,
         move_cost_mul: crate::fx!("1.35"),
-        height_emphasis: crate::fx!("1.1"),
-        decoration: DecoSpec { kind: Decoration::Rock, density: crate::fx!("0.28") },
         density: d(Z, crate::fx!("0.7"), Z, Z, crate::fx!("0.12")),
     },
     // Savanna — hot grass and acacia: herds graze here in numbers
@@ -346,8 +284,6 @@ const BIOME_DEFS: [BiomeDef; 25] = [
         passable: true,
         buildable: true,
         move_cost_mul: crate::fx!("1.0"),
-        height_emphasis: crate::fx!("0.85"),
-        decoration: DecoSpec { kind: Decoration::Acacia, density: crate::fx!("0.09") },
         density: d(crate::fx!("0.12"), crate::fx!("0.05"), crate::fx!("0.55"), Z, Z),
     },
     // Scrub — maquis: thorn, berries and firewood on a dry hillside
@@ -358,8 +294,6 @@ const BIOME_DEFS: [BiomeDef; 25] = [
         passable: true,
         buildable: true,
         move_cost_mul: crate::fx!("1.15"),
-        height_emphasis: crate::fx!("0.95"),
-        decoration: DecoSpec { kind: Decoration::Shrub, density: crate::fx!("0.3") },
         density: d(crate::fx!("0.18"), crate::fx!("0.08"), crate::fx!("0.3"), Z, Z),
     },
     // Pine — cedar and fir on the high slopes: the timber prize
@@ -370,8 +304,6 @@ const BIOME_DEFS: [BiomeDef; 25] = [
         passable: true,
         buildable: true,
         move_cost_mul: crate::fx!("1.35"),
-        height_emphasis: crate::fx!("1.2"),
-        decoration: DecoSpec { kind: Decoration::PineCluster, density: crate::fx!("0.32") },
         density: d(crate::fx!("1.0"), crate::fx!("0.05"), crate::fx!("0.1"), Z, Z),
     },
     // OliveGrove — terraced groves: wood and food off one slope
@@ -382,8 +314,6 @@ const BIOME_DEFS: [BiomeDef; 25] = [
         passable: true,
         buildable: true,
         move_cost_mul: crate::fx!("1.05"),
-        height_emphasis: crate::fx!("0.9"),
-        decoration: DecoSpec { kind: Decoration::Olive, density: crate::fx!("0.28") },
         density: d(crate::fx!("0.45"), Z, crate::fx!("0.25"), Z, Z),
     },
     // Alpine — above the tree line: thin meadow over exposed ore-bearing rock
@@ -394,8 +324,6 @@ const BIOME_DEFS: [BiomeDef; 25] = [
         passable: true,
         buildable: true,
         move_cost_mul: crate::fx!("1.5"),
-        height_emphasis: crate::fx!("1.8"),
-        decoration: DecoSpec { kind: Decoration::Rock, density: crate::fx!("0.2") },
         density: d(Z, crate::fx!("0.5"), Z, Z, crate::fx!("0.25")),
     },
 ];
@@ -413,13 +341,6 @@ pub fn biome_buildable(b: Biome) -> bool {
 pub fn move_cost_mul(b: Biome) -> Fx {
     biome_def(b).move_cost_mul
 }
-pub fn biome_height_emphasis(b: Biome) -> Fx {
-    biome_def(b).height_emphasis
-}
-pub fn biome_decoration(b: Biome) -> DecoSpec {
-    biome_def(b).decoration
-}
-
 pub fn tree_density(b: Biome) -> Fx {
     biome_def(b).density.tree
 }

@@ -365,7 +365,7 @@ fn run_command(world: &mut World, line: &str) -> String {
             });
             format!("AI {diff} seat queued (id {id})")
         }
-        _ => "unknown command — try 'help'".into(),
+        _ => "unknown command - try 'help'".into(),
     }
 }
 
@@ -619,6 +619,47 @@ pub fn auto_spawn_units(world: &mut World, mut stage: Local<u8>) {
                     break 'water;
                 }
             }
+        }
+    }
+    // prop lineup: every cosmetic kind against every rung of the tint ladder,
+    // so a units shot verifies each procedural fallback and the HSV bake
+    {
+        let meshes: Vec<bevy::prelude::Mesh> = crate::render::models::baked::prop_meshes();
+        let mat = {
+            let mut mats = world.resource_mut::<Assets<StandardMaterial>>();
+            mats.add(StandardMaterial {
+                base_color: bevy::prelude::Color::WHITE,
+                perceptual_roughness: 0.95,
+                ..Default::default()
+            })
+        };
+        let handles: Vec<bevy::prelude::Handle<bevy::prelude::Mesh>> = {
+            let mut assets = world.resource_mut::<Assets<bevy::prelude::Mesh>>();
+            meshes
+                .iter()
+                .flat_map(|m| {
+                    crate::PROP_TINTS
+                        .iter()
+                        .map(|&(h, s, v)| crate::render::models::bake_tint(m, h, s, v))
+                        .collect::<Vec<_>>()
+                })
+                .map(|m| assets.add(m))
+                .collect()
+        };
+        let field = crate::terrain::build_height_field(
+            world.resource::<saladin_protocol::WorldConfig>().seed,
+        );
+        for (i, h) in handles.into_iter().enumerate() {
+            let (kind, tint) = (i / crate::vegetation::TINTS, i % crate::vegetation::TINTS);
+            let x = kp.x.to_num::<f32>() + 9.0 + (kind % 5) as f32 * 1.7;
+            let z = kp.y.to_num::<f32>() - 7.0 + (kind / 5) as f32 * 5.6 + tint as f32 * 1.25;
+            let y = crate::terrain::height_at(&field, x, z);
+            world.spawn((
+                bevy::prelude::Mesh3d(h),
+                bevy::prelude::MeshMaterial3d(mat.clone()),
+                bevy::prelude::Transform::from_xyz(x, y, z),
+                crate::MatchScoped,
+            ));
         }
     }
     // wall demo: gate + tower composed into an L-run via the REAL command path

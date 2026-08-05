@@ -6,7 +6,10 @@
 //!   1. tectonics + corner height field: plate crust decides where land is and
 //!      where ranges rise, warped fbm supplies the detail (`terrain::height_at`)
 //!   2. thermal erosion sweeps: talus transport softens noise spikes into
-//!      coherent slopes (double-buffered, order-independent)
+//!      coherent slopes (double-buffered, order-independent). The talus angle
+//!      rises with elevation, so foothills grade into smooth debris aprons
+//!      while summits keep their crags; midway through, the pass noise carves
+//!      notches through the ranges so a crossing is real low ground
 //!   3. hydraulic incision: two stream-power passes cut the drainage network
 //!      into the land, so valleys are carved BY the rivers that later run in
 //!      them and ridges sharpen between them
@@ -20,9 +23,16 @@
 //!      precipitation from an advected moisture parcel (see `climate.rs`)
 //!   8. soil + ore: alluvium along the drainage, mineralization along the
 //!      orogenic seams
+//!   8b. slope: the world-space drop per tile of the exact surface the client
+//!      meshes — ONE field that decides the Cliff/Mountain label, and through
+//!      the label passability, move cost, buildability and keep siting. What
+//!      you SEE is where you can walk, by construction.
 //!   9. classify: Whittaker(temperature x precipitation) for the lowlands,
-//!      climate-aware highlands, cliffs where the corner gradient steps too
-//!      fast, and the arid/basin refinements (dunes, hammada, oasis, wadi)
+//!      climate-aware highlands, Cliff/Mountain wherever the ground falls away
+//!      too fast for a walker, and the arid/basin refinements (dunes, hammada,
+//!      oasis, wadi). Every climate and iso-line boundary is offset by the
+//!      ecotone noise first, so neighbouring biomes interdigitate instead of
+//!      meeting along the exact contour of a very smooth field.
 
 use crate::biomes::Biome;
 use crate::climate::{ClimateArchetype, ClimateField, climate_archetype, snow_line};
@@ -46,6 +56,17 @@ pub struct WorldGrid {
     pub moisture: Vec<Fx>,
     /// N^2 per-tile center height (average of the 4 carved corners).
     pub tile_h: Vec<Fx>,
+    /// N^2 world-space DROP to the lowest D8 neighbour, measured on the exact
+    /// surface the client meshes — the coupling between what the camera shows
+    /// and what a walker may cross. Cliff/Mountain labels, move cost,
+    /// buildability and keep siting all derive from this one field.
+    ///
+    /// It is the drop and not the absolute step because a tile is only ON a
+    /// wall if the ground falls away FROM it; the valley floor at the foot of
+    /// a scarp is flat ground you can stand on.
+    pub slope: Vec<Fx>,
+    /// N^2 orogenic belt weight 0..1 — the rock's identity under the tile.
+    pub belt: Vec<Fx>,
     /// N^2 per-tile temperature 0..1 (1 = hottest).
     pub temp: Vec<Fx>,
     /// N^2 soil fertility 0..1 — what a farm yields on this tile.
@@ -61,9 +82,12 @@ pub struct WorldGrid {
 const N: usize = WORLD_SIZE as usize;
 const C: usize = N + 1;
 
-// thermal erosion: material moves where the slope exceeds the talus angle
-const EROSION_SWEEPS: usize = 6;
-const TALUS: Fx = crate::fx!("0.045");
+// thermal erosion: material moves where the slope exceeds the talus angle.
+// The angle RISES with elevation — low ground grades into smooth debris
+// aprons (the foothill skirt) while summits keep their crags.
+const EROSION_SWEEPS: usize = 10;
+const TALUS_LOW: Fx = crate::fx!("0.022");
+const TALUS_GAIN: Fx = crate::fx!("0.14");
 const EROSION_K: Fx = crate::fx!("0.24");
 
 // hydraulic incision: h -= K * sqrt(accumulation) * slope, twice
@@ -79,13 +103,28 @@ const CARVE_MAX: Fx = crate::fx!("0.05");
 
 // classification bands
 const BEACH_BAND: Fx = crate::fx!("0.020");
-const HILL_T: Fx = crate::fx!("0.62");
-const MOUNTAIN_T: Fx = crate::fx!("0.78");
-const CLIFF_STEP: Fx = crate::fx!("0.055");
+const HILL_T: Fx = crate::fx!("0.55");
+const MOUNTAIN_T: Fx = crate::fx!("0.72");
+/// World-space rise per tile over which ground stops being walkable. Slope is
+/// measured on the meshed surface, so a face that renders as a wall IS a wall.
+/// Calibrated off the printed slope histogram (`worldstat`), never guessed.
+pub const CLIFF_SLOPE: Fx = crate::fx!("1.05");
+/// A summit is only a Mountain if it is also steep; gentle high ground stays
+/// Alpine/Hills and stays walkable, which is what makes saddles the route.
+const MOUNT_SLOPE: Fx = crate::fx!("0.55");
+/// How much a tile of climb adds to its movement cost.
+pub const CLIMB_COST: Fx = crate::fx!("1.6");
 const PASS_SCALE: Fx = crate::fx!("0.045");
 const PASS_T: Fx = crate::fx!("0.6");
+/// How deep a pass notch cuts into a range, in normalized height.
+const PASS_DEPTH: Fx = crate::fx!("0.10");
 const RAMP_SCALE: Fx = crate::fx!("0.06");
 const RAMP_T: Fx = crate::fx!("0.64");
+/// The ramp channel scales the cliff threshold between these multiples.
+/// `RAMP_HI` is the HARD ceiling: nothing steeper than
+/// `CLIFF_SLOPE * RAMP_HI / cliff_gain` is walkable on any tile, anywhere.
+const RAMP_LO: Fx = crate::fx!("0.7");
+pub const RAMP_HI: Fx = crate::fx!("2.0");
 
 // arid refinements
 /// Precipitation under which a channel only runs after a storm.
@@ -97,6 +136,24 @@ const DUNE_SCALE: Fx = crate::fx!("0.035");
 const DUNE_T: Fx = crate::fx!("0.52");
 /// Desert within reach of fresh water greens up.
 const OASIS_REACH: i32 = 3;
+/// Soil rich enough that the shore is green mud, not sand.
+const SHORE_GREEN_T: Fx = crate::fx!("0.42");
+/// Dune fetch and dryness a coast needs before its beach climbs into dunes.
+const SHORE_DUNE_T: Fx = crate::fx!("0.55");
+const SHORE_DUNE_P: Fx = crate::fx!("0.34");
+
+/// The gentlest drop this map can label `Cliff`.
+pub fn cliff_slope_min(seed: u32) -> Fx {
+    let g = seed_bias(seed).cliff_gain;
+    if g > Fx::ZERO { CLIFF_SLOPE * RAMP_LO / g } else { Fx::MAX }
+}
+
+/// The steepest ground that can ever be walkable on this map. Above this the
+/// ramp channel cannot save a tile — what renders as a wall IS a wall.
+pub fn max_walkable_slope(seed: u32) -> Fx {
+    let g = seed_bias(seed).cliff_gain;
+    if g > Fx::ZERO { CLIFF_SLOPE * RAMP_HI / g } else { Fx::MAX }
+}
 
 const D4: [(i32, i32); 4] = [(-1, 0), (1, 0), (0, -1), (0, 1)];
 const D8: [(i32, i32); 8] = [(-1, -1), (0, -1), (1, -1), (-1, 0), (1, 0), (-1, 1), (0, 1), (1, 1)];
@@ -235,33 +292,58 @@ fn build(seed: u32) -> WorldGrid {
 
     // ── 2. thermal erosion (double-buffered, order-independent) ─────────────
     let mut next = corner.clone();
-    for _ in 0..EROSION_SWEEPS {
-        for cy in 1..C - 1 {
-            for cx in 1..C - 1 {
-                let i = cidx(cx, cy);
-                let h = corner[i];
-                if h < sea {
-                    continue; // seabed keeps its noise — only land erodes
-                }
-                let mut low = h;
-                let mut low_i = i;
-                for (dx, dy) in D4 {
-                    let j = cidx((cx as i32 + dx) as usize, (cy as i32 + dy) as usize);
-                    if corner[j] < low {
-                        low = corner[j];
-                        low_i = j;
+    let sweep = |corner: &mut Vec<Fx>, next: &mut Vec<Fx>, n: usize| {
+        for _ in 0..n {
+            for cy in 1..C - 1 {
+                for cx in 1..C - 1 {
+                    let i = cidx(cx, cy);
+                    let h = corner[i];
+                    if h < sea {
+                        continue; // seabed keeps its noise — only land erodes
+                    }
+                    let mut low = h;
+                    let mut low_i = i;
+                    for (dx, dy) in D4 {
+                        let j = cidx((cx as i32 + dx) as usize, (cy as i32 + dy) as usize);
+                        if corner[j] < low {
+                            low = corner[j];
+                            low_i = j;
+                        }
+                    }
+                    let drop = h - low;
+                    let talus = TALUS_LOW + (h - sea).max(Fx::ZERO) * TALUS_GAIN;
+                    if drop > talus {
+                        let moved = (drop - talus) * EROSION_K;
+                        next[i] -= moved;
+                        next[low_i] += moved;
                     }
                 }
-                let drop = h - low;
-                if drop > TALUS {
-                    let moved = (drop - TALUS) * EROSION_K;
-                    next[i] -= moved;
-                    next[low_i] += moved;
-                }
             }
+            corner.copy_from_slice(next);
         }
-        corner.copy_from_slice(&next);
+    };
+    sweep(&mut corner, &mut next, EROSION_SWEEPS - 3);
+
+    // ── 2b. passes: a crossing has to BE low ground, not a relabelled wall ──
+    for cy in 0..C {
+        for cx in 0..C {
+            let i = cidx(cx, cy);
+            let high = ((corner[i] - HILL_T) * crate::fx!("5")).clamp(Fx::ZERO, Fx::ONE);
+            if high <= Fx::ZERO {
+                continue;
+            }
+            let pv = fbm(
+                Fx::from_num(cx as i32) * PASS_SCALE + Fx::from_num(17),
+                Fx::from_num(cy as i32) * PASS_SCALE + Fx::from_num(23),
+                base ^ 0x9a55,
+                3,
+            );
+            let t = ((pv - PASS_T) * crate::fx!("5")).clamp(Fx::ZERO, Fx::ONE);
+            corner[i] -= PASS_DEPTH * t * t * (crate::fx!("3") - crate::fx!("2") * t) * high;
+        }
     }
+    next.copy_from_slice(&corner);
+    sweep(&mut corner, &mut next, 3);
 
     let mut tile_h: Vec<Fx> = vec![Fx::ZERO; N * N];
     retile(&corner, &mut tile_h);
@@ -445,12 +527,14 @@ fn build(seed: u32) -> WorldGrid {
 
     let mut fertility = vec![Fx::ZERO; N * N];
     let mut ore = vec![Fx::ZERO; N * N];
+    let mut belt = vec![Fx::ZERO; N * N];
     let reach = Fx::from_num(FLOODPLAIN_REACH);
     for ty in 0..N {
         for tx in 0..N {
             let i = tidx(tx, ty);
             let p = plates.sample(Fx::from_num(tx as i32), Fx::from_num(ty as i32));
             ore[i] = (p.ore * crate::fx!("0.75") + p.belt * crate::fx!("0.25")).min(Fx::ONE);
+            belt[i] = p.belt;
             if tile_h[i] < sea {
                 continue;
             }
@@ -487,9 +571,48 @@ fn build(seed: u32) -> WorldGrid {
         }
     }
 
+    // ── 8b. slope of the meshed surface ─────────────────────────────────────
+    let surf: Vec<Fx> =
+        tile_h.iter().map(|&h| crate::terrain::surface_height(h, bias.elev_gain)).collect();
+    let mut slope = vec![Fx::ZERO; N * N];
+    for ty in 0..N {
+        for tx in 0..N {
+            let i = tidx(tx, ty);
+            let mut s = Fx::ZERO;
+            for (dx, dy) in D8 {
+                let (nx, ny) = (tx as i32 + dx, ty as i32 + dy);
+                if nx < 0 || ny < 0 || nx >= N as i32 || ny >= N as i32 {
+                    continue;
+                }
+                s = s.max(surf[i] - surf[tidx(nx as usize, ny as usize)]);
+            }
+            slope[i] = s.max(Fx::ZERO);
+        }
+    }
+
     // ── 9. classify ─────────────────────────────────────────────────────────
     let mut biome: Vec<Biome> = vec![Biome::DeepWater; N * N];
     let deep_margin = crate::fx!("0.06");
+    let cliff_t = if bias.cliff_gain > Fx::ZERO { CLIFF_SLOPE / bias.cliff_gain } else { Fx::MAX };
+    // Whether a CHANNEL runs year round is decided by the rain on the country
+    // it drains, never by the rain over the channel — the parcel sweep treats
+    // every water tile as a moisture source, so a channel always reads wet.
+    let land_precip = |tx: usize, ty: usize| -> Fx {
+        let (mut sum, mut n) = (Fx::ZERO, 0i32);
+        for (dx, dy) in D8 {
+            let (nx, ny) = (tx as i32 + dx, ty as i32 + dy);
+            if nx < 0 || ny < 0 || nx >= N as i32 || ny >= N as i32 {
+                continue;
+            }
+            let j = tidx(nx as usize, ny as usize);
+            if tile_h[j] < sea || river[j] || lake[j] || marsh[j] {
+                continue;
+            }
+            sum += precip[j];
+            n += 1;
+        }
+        if n == 0 { precip[tidx(tx, ty)] } else { sum / Fx::from_num(n) }
+    };
     for ty in 0..N {
         let snow_h = snow_line(clim, ty);
         for tx in 0..N {
@@ -499,8 +622,26 @@ fn build(seed: u32) -> WorldGrid {
             let p = precip[i];
             let x = Fx::from_num(tx as i32);
             let y = Fx::from_num(ty as i32);
+            // ONE steepness verdict per tile, and every walkable label defers
+            // to it: a gorge is never forded, a scarp never grows a beach.
+            // The ramp channel modulates the THRESHOLD rather than vetoing the
+            // verdict, so openings are organic AND nothing above
+            // `cliff_t * RAMP_HI` is ever walkable.
+            let steep = slope[i] > cliff_t * RAMP_LO && {
+                let ramp = fbm(
+                    x * RAMP_SCALE + Fx::from_num(13),
+                    y * RAMP_SCALE + Fx::from_num(29),
+                    base ^ 0xc11f,
+                    3,
+                );
+                let open = (ramp - RAMP_T + crate::fx!("0.2")) * crate::fx!("3");
+                let open = open.clamp(Fx::ZERO, Fx::ONE);
+                let t = cliff_t
+                    * (RAMP_LO + (RAMP_HI - RAMP_LO) * open * open * (crate::fx!("3") - crate::fx!("2") * open));
+                slope[i] > t
+            };
 
-            if salt[i] {
+            if salt[i] && !steep {
                 biome[i] = Biome::SaltFlat;
                 continue;
             }
@@ -509,7 +650,9 @@ fn build(seed: u32) -> WorldGrid {
                 continue;
             }
             if river[i] {
-                biome[i] = if p < WADI_T {
+                biome[i] = if steep {
+                    Biome::River
+                } else if land_precip(tx, ty) < WADI_T {
                     Biome::Wadi
                 } else if hash2(tx as i32, ty as i32, base ^ 0xf00d) > FORD_HASH_T && !wide[i] {
                     Biome::Ford
@@ -518,8 +661,8 @@ fn build(seed: u32) -> WorldGrid {
                 };
                 continue;
             }
-            if marsh[i] {
-                biome[i] = if p < WADI_T { Biome::SaltFlat } else { Biome::Marsh };
+            if marsh[i] && !steep {
+                biome[i] = if land_precip(tx, ty) < WADI_T { Biome::SaltFlat } else { Biome::Marsh };
                 continue;
             }
             if h < sea - deep_margin {
@@ -530,44 +673,60 @@ fn build(seed: u32) -> WorldGrid {
                 biome[i] = Biome::ShallowWater;
                 continue;
             }
-            if h < sea + BEACH_BAND {
-                biome[i] = Biome::Sand;
+            // Snow line and hill line are iso-lines of a smooth field too, so
+            // they get the same wander the climate axes do or they read as
+            // drawn contours.
+            let iso = crate::climate::ecotone_h(x, y, base);
+            // A summit is a Mountain only where it is also STEEP: plateaus,
+            // shoulders and the carved saddles fall through and stay walkable,
+            // which is what makes a pass a route instead of a relabel. Below
+            // the mountain line the same steepness reads as a scarp.
+            if h > MOUNTAIN_T && slope[i] > MOUNT_SLOPE {
+                biome[i] = Biome::Mountain;
                 continue;
             }
-            if h > snow_h {
+            if steep {
+                biome[i] = Biome::Cliff;
+                continue;
+            }
+            // Snow is what the high ground WEARS, not what makes it a barrier.
+            // Testing it after the steepness rules means a crag above the snow
+            // line is Mountain or Cliff and stops an army, while a snowfield is
+            // exactly what it looks like: open ground that is slow to cross.
+            if h > snow_h + iso {
                 biome[i] = Biome::Snow;
                 continue;
             }
-            if h > MOUNTAIN_T {
-                let pv = fbm(x * PASS_SCALE + Fx::from_num(17), y * PASS_SCALE + Fx::from_num(23), base ^ 0x9a55, 3);
-                biome[i] = if pv > PASS_T {
-                    crate::climate::highland(t, p, clim.tree_line, h)
-                } else {
-                    Biome::Mountain
-                };
-                continue;
-            }
-            // cliffs: too-steep corner step inside the tile (ramp channel cuts
-            // openings); checked before the climate LUT so plateau edges wall up
-            if bias.cliff_gain > Fx::ZERO && h > crate::fx!("0.5") {
-                let c00 = corner[cidx(tx, ty)];
-                let c10 = corner[cidx(tx + 1, ty)];
-                let c01 = corner[cidx(tx, ty + 1)];
-                let c11 = corner[cidx(tx + 1, ty + 1)];
-                let step = c00.max(c10).max(c01).max(c11) - c00.min(c10).min(c01).min(c11);
-                if step > CLIFF_STEP / bias.cliff_gain {
-                    let ramp = fbm(x * RAMP_SCALE + Fx::from_num(13), y * RAMP_SCALE + Fx::from_num(29), base ^ 0xc11f, 3);
-                    if ramp <= RAMP_T {
-                        biome[i] = Biome::Cliff;
-                        continue;
-                    }
+            // A shore is not one beige stamp: sand needs sediment and a dry
+            // back-shore, a fertile or marshy coast is green mud, and where the
+            // dune fetch runs the beach climbs into a dune shore. Steep coasts
+            // never get here at all — they were labelled Cliff above.
+            if h < sea + BEACH_BAND + iso * crate::fx!("0.5") {
+                let muddy = fertility[i] > SHORE_GREEN_T
+                    || D8.iter().any(|(dx, dy)| {
+                        let (nx, ny) = (tx as i32 + dx, ty as i32 + dy);
+                        nx >= 0
+                            && ny >= 0
+                            && nx < N as i32
+                            && ny < N as i32
+                            && marsh[tidx(nx as usize, ny as usize)]
+                    });
+                if !muddy {
+                    let (fx_s, fy_s) = if wind.0 != 0 {
+                        (crate::fx!("0.4"), Fx::ONE)
+                    } else {
+                        (Fx::ONE, crate::fx!("0.4"))
+                    };
+                    let dv = fbm(x * DUNE_SCALE * fx_s, y * DUNE_SCALE * fy_s, base ^ 0xd07e, 3);
+                    biome[i] = if dv > SHORE_DUNE_T && p < SHORE_DUNE_P { Biome::Dunes } else { Biome::Sand };
+                    continue;
                 }
             }
-            if h > HILL_T {
-                biome[i] = crate::climate::highland(t, p, clim.tree_line, h);
+            if h > HILL_T + iso {
+                biome[i] = crate::climate::highland(t, p, clim.tree_line, h, x, y, base);
                 continue;
             }
-            biome[i] = crate::climate::whittaker(t, p);
+            biome[i] = crate::climate::whittaker(t, p, x, y, base);
         }
     }
 
@@ -627,6 +786,8 @@ fn build(seed: u32) -> WorldGrid {
         biome: refined,
         moisture: precip,
         tile_h,
+        slope,
+        belt,
         temp,
         fertility,
         ore,

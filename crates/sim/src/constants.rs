@@ -38,6 +38,13 @@ pub const GOLD_NODES: i32 = 160;
 pub const GOLD_YIELD: i32 = 140;
 pub const FOOD_NODES: i32 = 360;
 pub const FOOD_YIELD: i32 = 160;
+/// Gravel gold in the channels below the highlands: cheap, safe, early.
+pub const PLACER_NODES: i32 = 60;
+/// The exploration prize in the high country. Sized to the Hills/Alpine band
+/// the elevation curve actually grows — a few percent of land, so these land
+/// as roughly half a dozen patches per map rather than one lucky pocket.
+pub const MOTHERLODE_GOLD_NODES: i32 = 40;
+pub const MOTHERLODE_STONE_NODES: i32 = 36;
 /// Fish replenished per economy tick on every water food node inside a
 /// fishing hut's reach — huts sustain their fishery; unmanaged waters fish out.
 pub const FISH_REGEN_PER_TICK: i32 = 2;

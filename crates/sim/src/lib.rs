@@ -40,13 +40,13 @@ pub use ai::{
 };
 pub use content::{
     AiDifficulty, AiProfile, MATCH_PRESETS, MAX_AI_OPPONENTS, MatchPreset, PLAYER_COLORS,
-    ResourceDef, ai_name, ai_profile, alloc_slot, enemy_faction, faction_label, node_kinds,
-    planner_tuning, resource_def, spawn_corner, tactical_tuning,
+    ResourceDef, TIMBER_SLOPE_MAX, ai_name, ai_profile, alloc_slot, enemy_faction, faction_label,
+    node_kinds, planner_tuning, resource_def, spawn_corner, tactical_tuning,
 };
 pub use match_state::{MatchStatus, match_simulates};
 pub use biomes::{
-    Biome, BiomeDef, DecoSpec, Decoration, biome_buildable, biome_decoration, biome_def,
-    biome_height_emphasis, biome_is_fresh_water, biome_is_water, biome_passable, fish_density,
+    Biome, BiomeDef, biome_buildable, biome_def,
+    biome_is_fresh_water, biome_is_water, biome_passable, fish_density,
     game_density, gold_density, motherlode_density, move_cost_mul, rock_density, tree_density,
 };
 pub use climate::{CLIMATES, ClimateArchetype, climate_archetype, highland, whittaker};
@@ -58,13 +58,15 @@ pub use pathfinding::{
 pub use terrain::{
     FAIR_MIN_FOOD, FAIR_MIN_STONE, FAIR_MIN_WOOD, FAIR_RADIUS, ScatterRule, ScatteredNode,
     TerrainSample, compose_seed, fair_start_nodes, find_land_near, is_coastal, is_land,
-    NodeSite, fertility_at, is_passable, node_reachable, node_site, ore_at, passable_grid, region_at,
-    region_grid, render_height, temp_at, world_climate, move_cost_at, move_cost_grid,
+    NodeSite, belt_at, fertility_at, is_passable, node_reachable, node_site, ore_at, passable_grid,
+    region_at, slope_at,
+    region_grid, surface_height, temp_at, world_climate, move_cost_at, move_cost_grid,
     dominant_region, buildable_grid, find_keep_site, is_buildable_tile, is_water_tile, sample_terrain, scatter_nodes,
     seed_base, seed_bias, seed_preset, start_point,
 };
 pub use buildings::{
-    Occupant, PlaceError, Tile, can_place, check_place, composes_with_walls, find_buildable_near, soil_quality,
+    BUILD_SLOPE_MAX, FOUNDATION_RELIEF, Occupant, PlaceError, Tile, can_place, check_place,
+    composes_with_walls, find_buildable_near, footprint_relief, soil_quality,
     footprint_center, footprint_tiles, has_passable_approach, is_water_adjacent, occupancy_set,
     tile_key,
 };

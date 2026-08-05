@@ -360,6 +360,94 @@ def prop_flowers():
     return b.join(subdivide=0)
 
 
+def prop_acacia():
+    b = Builder("prop_acacia")
+    b.cyl(0x6B5334, 0.12, 1.0, (0, 0, 0.5), seg=6, r_top=0.05, bevel=0.0)
+    b.cyl(0x6B5334, 0.06, 0.55, (0.18, 0.02, 0.95), seg=4, r_top=0.035, rot=(0, 0.55, 0), bevel=0.0)
+    b.cyl(0x6B5334, 0.06, 0.55, (-0.18, -0.06, 0.93), seg=4, r_top=0.035, rot=(0, -0.55, 0), bevel=0.0)
+    b.cyl(0x6B5334, 0.05, 0.45, (0.02, 0.2, 0.98), seg=4, r_top=0.03, rot=(-0.5, 0, 0), bevel=0.0)
+    for dx, dy, r, z, sq, c in (
+        (0.0, 0.0, 0.5, 1.34, 0.3, 0x6D7A3C),
+        (0.38, -0.14, 0.36, 1.22, 0.28, 0x51602C),
+        (-0.34, 0.16, 0.33, 1.24, 0.3, 0x51602C),
+        (0.1, 0.36, 0.28, 1.3, 0.26, 0x7D8A48),
+        (-0.12, -0.34, 0.26, 1.28, 0.28, 0x7D8A48),
+    ):
+        b.blob(c, r, (dx, dy, z), scale=(1, 1, sq), noise=0.3)
+    return b.join(subdivide=0)
+
+
+def prop_olive():
+    b = Builder("prop_olive")
+    b.cyl(TRUNK, 0.085, 0.34, (0.04, 0, 0.17), seg=5, r_top=0.045, rot=(0, 0.22, 0), bevel=0.0)
+    b.cyl(TRUNK_DARK, 0.06, 0.26, (-0.08, -0.03, 0.14), seg=5, r_top=0.035, rot=(0, -0.3, 0), bevel=0.0)
+    b.blob(0x6A7B46, 0.28, (0.02, 0, 0.5), scale=(1, 1, 0.68), noise=0.35)
+    b.blob(0x55663A, 0.19, (0.21, -0.09, 0.42), scale=(1, 1, 0.62), noise=0.35)
+    b.blob(0x77875A, 0.16, (-0.16, 0.1, 0.46), scale=(1, 1, 0.66), noise=0.35)
+    return b.join(subdivide=0)
+
+
+def prop_tussock():
+    b = Builder("prop_tussock")
+    b.blob(0x56702E, 0.13, (0, 0, 0.03), scale=(1, 1, 0.35), noise=0.4)
+    n = 9
+    for i in range(n):
+        a = i / n * math.tau + (i % 3) * 0.4
+        h = 0.26 + (i % 4) * 0.09
+        lean = 0.3 + (i % 3) * 0.16
+        c = 0x56702E if i % 3 == 0 else 0x6F8C3C
+        # the blade pivots about its own centre, so the base only stays at the
+        # clump if the centre is pushed out along the lean
+        out = 0.06 + h * 0.5 * math.sin(lean)
+        b.cone(c, 0.032, h, (math.cos(a) * out, math.sin(a) * out, h * 0.5 * math.cos(lean)), seg=3,
+               rot=(math.sin(a) * lean, -math.cos(a) * lean, 0), scale=(0.42, 1, 1))
+    return b.join(subdivide=0)
+
+
+def prop_fern():
+    b = Builder("prop_fern")
+    n = 7
+    for i in range(n):
+        a = i / n * math.tau
+        length = 0.34 + (i % 3) * 0.07
+        c = 0x3F6B2C if i % 2 == 0 else 0x4E8034
+        b.cone(c, 0.11, length, (math.cos(a) * length * 0.36, math.sin(a) * length * 0.36, 0.2),
+               seg=3, rot=(0.95, 0, a - math.pi / 2), scale=(1, 0.25, 1))
+    b.blob(0x3F6B2C, 0.09, (0, 0, 0.06), scale=(1, 1, 0.5), noise=0.3)
+    return b.join(subdivide=0)
+
+
+def prop_deadfall():
+    b = Builder("prop_deadfall")
+    b.cyl(0x5A4530, 0.085, 0.95, (0, 0, 0.15), seg=7, r_top=0.055,
+          rot=(math.pi / 2 - 0.18, 0, 0), bevel=0.0)
+    b.cyl(0x45341F, 0.15, 0.22, (0.03, -0.44, 0.11), seg=6, r_top=0.11, bevel=0.0)
+    b.cyl(0x45341F, 0.032, 0.26, (0.09, 0.12, 0.2), seg=4, r_top=0.02, rot=(0.9, -0.8, 0), bevel=0.0)
+    b.blob(0x4C6B31, 0.09, (-0.02, -0.12, 0.2), scale=(1, 1, 0.3), noise=0.35)
+    b.blob(0x4C6B31, 0.07, (0.03, 0.2, 0.16), scale=(1, 1, 0.32), noise=0.35)
+    return b.join(subdivide=0)
+
+
+def prop_sapling():
+    b = Builder("prop_sapling")
+    b.cyl(TRUNK, 0.045, 0.6, (0, 0, 0.3), seg=5, r_top=0.025, bevel=0.0)
+    b.blob(0x53853A, 0.19, (0, 0, 0.68), noise=0.35)
+    b.blob(0x426C2E, 0.12, (0.15, -0.07, 0.5), noise=0.35)
+    b.blob(0x426C2E, 0.1, (-0.13, 0.08, 0.55), noise=0.35)
+    return b.join(subdivide=0)
+
+
+def prop_pebbles():
+    b = Builder("prop_pebbles")
+    rng = random.Random(41)
+    for i, (x, y, r) in enumerate((
+        (0.0, 0.0, 0.13), (0.26, -0.12, 0.09), (-0.2, -0.2, 0.08), (0.14, 0.24, 0.07),
+        (-0.28, 0.14, 0.06), (0.34, 0.05, 0.05), (-0.06, -0.32, 0.05),
+    )):
+        c = (0x8B8880, 0x7A7770, 0x969289, 0x6F6C66)[i % 4]
+        b.rock(c, r, (x, y, r * 0.28), rng, squash=0.4, dark=0x4E4B45)
+    return b.join(subdivide=0)
+
 # ── peasant hand tools (parented onto the right hand, swapped per task) ─────
 # Origin = grip point; haft runs up local +Z, business end faces -Y (game +Z,
 # the unit's facing) so the swing arc reads correctly.
@@ -479,6 +567,13 @@ BUILDERS = {
     "prop_palm": prop_palm,
     "prop_pine": prop_pine,
     "prop_flowers": prop_flowers,
+    "prop_acacia": prop_acacia,
+    "prop_olive": prop_olive,
+    "prop_tussock": prop_tussock,
+    "prop_fern": prop_fern,
+    "prop_deadfall": prop_deadfall,
+    "prop_sapling": prop_sapling,
+    "prop_pebbles": prop_pebbles,
     "tree_broadleaf": tree_broadleaf,
     "tree_conifer": tree_conifer,
     "tree_broadleaf_tall": tree_broadleaf_tall,

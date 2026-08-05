@@ -1,7 +1,7 @@
 use bevy_app::prelude::*;
 use saladin_sim::{
     AiDifficulty, BuildingKind, Faction, Fx, GatherState, ResourceType, START_FOOD,
-    START_GOLD, START_STONE, START_WOOD, Stance, Stockpile, UnitKind, V2, ZERO, is_passable,
+    START_GOLD, START_STONE, START_WOOD, Stance, Stockpile, UnitKind, V2, WORLD_SIZE, ZERO, is_passable,
     unit_def,
 };
 use saladin_protocol::*;
@@ -263,9 +263,9 @@ fn combat_scales_to_hundreds_of_units() {
     let mut id = 1u64;
     let mut placed = 0;
     let mut ty = 20;
-    'outer: while ty < 130 {
+    'outer: while ty < WORLD_SIZE - 20 {
         let mut tx = 20;
-        while tx < 130 {
+        while tx < WORLD_SIZE - 20 {
             if is_passable(seed, tx, ty) && is_passable(seed, tx + 1, ty) {
                 spawn_combatant(&mut app, id, 1, V2::new(f(tx) + h, f(ty) + h));
                 spawn_combatant(&mut app, id + 1, 2, V2::new(f(tx + 1) + h, f(ty) + h));

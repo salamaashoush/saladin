@@ -10,9 +10,10 @@ use bevy::mesh::{MeshBuilder, Meshable};
 use bevy::prelude::*;
 use std::collections::HashMap;
 use saladin_protocol::{Building, GameId, Owner, Player, Pos, ResourceNode, Unit, WorldConfig};
+use saladin_sim::rng::mix_seed;
 use saladin_sim::{
     BuildingKind, PLAYER_COLORS, ResourceType, UnitKind, WORLD_SIZE, building_def,
-    footprint_tiles, tile_key, unit_def,
+    footprint_tiles, hash2, tile_key, unit_def,
 };
 use std::collections::HashSet;
 
@@ -273,6 +274,12 @@ pub struct AnimState {
     /// faster than a trundling ram
     pub stride: f32,
 }
+
+/// Per-node girth and height jitter fixed at spawn. `sync_render` rewrites
+/// `Transform::scale` from the depletion curve every frame, so variety has to
+/// survive as a multiplier or it is erased on frame two.
+#[derive(Component)]
+pub struct NodeBaseScale(pub Vec3);
 
 /// Fish-school food node: the school slowly circles its ripple rings and
 /// bobs with the water.
@@ -543,10 +550,12 @@ pub fn sync_render(
         (&ChildOf, &UnitBody, &mut Visibility, &mut MeshMaterial3d<StandardMaterial>),
         (Without<RenderRoot>, Without<SelRing>, Without<RoutFlag>),
     >,
-    (mut q_rings, mut q_routs, mut q_animals): (
+    (mut q_rings, mut q_routs, mut q_animals, q_node_scale, mut prop_grid): (
         Query<(&ChildOf, &mut Visibility), (With<SelRing>, Without<RenderRoot>)>,
         Query<(&ChildOf, &mut Visibility), (With<RoutFlag>, Without<RenderRoot>, Without<SelRing>)>,
         Query<&mut AnimalNode>,
+        Query<&NodeBaseScale>,
+        ResMut<crate::PropGrid>,
     ),
 ) {
     let owner_color: HashMap<u64, u32> = q_players
@@ -637,6 +646,22 @@ pub fn sync_render(
             let faction = owner
                 .and_then(|o| owner_faction.get(&o.0).copied())
                 .unwrap_or(saladin_sim::Faction::Ayyubid);
+            if !map.0.contains_key(&gid.0) && !prop_grid.0.is_empty() {
+                // scatter dressing does not survive a foundation being poured.
+                // Models overhang their footprint, so anything bigger than a
+                // hut clears the ring around it too.
+                let fp = building_def(b.kind).footprint;
+                let pad = if fp > 1 { 1 } else { 0 };
+                let (cx, cz) = (x as i32, z as i32);
+                let r = fp / 2 + pad;
+                for tz in cz - r..=cz + r {
+                    for tx in cx - r..=cx + r {
+                        for e in prop_grid.0.remove(&tile_key(tx, tz)).unwrap_or_default() {
+                            commands.entity(e).despawn();
+                        }
+                    }
+                }
+            }
             let root = *map.0.entry(gid.0).or_insert_with(|| {
                 let mat = rmats.tint_mat(&mut mats, team.unwrap_or(0x9c958a));
                 let def = building_def(b.kind);
@@ -679,13 +704,18 @@ pub fn sync_render(
                 // Coastal food sits on water tiles — draw a fish school there,
                 // never a deer standing on the sea.
                 use crate::render::models::props::*;
+                // GameIds are handed out sequentially, so anything derived from
+                // one makes a whole patch share a variant and a facing. Species,
+                // yaw and girth all read the TILE instead.
+                let stream = |salt: u32| {
+                    hash2(x as i32, z as i32, mix_seed(world_cfg.seed, salt)).to_num::<f32>()
+                };
                 let variants = &assets.nodes[&n.res_type];
-                let roll = (gid.0 ^ (gid.0 >> 17)) as usize;
+                let roll = (stream(0x3b17) * 997.0) as usize;
                 let idx = node_variant(n.res_type, world_cfg.seed, x, z, roll, variants.len());
                 let fishy = n.res_type == ResourceType::Food && ground < -0.005;
                 let mesh = if fishy { assets.fish_node.clone() } else { variants[idx].clone() };
-                // Deterministic per-node yaw so herds/groves don't all face north.
-                let yaw = ((gid.0 >> 5) % 628) as f32 * 0.01;
+                let yaw = stream(0x7071) * std::f32::consts::TAU;
                 // mineral outcrops settle INTO the slope: slightly embedded,
                 // tilted most of the way onto the surface normal — never
                 // perched flat on a hillside
@@ -697,21 +727,27 @@ pub fn sync_render(
                 } else {
                     (world - Vec3::Y * 0.01, Quat::from_rotation_y(yaw))
                 };
-                // Every tree the same height reads as a plantation. A
-                // deterministic per-node scale gives a wood saplings and
-                // veterans; herds and outcrops vary far less.
+                // Every tree the same height reads as a plantation: a wood wants
+                // saplings and veterans, and girth has to vary apart from height
+                // or they are one mesh at N sizes.
                 let spread = match n.res_type {
-                    ResourceType::Wood => 0.34,
+                    ResourceType::Wood => 0.45,
                     ResourceType::Food => 0.12,
                     _ => 0.18,
                 };
-                let jitter = ((gid.0 >> 11) % 1000) as f32 / 1000.0 - 0.5;
-                let scale = 1.0 + jitter * spread * 2.0;
+                let base = Vec3::new(
+                    1.0 + (stream(0x5231) - 0.5) * spread * 1.2,
+                    1.0 + (stream(0x5117) - 0.5) * spread * 2.0,
+                    1.0 + (stream(0x5231) - 0.5) * spread * 1.2,
+                );
                 let mut e = commands.spawn((
                     RenderRoot(gid.0),
+                    NodeBaseScale(base),
                     Mesh3d(mesh),
                     MeshMaterial3d(rmats.node[&n.res_type].clone()),
-                    Transform::from_translation(pos).with_rotation(rot).with_scale(Vec3::splat(scale)),
+                    Transform::from_translation(pos)
+                        .with_rotation(rot)
+                        .with_scale(base * node_scale(n.remaining)),
                     Lerp { target: pos, yaw, bob_phase: 0.0, turn: false, hop: false },
                 ));
                 if fishy {
@@ -739,8 +775,9 @@ pub fn sync_render(
                 }
                 e.id()
             });
+            let base = q_node_scale.get(root).map(|b| b.0).unwrap_or(Vec3::ONE);
             if let Ok((_, _, mut tf, _, _)) = q_roots.get_mut(root) {
-                tf.scale = Vec3::splat(node_scale(n.remaining));
+                tf.scale = base * node_scale(n.remaining);
             }
             if let Ok(mut animal) = q_animals.get_mut(root) {
                 animal.remaining = n.remaining;
@@ -884,7 +921,7 @@ pub fn building_damage_fx(
                             Mesh3d(assets.rubble_chunk.clone()),
                             MeshMaterial3d(mat.clone()),
                             Transform::from_xyz(ang.cos() * span * 1.05, 0.02, ang.sin() * span * 1.05)
-                                .with_rotation(Quat::from_rotation_y(h01(k + 5.0) * 6.28))
+                                .with_rotation(Quat::from_rotation_y(h01(k + 5.0) * std::f32::consts::TAU))
                                 .with_scale(Vec3::splat(0.9 + span * 0.3)),
                         ));
                     }

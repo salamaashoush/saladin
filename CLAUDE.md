@@ -51,7 +51,7 @@ crates/
 ## Commands
 
 ```bash
-cargo test --workspace                 # 164 tests, all must stay green
+cargo test --workspace                 # 166 tests, all must stay green
 cargo run -p saladin-client --bin saladin-client          # single player
 cargo run -p saladin-client --bin saladin-client connect <ip>   # dev shortcut (menus cover all MP flows)
 cargo run -p saladin-server                                # internet relay (rooms) — VPS docs: crates/server/README.md
@@ -59,8 +59,18 @@ cargo run --release -p saladin-protocol --example net_bench -- 2 50000 200
                                        # lockstep benchmark: clients units ticks
 cargo run -p saladin-sim --example mapdump -- <base> <preset> [out.ppm]
                                        # worldgen tuning: biome map + dominant-region dump
-cargo run --release -p saladin-sim --example worldstat -- [seeds] [preset|all] [--per-seed]
-                                       # biome/climate histogram: THE diversity dial
+cargo run --release -p saladin-sim --example worldstat -- [seeds] [preset|all] [--per-seed] [--seeds a,b,c]
+                                       # biome/climate histogram + height/slope
+                                       # quantiles + high-country share: THE
+                                       # diversity and shape dial
+cargo run --release -p saladin-sim --example massifprobe [start <preset>]
+                                       # per-seed counts worldstat rounds away;
+                                       # `start` finds seeds with a massif by slot 0
+cargo run --release -p saladin-sim --example resprobe -- [seeds] [preset|all] [--per-seed] [--seeds a,b,c] [--fair]
+                                       # where the resource scatter lands vs the
+                                       # terrain it reads (slope/ore/fertility per
+                                       # node kind); `--fair` audits fair-start
+                                       # headroom over all 100 test worlds
 uv run scripts/bake_voices.py          # Chatterbox TTS bark bake -> assets/voices/
    # (gitignored; engine falls back to procedural formant voices per missing
    # file — see client/src/audio/voice.rs. TTS_DEVICE=cpu if CUDA acts up.)
@@ -76,7 +86,9 @@ uv run scripts/bake_voices.py          # Chatterbox TTS bark bake -> assets/voic
    # units (every unit kind + one node of each type + a water fish node beside
    # the keep — model verification).
    # Overrides: SALADIN_SEED, SALADIN_PRESET, SALADIN_TAB, SALADIN_ZOOM
-   # (view_size, min 4 = close-up model inspection), SALADIN_YAW.
+   # (view_size, min 4 = close-up model inspection), SALADIN_YAW,
+   # SALADIN_PERF=1 (starts the F3 frame-time overlay on, so a shot can be
+   # read as a benchmark).
 ```
 
 Multiplayer (all menu-driven; protocol v2 handshake rejects mismatched builds):
@@ -123,15 +135,32 @@ Classification is Whittaker(temp x precip) for lowlands, climate-aware
 highlands, then arid refinement (dunes need flat ground and a dry fetch,
 hammada takes the slopes, oasis where fresh water is in reach). 25 biomes: the
 original 15 plus Lake, Marsh, Wadi, SaltFlat, Hammada, Savanna, Scrub, Pine
-(cedar), OliveGrove, Alpine. `WorldGrid` also carries `temp`, `fertility` and
-`ore` - the resource system and farms read them.
+(cedar), OliveGrove, Alpine. `WorldGrid` also carries `temp`, `fertility`,
+`ore`, `belt` and `slope` - the resource system and farms read them.
+
+**Shape is one system.** `terrain::surface_height(h, elev_gain)` is THE
+vertical scale of the world, a single monotone function of the height field
+(the old per-biome `height_emphasis` invented geometry at render time and
+turned every label flip into a wall). Ranges are BROAD: a low-frequency massif
+envelope along the orogenic seam supplies the mass, the ridged fold is
+multiplied by it so crests are texture ON a mountain, and the pass noise carves
+real notches before the last erosion sweeps. `WorldGrid.slope` - the
+world-space drop per tile of exactly the surface the client meshes - then
+decides the Cliff/Mountain label, and through the label decides passability,
+move cost (`1 + slope * CLIMB_COST`), buildability and keep siting. So what you
+SEE is where you can walk: nothing above `max_walkable_slope(seed)` is ever
+passable, cliffs are edges (never area fills), gentle summit plateaus and
+saddles stay walkable, and `PlaceError::TooSteep` refuses a foundation on a
+hillside for the command, the AI and the ghost alike.
 
 4 presets (`MAP_PRESETS`) bias geography only: sea level, river/cliff/island
 gain and `relief_gain` (how much vertical range the land spans - this is what
 makes Highlands actually mountainous).
 
 Fair starts: `fair_start_nodes` tops every spawn slot up to wood/stone/food
-minima within `FAIR_RADIUS`; `start_point` snaps spawns to `dominant_region`.
+minima within `FAIR_RADIUS` (guaranteed stone takes a rocky-ground pass first,
+then an unfiltered one that keeps the guarantee absolute); `start_point` snaps
+spawns to `dominant_region`.
 Invariants tested in `sim/tests/worldgen.rs` - fair starts over 100 worlds, no
 map is a single biome, archetypes change the world, highlands reach the high
 country, soil is richest where the water runs, ore follows the belts. Keep them
@@ -139,12 +168,19 @@ green when touching terrain.
 
 ## Resources (sim/content.rs scatter rules + protocol farms)
 
-Placement reads geology and climate, never just the biome label: timber (stand
-by biome, thickness by rainfall), quarry (exposed rock, high dry ground),
-herds (grazing = fertility), fishery (the water the shore FACES - lake teems,
+Placement reads geology, climate and RELIEF, never just the biome label:
+timber (stand by biome, thickness by rainfall, tapered to nothing between
+`TIMBER_SLOPE_T` and `TIMBER_SLOPE_MAX` so no stand grows on ground the client
+renders as rock face — the taper tracks `client terrain::ROCK_LO/HI`), quarry
+(exposed rock: scarp slope + ore + height, and above `SCREE_T` the soil has
+slid off so bedrock quarries whatever the label says — this is what puts
+outcrops on foothill flanks instead of the plain), herds (grazing = fertility
++ rain, penalized by slope), fishery (the water the shore FACES - lake teems,
 river runs thin), vein (mineralized rock only), placer (channel gravel below
 ore-bearing highlands - cheap, safe, early, finite), motherlode (remote high
-country, gated on ore too).
+country, gated on ore and broken ground). `NodeSite.slope` is the same field
+the camera draws and the pathfinder charges for, so a deposit that reads as
+clinging to a scarp is on one. `resprobe` is the dial.
 
 `ResourceNode` carries `cap` + `regen`. Wild timber/ore/herds are FINITE on
 purpose; the renewables are farms and hut-tended fisheries. A **Farm** may only
@@ -165,8 +201,12 @@ Run-conditions via `every(n)`; `MatchStatuses` gates paused matches.
 
 ## Perf doctrine
 
-Worst-case all-out melee on one box: ~920 t/s @20k units, ~220 @50k (2
-clients re-simulating). Hot-path rules: no per-tick allocation (scratch
+Worst-case all-out melee on one box: ~150 t/s @20k units, ~30 @50k (2 clients
+re-simulating, `net_bench 2 <units> 200`). Costed pathfinding is what those
+numbers bought: at 72edec4, before `move_cost_at` existed, the same runs were
+~200 and ~47 t/s. A non-uniform cost field breaks A*'s tie-plateaus, so it
+expands more nodes per query — budget for it before adding another costed
+consumer. Hot-path rules: no per-tick allocation (scratch
 resources with retained buffers — see `CombatScratch`), flat cell grid
 (`CELL_SIZE` 4, `cell_of`), ring-ordered nearest scans with early exit,
 squared-distance compares (`dist2` vs r²; `fx_sqrt` only when unavoidable),
@@ -203,6 +243,25 @@ Every gameplay fix ships with a test (`crates/protocol/tests/`).
   the card grid. Absolute bottom-anchored panels need explicit min_height.
 - Render = shared mesh+material handles per kind×team so Bevy
   auto-instances; sim→render reconciliation in `render/sync.rs`.
+- **Terrain ships CONTINUOUS FIELDS, never a biome label.** `build_fields`
+  bakes N x N arrays — palette (biome colour modulated by the worldgrid's own
+  moisture + temperature, with a large-scale relief AO baked in), land
+  coverage, rock exposure, aridity and rock hue — blurs palette/rock over
+  ~2.5 tiles with WATER AT WEIGHT ZERO, and every vertex reads them through
+  one smoothstepped bilinear `tap` (plain bilinear is C0 and its kinks print a
+  one-tile lattice down any steep face). Vertex COLOR.rgb = palette, COLOR.a =
+  rock exposure, UV_0 = (fertility, land), UV_1 = (aridity, rock hue).
+  `render/terrain.wgsl` then does what vertex data structurally cannot: a
+  3-octave value-noise BUMP NORMAL (each octave rotated so the lattice never
+  streaks, triplanar on steep ground, faded at its own Nyquist limit from
+  `fwidth`), triplanar rock with hue-shifted strata banded on world Y, a scree
+  apron at the foot of faces, and every mask re-sharpened through a
+  noise-warped `smoothstep` at PIXEL resolution. Quad diagonals alternate by
+  parity and interior detail vertices jitter +-0.15 tile, so a silhouette is
+  an irregular edge instead of a run of identical teeth. `HeightField` samples
+  the same half-tile lattice the mesh is built on. Camera: `Msaa::Sample4` +
+  TonyMcMapface with a `ColorGrading` contrast bump (AgX was measured and is
+  FLATTER here, not sharper).
 - Units are RIGS, not single meshes: `unit_rig(kind)` returns parts tagged
   `RigGroup` (Body/legs/arms/wheel slots) with joint pivots; mesh verts are
   pivot-relative, one child entity per part (still instanced per

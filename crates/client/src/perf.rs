@@ -9,8 +9,16 @@ use saladin_protocol::{Building, ResourceNode, Unit};
 #[derive(Component)]
 pub struct PerfText;
 
-#[derive(Resource, Default)]
+/// `SALADIN_PERF=1` starts the overlay on, so the screenshot harness can read
+/// a frame time without anyone pressing F3.
+#[derive(Resource)]
 pub struct PerfVisible(pub bool);
+
+impl Default for PerfVisible {
+    fn default() -> Self {
+        PerfVisible(std::env::var("SALADIN_PERF").is_ok())
+    }
+}
 
 pub fn setup_perf(mut commands: Commands, font: Res<UiFont>) {
     commands.spawn((

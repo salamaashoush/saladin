@@ -70,7 +70,7 @@ pub const MAP_PRESETS: [MapPreset; 4] = [
             elev_gain: crate::fx!("1.45"),
             river_gain: crate::fx!("0.7"),
             cliff_gain: crate::fx!("1.7"),
-            relief_gain: crate::fx!("1.75"),
+            relief_gain: crate::fx!("1.95"),
             island_gain: crate::fx!("0"),
         },
     },

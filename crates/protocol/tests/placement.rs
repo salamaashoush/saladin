@@ -6,9 +6,9 @@
 use bevy_app::prelude::*;
 use saladin_protocol::*;
 use saladin_sim::{
-    Biome, BuildingKind, Faction, Fx, GatherState, ResourceType, Stance, Stockpile, UnitKind, V2,
-    WORLD_SIZE, ZERO, building_def, compose_seed, fx, is_buildable_tile, is_passable,
-    is_water_tile, sample_terrain, unit_def,
+    BUILD_SLOPE_MAX, Biome, BuildingKind, Faction, Fx, GatherState, PlaceError, ResourceType,
+    Stance, Stockpile, UnitKind, V2, WORLD_SIZE, ZERO, building_def, check_place, compose_seed, fx,
+    is_buildable_tile, is_passable, is_water_tile, sample_terrain, slope_at, unit_def,
 };
 
 fn build_app(seed: u32) -> App {
@@ -312,4 +312,46 @@ fn build_facing_rides_the_command() {
         .map(|(p, _)| p.facing)
         .expect("house built");
     assert_eq!(p, fx!("1.5707963") * Fx::from_num(3), "quarter turns applied deterministically");
+}
+
+#[test]
+fn nothing_is_founded_on_a_hillside() {
+    // Defect 9: the placement rules used to read the biome label only, so a
+    // ridge crest counted as ground. Steepness is now part of the rule set the
+    // command, the AI and the ghost all share.
+    let seed = compose_seed(5, 2); // highlands
+    let mut steepest = (fx!("0"), 0i32, 0i32);
+    for ty in 8..WORLD_SIZE - 8 {
+        for tx in 8..WORLD_SIZE - 8 {
+            if !(-1..=1).all(|dx| (-1..=1).all(|dy| is_buildable_tile(seed, tx + dx, ty + dy))) {
+                continue;
+            }
+            let s = slope_at(seed, Fx::from_num(tx) + fx!("0.5"), Fx::from_num(ty) + fx!("0.5"));
+            if s > steepest.0 {
+                steepest = (s, tx, ty);
+            }
+        }
+    }
+    assert!(
+        steepest.0 > BUILD_SLOPE_MAX,
+        "highlands has no buildable-biome tile steep enough to test ({})",
+        steepest.0
+    );
+    let pos = center(steepest.1, steepest.2);
+    assert_eq!(
+        check_place(seed, BuildingKind::House, pos.x, pos.y, |_, _| false, &[]),
+        Err(PlaceError::TooSteep),
+        "a house on a {} slope at ({},{})",
+        steepest.0,
+        steepest.1,
+        steepest.2
+    );
+    // and the same rule refuses the whole footprint when only the ground under
+    // it varies, not the individual tiles
+    let (cx, cy) = inland_block(seed);
+    assert!(
+        check_place(seed, BuildingKind::House, center(cx + 2, cy + 2).x, center(cx + 2, cy + 2).y, |_, _| false, &[])
+            .is_ok(),
+        "flat inland ground must still take a building"
+    );
 }

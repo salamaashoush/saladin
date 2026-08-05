@@ -80,6 +80,30 @@ pub fn bake_team(mesh: &Mesh, hex: u32) -> Mesh {
     m
 }
 
+/// Clone a mesh with every vertex colour shifted in HSV — hue in degrees,
+/// saturation and value as multipliers. The way thousands of props get colour
+/// variety without a single per-entity material: K pre-tinted copies of one
+/// shared mesh still batch, K materials do not.
+pub fn bake_tint(mesh: &Mesh, hue_shift: f32, sat_shift: f32, value_shift: f32) -> Mesh {
+    use bevy::mesh::VertexAttributeValues;
+    let mut m = mesh.clone();
+    if m.attribute(Mesh::ATTRIBUTE_COLOR).is_none() {
+        let n = m.count_vertices();
+        m.insert_attribute(Mesh::ATTRIBUTE_COLOR, vec![[1.0f32; 4]; n]);
+    }
+    if let Some(VertexAttributeValues::Float32x4(colors)) = m.attribute_mut(Mesh::ATTRIBUTE_COLOR) {
+        for c in colors.iter_mut() {
+            let mut h = Hsva::from(Srgba::from(LinearRgba::new(c[0], c[1], c[2], c[3])));
+            h.hue = (h.hue + hue_shift).rem_euclid(360.0);
+            h.saturation = (h.saturation * sat_shift).clamp(0.0, 1.0);
+            h.value = (h.value * value_shift).clamp(0.0, 1.0);
+            let out = LinearRgba::from(Srgba::from(h));
+            *c = [out.red, out.green, out.blue, c[3]];
+        }
+    }
+    m
+}
+
 fn srgb(hex: u32) -> [f32; 4] {
     let c = Color::srgb_u8((hex >> 16) as u8, (hex >> 8) as u8, hex as u8).to_linear();
     [c.red, c.green, c.blue, 1.0]
