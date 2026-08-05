@@ -270,6 +270,16 @@ pub struct AnimState {
     pub kind: UnitKind,
     pub moving: bool,
     pub combat: bool,
+    /// Toe to toe: has an enemy and has stopped walking to deal with it. Feet
+    /// plant, the swing owns the pose.
+    pub engaged: bool,
+    /// Set against cavalry — the sim's own test (`brace && !has_target`), so
+    /// the levelled spear on screen is the one the damage model is using.
+    pub braced: bool,
+    /// A loaded charge going in. Reads as a gallop and a couched lance.
+    pub charging: bool,
+    /// Broken and running. Overrides every other pose.
+    pub routing: bool,
     pub harvest: bool,
     /// Debounce: the sim flaps Harvesting<->ToResource every few ticks at
     /// node edges (separation shoves workers out of range); the work pose
@@ -729,18 +739,12 @@ pub fn sync_render(
 
         if let Some(u) = unit {
             seen.insert(gid.0);
-            let selected = selection.units.contains(&gid.0);
+            let selected = selection.contains(&gid.0);
             let color = team.unwrap_or(0xdddddd);
             let faction = owner
                 .and_then(|o| owner_faction.get(&o.0).copied())
                 .unwrap_or(saladin_sim::Faction::Ayyubid);
-            let yaw = if u.has_target {
-                let dx = u.target.x.to_num::<f32>() - x;
-                let dz = u.target.y.to_num::<f32>() - z;
-                if dx.abs() + dz.abs() > 1e-4 { dx.atan2(dz) } else { f32::NAN }
-            } else {
-                f32::NAN
-            };
+            let yaw = heading_yaw(u.heading);
             let world = Vec3::new(x, ground, z);
             let root = *map.0.entry(gid.0).or_insert_with(|| {
                 spawn_unit_tree(
@@ -759,13 +763,21 @@ pub fn sync_render(
             if let Ok((mut lerp, mut vis, _, anim, _)) = q_roots.get_mut(root) {
                 lerp.target = world;
                 lerp.hop = u.has_target;
-                if !yaw.is_nan() {
-                    lerp.yaw = yaw;
-                }
+                lerp.yaw = yaw;
                 *vis = if u.garrisoned_in != 0 { Visibility::Hidden } else { Visibility::Inherited };
                 if let Some(mut anim) = anim {
+                    let def = unit_def(u.kind);
                     anim.moving = u.has_target;
                     anim.combat = u.attack_target != 0;
+                    anim.engaged = u.attack_target != 0 && !u.has_target;
+                    anim.braced = def.brace && !u.has_target;
+                    anim.charging = def.charge_mult > saladin_sim::Fx::ONE
+                        && u.charge_cd == 0
+                        && u.has_target
+                        && (u.attack_target != 0
+                            || u.order == saladin_protocol::ORDER_ATTACK
+                            || u.order == saladin_protocol::ORDER_ATTACK_MOVE);
+                    anim.routing = u.routing;
                     anim.harvest = u.gather_state == saladin_sim::GatherState::Harvesting;
                     // carry_type identifies the node being worked while
                     // harvesting — picks the tool + swing cycle. STICKY: the
@@ -1222,6 +1234,10 @@ fn spawn_unit_tree(
                 kind,
                 moving: false,
                 combat: false,
+                engaged: false,
+                braced: false,
+                charging: false,
+                routing: false,
                 harvest: false,
                 work_until: 0.0,
                 activity: Activity::None,
@@ -1308,6 +1324,20 @@ fn spawn_unit_tree(
         .id()
 }
 
+/// Render yaw for a sim `heading`. The sim keeps facing as one of sixteen
+/// compass points counter-clockwise from +X (no trig anywhere in lockstep);
+/// models are authored forward = +Z, so the render yaw is a quarter turn minus
+/// the compass angle.
+///
+/// This replaces deriving yaw from `has_target` and the move target, which was
+/// wrong the moment a unit stopped to fight: combat clears the walk every
+/// strike, so a man kept whatever heading he last WALKED in and swung at
+/// enemies standing behind him.
+pub fn heading_yaw(heading: u8) -> f32 {
+    use std::f32::consts::{FRAC_PI_2, TAU};
+    FRAC_PI_2 - (heading % saladin_sim::HEADINGS as u8) as f32 * TAU / saladin_sim::HEADINGS as f32
+}
+
 /// Procedural unit animation: walk leg-swing, melee/gather chop, ranged aim,
 /// wheel spin, idle sway — all from `AnimState` flags + wall time, zero sim
 /// involvement. Skipped entirely at impostor zoom.
@@ -1328,13 +1358,21 @@ pub fn animate_units(
     for (anim, children) in &q_roots {
         let tp = t + anim.phase;
         let mounted = matches!(anim.kind, UnitKind::Knight | UnitKind::HorseArcher | UnitKind::Mamluk);
-        let ranged = matches!(
-            anim.kind,
-            UnitKind::Archer | UnitKind::Crossbowman | UnitKind::HorseArcher
-        );
-        let gait = 3.5 + anim.stride * 2.4;
+        // read the def, not a hand-kept list: the Mangonel became `ranged` and
+        // three kinds were appended, and a stale list poses them wrong
+        let ranged = unit_def(anim.kind).ranged;
+        let stance = if anim.engaged && !mounted { 0.2 } else { 0.0 };
+        // a charge is a gallop and a rout is a sprint — same legs, faster clock
+        let urgency = if anim.routing {
+            1.6
+        } else if anim.charging {
+            1.35
+        } else {
+            1.0
+        };
+        let gait = (3.5 + anim.stride * 2.4) * urgency;
         let walk = if anim.moving { (tp * gait).sin() } else { 0.0 };
-        let swing_amp = if mounted { 0.38 } else { 0.55 };
+        let swing_amp = (if mounted { 0.38 } else { 0.55 }) * if anim.routing { 1.4 } else { 1.0 };
         // chop / strike cycle: slow raise, sharp fall
         let strike = {
             let s = (tp * 4.0).sin();
@@ -1361,11 +1399,28 @@ pub fn animate_units(
                 && anim.activity == Activity::Forage;
             // foragers bow at the hips; arms must FOLLOW the bow (they're rig
             // siblings of the body, not children) or shoulders detach
-            let bow = if foraging { Quat::from_rotation_x(0.3) } else { Quat::IDENTITY };
+            let bow = if foraging {
+                Quat::from_rotation_x(0.3)
+            } else if anim.routing || anim.charging {
+                // broken men run bent, a lancer leans into the charge
+                Quat::from_rotation_x(if anim.routing { 0.24 } else { 0.16 })
+            } else {
+                Quat::IDENTITY
+            };
             let rot = match body.group {
                 G::Body => bow,
-                G::LegL => Quat::from_rotation_x(walk * swing_amp),
-                G::LegR => Quat::from_rotation_x(-walk * swing_amp),
+                // toe to toe: one foot forward, one back — a fighting stance
+                // instead of a man standing to attention while he swings
+                G::LegL => Quat::from_rotation_x(walk * swing_amp + stance),
+                G::LegR => Quat::from_rotation_x(-walk * swing_amp - stance),
+                // a rout is arms-down flight: no weapon pose survives it
+                _ if anim.routing && matches!(body.group, G::ArmL | G::ArmR) => {
+                    let side = if body.group == G::ArmL { 1.0 } else { -1.0 };
+                    Quat::from_rotation_x(-walk * side * 0.9 - 0.2)
+                }
+                // set spears: the arm levels the shaft forward and STAYS there
+                // while the sim counts this unit as braced
+                G::ArmR if anim.braced && !anim.combat => Quat::from_rotation_x(1.2),
                 G::ArmR => match anim.kind {
                     UnitKind::Ram => Quat::IDENTITY, // handled via translation below
                     UnitKind::Mangonel => {
@@ -1388,9 +1443,12 @@ pub fn animate_units(
                         }
                         _ => Quat::from_rotation_x(0.3 - strike * 0.9),
                     },
+                    // a levelled lance going in beats a walk swing
+                    _ if anim.charging => Quat::from_rotation_x(1.05),
                     _ if anim.moving => Quat::from_rotation_x(-walk * 0.25),
                     _ => Quat::from_rotation_x((tp * 1.6).sin() * 0.06),
                 },
+                G::ArmL if anim.braced && !anim.combat => Quat::from_rotation_x(0.5),
                 G::ArmL => {
                     if anim.combat && ranged {
                         // raise the bow/crossbow to aim
@@ -1910,5 +1968,39 @@ mod tests {
             BuildingKind::ALL.iter().any(|k| building_def(*k).aura.is_some()),
             "the per-kind aura ring table would be dead code otherwise"
         );
+        for (i, k) in UnitKind::ALL.iter().enumerate() {
+            assert_eq!(*k as usize, i, "{k:?} is not at its own discriminant");
+        }
+    }
+
+    /// The render yaw has to agree with the sim's own compass, or a man swings
+    /// at an enemy standing behind him. The sim keeps `heading` as a sixteenth
+    /// of a turn counter-clockwise from +X; models face +Z.
+    #[test]
+    fn render_facing_agrees_with_the_sims_compass() {
+        for h in 0..saladin_sim::HEADINGS as u8 {
+            let dir = saladin_sim::heading_dir(h);
+            let (sx, sz) = (dir.x.to_num::<f32>(), dir.y.to_num::<f32>());
+            // where the model's +Z ends up after the yaw
+            let q = Quat::from_rotation_y(heading_yaw(h));
+            let fwd = q * Vec3::Z;
+            assert!((fwd.x - sx).abs() < 1e-3 && (fwd.z - sz).abs() < 1e-3, "heading {h}: {fwd:?}");
+        }
+        // and it wraps rather than indexing off the end
+        assert!((heading_yaw(16) - heading_yaw(0)).abs() < 1e-6);
+    }
+
+    /// Every pose the animator can strike must be reachable from sim state the
+    /// client actually mirrors: a flag with no writer is a dead branch.
+    #[test]
+    fn every_animation_flag_has_a_kind_that_can_raise_it() {
+        use saladin_sim::unit_def as ud;
+        assert!(UnitKind::ALL.iter().any(|k| ud(*k).brace), "nothing braces");
+        assert!(
+            UnitKind::ALL.iter().any(|k| ud(*k).charge_mult > saladin_sim::Fx::ONE),
+            "nothing charges"
+        );
+        assert!(UnitKind::ALL.iter().any(|k| ud(*k).ranged), "nothing shoots");
+        assert!(UnitKind::ALL.iter().any(|k| ud(*k).splash > saladin_sim::Fx::ZERO));
     }
 }

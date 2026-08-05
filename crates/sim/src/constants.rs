@@ -91,10 +91,21 @@ pub const FARM_STORE: i32 = 90;
 pub const FARM_REGEN_MAX: i32 = 7;
 pub const FARM_MIN_FERTILITY: Fx = crate::fx!("0.22");
 
-// Food economy: every owned unit eats FOOD_PER_UNIT per economy tick; an empty
-// stockpile bleeds STARVE_DPS hp/sec.
+// Food economy: every ration-drawing unit eats FOOD_PER_UNIT per economy tick.
+// A short larder is PROPORTIONAL from here on (`supply.rs`) — an empty one
+// bleeds STARVE_DPS hp/sec, a nearly-full one costs almost nothing.
 pub const FOOD_PER_UNIT: i32 = 1;
 pub const STARVE_DPS: Fx = crate::fx!("4");
+
+// ── shock ────────────────────────────────────────────────────────────────────
+// A charge is a once-per-approach event, not a passive damage stat, so it needs
+// a run-up and a recovery. Both are counted in COMBAT ticks (200 ms).
+/// Ground a rider must cover unobstructed before the next blow counts as a charge.
+pub const CHARGE_MIN_RUN: Fx = crate::fx!("4");
+/// Combat ticks before the same rider may charge again.
+pub const CHARGE_COOLDOWN_TICKS: i32 = 50;
+/// Combat ticks a broken unit needs before it will listen to an order again.
+pub const RALLY_COOLDOWN_TICKS: i32 = 25;
 
 // Market: sell MARKET_RATE units of a good for one gold; buying costs
 // MARKET_BUY_RATE gold per unit — the spread is the merchant's cut.

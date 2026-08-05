@@ -125,6 +125,7 @@ struct Pal {
     hide_dark: [f32; 4],
     hide_grey: [f32; 4],
     stone: [f32; 4],
+    flame: [f32; 4],
 }
 
 fn pal() -> Pal {
@@ -144,6 +145,7 @@ fn pal() -> Pal {
         hide_dark: srgb(0x33251a),
         hide_grey: srgb(0x5a4632),
         stone: srgb(0x7a7a7a),
+        flame: srgb(0xf07a1e),
     }
 }
 
@@ -762,6 +764,165 @@ fn build_parts(kind: UnitKind) -> (Vec<Mesh>, Spans) {
                 parts.push(part(torus(0.06, 0.018, 5, 8, PI * 2.0), p.gold, xyz(r * 0.92, base_y + h * 1.55, 0.0)));
                 spans.push((RigGroup::ArmR, s..parts.len()));
             }
+            UnitKind::Sergeant => {
+                // Professional mail foot: flat-topped great helm, aventail,
+                // surcoat over the hauberk, heater shield and a set spear.
+                parts.push(part(
+                    cyl(r * 0.56, r * 0.56, h * 0.34, 8),
+                    p.steel,
+                    xyz(0.0, base_y + h * 1.18, 0.0),
+                ));
+                parts.push(part(
+                    cyl(r * 0.6, r * 0.6, 0.04, 8),
+                    p.iron,
+                    xyz(0.0, base_y + h * 1.36, 0.0),
+                ));
+                parts.push(part(boxm(r * 0.7, 0.05, 0.05), p.iron, xyz(0.0, base_y + h * 1.2, r * 0.5)));
+                parts.push(part(
+                    cyl(r * 0.86, r * 0.9, h * 0.18, 8),
+                    p.metal,
+                    xyz(0.0, base_y + h * 0.94, 0.0),
+                ));
+                // surcoat: team colour front and back over the mail
+                for sz in [-1.0f32, 1.0] {
+                    parts.push(part(
+                        boxm(r * 1.05, h * 0.5, 0.05),
+                        TINT,
+                        xyz(0.0, base_y + h * 0.66, sz * r * 0.5),
+                    ));
+                }
+                // Heater shield: flat top, tapered to a point.
+                let s = parts.len();
+                parts.push(part(
+                    boxm(r * 1.0, h * 0.46, 0.07),
+                    TINT,
+                    at(-r * 1.0, base_y + h * 0.82, r * 0.16, Quat::from_rotation_z(0.12)),
+                ));
+                parts.push(part(
+                    cone(r * 0.5, h * 0.4, 3),
+                    TINT,
+                    Transform {
+                        translation: Vec3::new(-r * 1.0, base_y + h * 0.4, r * 0.16),
+                        rotation: Quat::from_euler(EulerRot::XYZ, PI, 0.0, 0.0),
+                        scale: Vec3::new(1.0, 1.0, 0.2),
+                    },
+                ));
+                parts.push(part(boxm(0.05, h * 0.42, 0.09), p.iron, xyz(-r * 1.0, base_y + h * 0.82, r * 0.2)));
+                spans.push((RigGroup::ArmL, s..parts.len()));
+                // Short, thick, broad-headed spear — a wall weapon, not a pike.
+                let s = parts.len();
+                parts.push(part(
+                    cyl(0.036, 0.04, h * 1.9, 6),
+                    p.wood_dark,
+                    xyz(r * 0.9, base_y + h * 0.85, 0.0),
+                ));
+                parts.push(part(cone(0.085, 0.34, 6), p.steel, xyz(r * 0.9, base_y + h * 1.8, 0.0)));
+                parts.push(part(boxm(0.03, 0.14, 0.16), p.steel, xyz(r * 0.9, base_y + h * 1.58, 0.0)));
+                spans.push((RigGroup::ArmR, s..parts.len()));
+            }
+            UnitKind::Chaplain => {
+                // Habit and hood, rope cincture, processional cross. Deliberately
+                // NOT a smaller Imam: robe over turban, cross over staff.
+                parts.push(part(cone(r * 1.0, h * 1.1, 10), TINT, xyz(0.0, base_y + h * 0.5, 0.0)));
+                parts.push(part(
+                    cyl(r * 0.6, r * 0.66, h * 0.1, 10),
+                    p.rope,
+                    xyz(0.0, base_y + h * 0.62, 0.0),
+                ));
+                parts.push(part(
+                    sphere(r * 0.62, 9, 7),
+                    p.white_cloth,
+                    Transform {
+                        translation: Vec3::new(0.0, base_y + h * 1.12, -r * 0.08),
+                        rotation: Quat::IDENTITY,
+                        scale: Vec3::new(1.0, 0.88, 1.05),
+                    },
+                ));
+                // hood thrown back between the shoulders
+                parts.push(part(
+                    cone(r * 0.5, h * 0.42, 7),
+                    p.white_cloth,
+                    at(0.0, base_y + h * 0.98, -r * 0.52, Quat::from_rotation_x(-0.5)),
+                ));
+                // stole down the chest
+                parts.push(part(
+                    boxm(r * 0.26, h * 0.72, 0.04),
+                    TINT,
+                    xyz(0.0, base_y + h * 0.78, r * 0.5),
+                ));
+                let s = parts.len();
+                parts.push(part(
+                    cyl(0.024, 0.028, h * 1.5, 5),
+                    p.wood,
+                    xyz(r * 0.9, base_y + h * 0.74, 0.0),
+                ));
+                // The cross has to READ as a cross at gameplay zoom — a small
+                // gilt nub is indistinguishable from the Imam's staff knob.
+                parts.push(part(boxm(0.07, h * 0.5, 0.07), p.gold, xyz(r * 0.9, base_y + h * 1.66, 0.0)));
+                parts.push(part(boxm(r * 1.5, 0.07, 0.07), p.gold, xyz(r * 0.9, base_y + h * 1.74, 0.0)));
+                spans.push((RigGroup::ArmR, s..parts.len()));
+            }
+            UnitKind::Naffatun => {
+                // Naft thrower: face wrap, quilted coat, a satchel of pots and a
+                // lit one already in the hand.
+                parts.push(part(
+                    sphere(r * 0.56, 8, 6),
+                    p.white_cloth,
+                    Transform {
+                        translation: Vec3::new(0.0, base_y + h * 1.16, 0.0),
+                        rotation: Quat::IDENTITY,
+                        scale: Vec3::new(1.0, 0.8, 1.0),
+                    },
+                ));
+                // wrap band all the way round the head, not a patch on the face
+                parts.push(part(
+                    torus(r * 0.5, r * 0.13, 5, 10, PI * 2.0),
+                    TINT,
+                    xyz(0.0, base_y + h * 1.06, 0.0),
+                ));
+                parts.push(part(
+                    cyl(r * 0.8, r * 0.88, h * 0.16, 8),
+                    p.leather,
+                    xyz(0.0, base_y + h * 0.6, 0.0),
+                ));
+                // satchel of pots slung at the off hip
+                parts.push(part(
+                    boxm(r * 0.5, r * 0.5, r * 0.36),
+                    p.leather,
+                    xyz(-r * 0.78, base_y + h * 0.45, -r * 0.2),
+                ));
+                for dx in [-0.05f32, 0.05] {
+                    parts.push(part(
+                        sphere(r * 0.15, 6, 5),
+                        p.wood_dark,
+                        xyz(-r * 0.78 + dx, base_y + h * 0.62, -r * 0.2),
+                    ));
+                }
+                // Lit pot cocked to throw: held OUT and UP, or the body hides
+                // the only thing that says what this unit is.
+                let s = parts.len();
+                parts.push(part(
+                    sphere(r * 0.36, 8, 6),
+                    p.wood_dark,
+                    xyz(r * 1.0, base_y + h * 1.02, r * 0.36),
+                ));
+                parts.push(part(
+                    torus(r * 0.34, 0.025, 4, 8, PI * 2.0),
+                    p.rope,
+                    xyz(r * 1.0, base_y + h * 1.08, r * 0.36),
+                ));
+                parts.push(part(
+                    cone(r * 0.26, r * 0.8, 6),
+                    p.flame,
+                    xyz(r * 1.0, base_y + h * 1.36, r * 0.36),
+                ));
+                parts.push(part(
+                    sphere(r * 0.14, 6, 5),
+                    p.gold,
+                    xyz(r * 1.0, base_y + h * 1.24, r * 0.36),
+                ));
+                spans.push((RigGroup::ArmR, s..parts.len()));
+            }
             _ => {}
         }
 
@@ -800,6 +961,10 @@ fn build_parts(kind: UnitKind) -> (Vec<Mesh>, Spans) {
                 ));
             }
             parts.push(part(boxm(h * 1.5, 0.08, 0.1), p.wood_dark, xyz(0.0, h * 1.32, 0.0)));
+            // Team pennon on the ridge. The ram carried NO team colour at all,
+            // so the engine at your gate and the one at theirs looked the same.
+            parts.push(part(cyl(0.022, 0.022, h * 0.5, 4), p.wood, xyz(-h * 0.6, h * 1.55, 0.0)));
+            parts.push(part(boxm(r * 0.7, r * 0.6, 0.02), TINT, xyz(-h * 0.6 + r * 0.4, h * 1.68, 0.0)));
             // The ram beam slung under the roof, with iron rings + sling ropes
             // — the whole swinging assembly is one ArmR rig group.
             let s = parts.len();
@@ -962,4 +1127,51 @@ pub fn unit_impostor_mesh(kind: UnitKind) -> Mesh {
     parts.push(part(cyl(r * 0.7, r * 0.92, h * 0.62, 5), TINT, xyz(0.0, base_y + h * 0.72, 0.0)));
     parts.push(part(sphere(r * 0.6, 5, 4), skin, xyz(0.0, base_y + h * 1.12, 0.0)));
     merge(parts)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bevy::mesh::VertexAttributeValues;
+
+    fn tinted(m: &Mesh) -> bool {
+        matches!(m.attribute(Mesh::ATTRIBUTE_COLOR), Some(VertexAttributeValues::Float32x4(c)) if c.iter().any(|v| *v == TINT))
+    }
+
+    /// Every kind has to build a rig, wear the team colour somewhere, and hang
+    /// its parts off finite pivots. A kind with no `build_parts` arm silently
+    /// renders as a bare torso, which is how a new unit ships invisible.
+    #[test]
+    fn every_kind_builds_a_rig_that_can_be_animated_and_team_coloured() {
+        for &kind in UnitKind::ALL {
+            let rig = unit_rig(kind);
+            assert!(!rig.is_empty(), "{kind:?} has no rig at all");
+            assert!(rig.iter().any(|p| p.group == RigGroup::Body), "{kind:?} has no Body group");
+            assert!(
+                rig.iter().any(|p| tinted(&p.mesh)),
+                "{kind:?} has nothing in the team colour, so both sides look alike"
+            );
+            for p in &rig {
+                assert!(p.pivot.is_finite(), "{kind:?} {:?} pivot {:?}", p.group, p.pivot);
+                assert!(p.mesh.count_vertices() > 0, "{kind:?} {:?} is an empty mesh", p.group);
+            }
+            assert!(unit_impostor_mesh(kind).count_vertices() > 0, "{kind:?} impostor");
+        }
+    }
+
+    /// The animator swings ArmR for a strike and ArmL for a shield or a bow, so
+    /// a fighting kind whose weapon lives in `Body` never animates.
+    #[test]
+    fn everything_that_fights_carries_its_weapon_on_a_moving_joint() {
+        for &kind in UnitKind::ALL {
+            if unit_def(kind).attack == 0 {
+                continue;
+            }
+            let rig = unit_rig(kind);
+            assert!(
+                rig.iter().any(|p| p.group == RigGroup::ArmR),
+                "{kind:?} has no right arm to strike with"
+            );
+        }
+    }
 }

@@ -207,3 +207,156 @@ fn a_site_under_construction_survives_the_disk() {
         "the restored crew never finished the house"
     );
 }
+
+fn find_land_block(seed: u32) -> (i32, i32) {
+    for cy in 16..128 {
+        for cx in 16..128 {
+            if (0..10).all(|dx| (0..10).all(|dy| saladin_sim::is_passable(seed, cx + dx, cy + dy))) {
+                return (cx, cy);
+            }
+        }
+    }
+    panic!("no 10x10 land block found");
+}
+
+/// The whole combat layer has to survive the disk: a man running from the line,
+/// an archer on a parapet, a wall someone has been hitting and an order in a
+/// queue. Every one of those was invisible to the state hash until T2, so this
+/// test could not have been written before it.
+#[test]
+fn a_battle_in_progress_survives_the_disk() {
+    let seed = 1u32;
+    let (cx, cy) = find_land_block(seed);
+    let f = |n: i32| saladin_sim::Fx::from_num(n) + saladin_sim::fx!("0.5");
+    let mut a = build();
+    a.world_mut().insert_resource(WorldConfig { seed });
+    for owner in [1u64, 2u64] {
+        a.world_mut().spawn((
+            GameId(900 + owner),
+            MatchId(1),
+            Player {
+                player_id: owner,
+                name: format!("P{owner}"),
+                faction: Faction::Ayyubid,
+                stock: Stockpile { wood: 999, stone: 999, food: 999, gold: 999 },
+                color: 0,
+                online: true,
+                keep: 0,
+                defeated: false,
+                slot: owner as u8,
+                tech_mask: 0,
+                hunger: 0,
+            },
+        ));
+    }
+    let keep_pos = V2::new(f(cx + 2), f(cy + 2));
+    a.world_mut().spawn((
+        GameId(10),
+        Owner(1),
+        MatchId(1),
+        Pos { pos: keep_pos, facing: ZERO },
+        Building::new(BuildingKind::Keep, building_def(BuildingKind::Keep).max_hp, keep_pos),
+    ));
+    // houses, so the keep's order has population to fill
+    for i in 0..3i32 {
+        let hp_pos = V2::new(f(cx + 8), f(cy + 2 + i * 2));
+        a.world_mut().spawn((
+            GameId(12 + i as u64),
+            Owner(1),
+            MatchId(1),
+            Pos { pos: hp_pos, facing: ZERO },
+            Building::new(BuildingKind::House, building_def(BuildingKind::House).max_hp, hp_pos),
+        ));
+    }
+    // a wall someone has been working on
+    let wall_pos = V2::new(f(cx + 6), f(cy + 2));
+    let wall_max = building_def(BuildingKind::Wall).max_hp;
+    let mut wall = Building::new(BuildingKind::Wall, wall_max, wall_pos);
+    wall.hp = wall_max / 3;
+    a.world_mut().spawn((GameId(11), Owner(1), MatchId(1), Pos { pos: wall_pos, facing: ZERO }, wall));
+    // an archer on the keep's parapet
+    a.world_mut().spawn((
+        GameId(20),
+        Owner(1),
+        MatchId(1),
+        Pos { pos: keep_pos, facing: ZERO },
+        Unit { garrisoned_in: 10, ..Unit::new(saladin_sim::UnitKind::Archer, keep_pos) },
+    ));
+    // a man already running
+    let flee_pos = V2::new(f(cx + 3), f(cy + 5));
+    a.world_mut().spawn((
+        GameId(21),
+        Owner(1),
+        MatchId(1),
+        Pos { pos: flee_pos, facing: ZERO },
+        Unit {
+            morale: saladin_sim::MORALE_MIN,
+            routing: true,
+            ..Unit::new(saladin_sim::UnitKind::Spearman, flee_pos)
+        },
+    ));
+    // and a line still fighting
+    for i in 0..6i32 {
+        let ap = V2::new(f(cx + 2 + i), f(cy + 6));
+        let bp = V2::new(f(cx + 2 + i), f(cy + 7));
+        a.world_mut().spawn((
+            GameId(30 + i as u64),
+            Owner(1),
+            MatchId(1),
+            Pos { pos: ap, facing: ZERO },
+            Unit::new(saladin_sim::UnitKind::Spearman, ap),
+        ));
+        a.world_mut().spawn((
+            GameId(40 + i as u64),
+            Owner(2),
+            MatchId(1),
+            Pos { pos: bp, facing: ZERO },
+            Unit::new(saladin_sim::UnitKind::Knight, bp),
+        ));
+    }
+    // an order in the keep's queue
+    a.world_mut().resource_mut::<CommandQueue>().0.push(PlayerCommand::TrainAt {
+        player_id: 1,
+        building: 10,
+        kind: saladin_sim::UnitKind::Peasant,
+    });
+    for _ in 0..24 {
+        step(a.world_mut());
+    }
+    {
+        let world = a.world_mut();
+        let mut q = world.query::<&Unit>();
+        assert!(q.iter(world).any(|u| u.routing), "nobody was routing at the snapshot");
+        assert!(q.iter(world).any(|u| u.garrisoned_in != 0), "the parapet emptied before the snapshot");
+        assert!(q.iter(world).any(|u| u.attack_target != 0), "no one had picked a fight");
+        let mut b = world.query::<&Building>();
+        assert_eq!(b.iter(world).find(|x| x.kind == BuildingKind::Keep).unwrap().queue_len, 1);
+    }
+
+    let bytes = save::to_bytes(&save::snapshot(a.world_mut()));
+    let mut b = build();
+    b.world_mut().insert_resource(WorldConfig { seed });
+    save::restore(b.world_mut(), save::from_bytes(&bytes).expect("savegame parses"));
+
+    for i in 0..400 {
+        step(a.world_mut());
+        step(b.world_mut());
+        assert_eq!(
+            a.world().resource::<StateHash>().0,
+            b.world().resource::<StateHash>().0,
+            "the restored battle diverged at step {i}"
+        );
+    }
+}
+
+/// bincode 1.3 is POSITIONAL: a v1 save fed to a v2 `Unit` decodes as garbage
+/// rather than failing, so the version header has to refuse it outright.
+#[test]
+fn a_version_one_save_is_refused_not_misread() {
+    let mut a = build();
+    step(a.world_mut());
+    let mut bytes = save::to_bytes(&save::snapshot(a.world_mut()));
+    assert_eq!(save::SAVE_VERSION, 2, "bump this test with the save version");
+    bytes[8..12].copy_from_slice(&1u32.to_le_bytes());
+    assert!(save::from_bytes(&bytes).is_none(), "a v1 save was accepted into a v2 world");
+}

@@ -896,6 +896,15 @@ pub fn fair_start_nodes(
                 if dx * dx + dy * dy > r2 {
                     continue;
                 }
+                // A grove on the far side of a cliff is not a grove this start
+                // HAS. Counting it satisfied the guarantee without topping up,
+                // and the top-up is the only thing that places in-region: seed
+                // 48514 slot 1 had seven trees inside the radius and NOT ONE it
+                // could walk to, so that base never gathered a stick of wood
+                // for the whole match.
+                if region_at(seed, n.pos.x, n.pos.y) != region {
+                    continue;
+                }
                 match n.res_type {
                     ResourceType::Wood => have[0] += 1,
                     ResourceType::Stone => have[1] += 1,

@@ -1,6 +1,7 @@
 use crate::commands::{
-    assign_builders, assign_idle_gatherers, build_context, build_with, garrison, market_buy_cmd,
-    market_trade, path_to, repair, start_research, train, ungarrison, upgrade_building,
+    assign_builders, assign_idle_gatherers, build_context, build_with, garrison, group_attack,
+    group_move, market_buy_cmd, market_trade, move_unit, repair, start_research, train,
+    ungarrison, upgrade_building,
 };
 use crate::components::*;
 use bevy_ecs::prelude::*;
@@ -15,6 +16,20 @@ const SHORE_SCAN: i32 = 14; // tile radius around the keep that counts as "shore
 // How far out a bot will plant a forward Storehouse. Past this the outpost is
 // indefensible and the haul home costs more than the drop-off saves.
 const REMOTE_CLUSTER_MAX: Fx = saladin_sim::fx!("48");
+// Squared distance from its node inside which a gatherer counts as "practically
+// there" and is left alone by an economic re-steer.
+const NEARLY_THERE2: Fx = saladin_sim::fx!("9");
+/// No `FormationShape` — march loose. A recall and a retreat are not a parade:
+/// dressing the line costs the seconds the men are running for.
+const FORMATION_LOOSE: u8 = u8::MAX;
+/// Full-cost group paths one bot may lay per brain tick. The rest fall back to
+/// the cheap expansion cap, exactly as the player's command batch does. The old
+/// code ran one UNCAPPED A* per unit per wave; a squad shares one.
+const ARMY_PATHS_PER_BRAIN_TICK: usize = 4;
+
+fn is_support(kind: UnitKind) -> bool {
+    unit_def(kind).role == saladin_sim::UnitRole::Support
+}
 
 fn is_combat(kind: UnitKind) -> bool {
     unit_def(kind).attack > 0
@@ -36,6 +51,7 @@ struct BotSnap {
     defeated: bool,
     wave_launched: i32,
     fishing_blocked: bool,
+    famine: bool,
 }
 
 /// One structure's lifecycle row, for the planner's site/damage/upgrade view.
@@ -62,6 +78,9 @@ struct USnap {
     target_node: u64,
     garrisoned_in: u64,
     job_site: u64,
+    /// Nothing to walk to and nothing to hit — the state a wave that has won
+    /// its road fight sits in until somebody points it at the objective again.
+    idle: bool,
 }
 
 /// Strategic skirmish AI. Under lockstep every client runs this identically (the
@@ -88,6 +107,7 @@ pub fn ai_brain(world: &mut World) {
                 defeated: p.defeated,
                 wave_launched: b.wave_launched,
                 fishing_blocked: b.fishing_blocked,
+                famine: b.famine,
             })
             .collect()
     };
@@ -114,6 +134,7 @@ pub fn ai_brain(world: &mut World) {
                 target_node: u.target_node,
                 garrisoned_in: u.garrisoned_in,
                 job_site: u.job_site,
+                idle: !u.has_target && u.attack_target == 0,
             })
             .collect()
     };
@@ -150,6 +171,7 @@ pub fn ai_brain(world: &mut World) {
         let mut q = world.query::<(&GameId, &Pos, &ResourceNode)>();
         q.iter(world).map(|(g, p, _)| (g.0, p.pos)).collect()
     };
+    let node_at: HashMap<u64, V2> = node_pos.iter().copied().collect();
 
     let paused: StdSet<u64> = {
         let statuses = world.resource::<crate::MatchStatuses>();
@@ -178,7 +200,7 @@ pub fn ai_brain(world: &mut World) {
             buildings.iter().filter(|(_, _, o, _, _)| *o == owner).map(|(_, p, _, _, _)| *p).collect();
 
         // my census
-        let mut army_comp: Census = [0; 10];
+        let mut army_comp: Census = saladin_sim::EMPTY_CENSUS;
         let (mut peasants, mut soldiers, mut sieges, mut pop) = (0, 0, 0, 0);
         for u in &units {
             if u.owner != owner {
@@ -188,7 +210,7 @@ pub fn ai_brain(world: &mut World) {
             if u.kind == UnitKind::Peasant {
                 peasants += 1;
             }
-            if is_combat(u.kind) || u.kind == UnitKind::Imam {
+            if is_combat(u.kind) || is_support(u.kind) {
                 army_comp[u.kind as usize] += 1;
             }
             if is_combat(u.kind) {
@@ -216,7 +238,7 @@ pub fn ai_brain(world: &mut World) {
         }
 
         // enemy census + threat + walls
-        let mut enemy: Census = [0; 10];
+        let mut enemy: Census = saladin_sim::EMPTY_CENSUS;
         let mut threat = 0;
         for u in &units {
             if u.owner == owner || u.match_id != bot.match_id {
@@ -364,6 +386,7 @@ pub fn ai_brain(world: &mut World) {
         };
 
         let state = PlannerState {
+            faction: bot.faction,
             peasants,
             pop,
             cap,
@@ -393,27 +416,45 @@ pub fn ai_brain(world: &mut World) {
         };
 
         // ── economy: steer gatherers to what the bot is short of ──────────────
-        // Two levers: (a) idle bias — what NEW idle peasants pick up; (b) committed
-        // re-steer — pull a few peasants off the glut resource so a bias takes hold
-        // even when everyone is locked onto fat nodes. Food emergency pulls all.
+        // Each steer pulls a BOUNDED number of hands off one trade and puts
+        // exactly those hands on another. The old shape — idle a few, then let
+        // one blanket bias reassign everyone still idle — could not express two
+        // wants at once: a famine bias overrode the wood steer entirely, so a
+        // starving bot quarried fourteen hundred stone it could not eat while
+        // sitting on twelve wood, four short of the forty-five a field costs.
         let upkeep_food = soldiers * FOOD_PER_UNIT;
         let crisis = food_crisis(&state, &tune);
         let cushion = 40 + upkeep_food * tune.food_floor_mult * 2;
-        let food_emergency = crisis || stock.food <= cushion;
+        // Enter at the cushion, leave at half again: a bare threshold makes the
+        // whole workforce change trade on every crossing, and a peasant that is
+        // walking is a peasant that is not gathering.
+        let food_emergency =
+            crisis || stock.food <= cushion || (bot.famine && stock.food <= cushion + cushion / 2);
         let food_surplus = !food_emergency && upkeep_food == 0 && stock.food > cushion + 200;
         let scarce_build = if stock.wood <= stock.stone { ResourceType::Wood } else { ResourceType::Stone };
-        let idle_bias = if food_emergency {
-            Some(ResourceType::Food)
-        } else if food_surplus {
-            Some(scarce_build)
-        } else {
-            None
-        };
+        let on_food = units
+            .iter()
+            .filter(|u| {
+                u.owner == owner
+                    && u.kind == UnitKind::Peasant
+                    && node_type.get(&u.target_node) == Some(&ResourceType::Food)
+            })
+            .count() as i32;
+        // Half the workforce on food, not all of it: the larder is ultimately
+        // paid for with the wood and stone the other half brings in.
+        let want_food = (peasants / 2).max(2);
 
         // Pull peasants OFF a resource and idle them so they reassign to `want`.
         // Skips the scout, idle ones, loads in transit, and anyone whose target
-        // node already matches `want`.
-        let steer_to = |world: &mut World, want: ResourceType, from: Option<&[ResourceType]>, max: i32| {
+        // node already matches `want`. `moved` keeps a second steer in the same
+        // brain tick from re-tasking a hand the first one just re-tasked — the
+        // `units` snapshot is from before either.
+        let mut moved: StdSet<u64> = StdSet::new();
+        let steer_to = |world: &mut World,
+                            moved: &mut StdSet<u64>,
+                            want: ResourceType,
+                            from: Option<&[ResourceType]>,
+                            max: i32| {
             let mut n = 0;
             for u in &units {
                 if n >= max {
@@ -425,12 +466,20 @@ pub fn ai_brain(world: &mut World) {
                     || u.garrisoned_in != 0
                     || u.gather_state == GatherState::Idle
                     || u.gather_state == GatherState::ToStockpile
+                    || moved.contains(&u.id)
                 {
                     continue;
+                }
+                if u.gather_state == GatherState::Harvesting {
+                    continue; // hands already on the node: never interrupt a swing
                 }
                 let nt = if u.target_node == 0 { None } else { node_type.get(&u.target_node).copied() };
                 if nt == Some(want) {
                     continue; // already working the wanted resource
+                }
+                // practically there — re-steering now throws away the whole walk
+                if node_at.get(&u.target_node).is_some_and(|p| dist2(u.pos, *p) <= NEARLY_THERE2) {
+                    continue;
                 }
                 if let Some(from) = from {
                     match nt {
@@ -441,18 +490,37 @@ pub fn ai_brain(world: &mut World) {
                 if let Some(mut unit) = world.get_mut::<Unit>(u.entity) {
                     unit.gather_state = GatherState::Idle;
                     unit.target_node = 0;
+                    moved.insert(u.id);
                     n += 1;
                 }
             }
+            n > 0
         };
-        if food_emergency {
-            steer_to(world, ResourceType::Food, None, peasants);
-        } else if food_surplus {
-            steer_to(world, scarce_build, Some(&[ResourceType::Food]), 3);
-        } else if (stock.wood - stock.stone).abs() > 80 {
-            let glut = if stock.wood > stock.stone { ResourceType::Wood } else { ResourceType::Stone };
-            steer_to(world, scarce_build, Some(&[glut]), 3);
+        if food_emergency && on_food < want_food {
+            if steer_to(world, &mut moved, ResourceType::Food, None, want_food - on_food) {
+                assign_idle_gatherers(world, owner, Some(ResourceType::Food));
+            }
+        } else if food_surplus
+            && steer_to(world, &mut moved, scarce_build, Some(&[ResourceType::Food]), 3)
+        {
+            assign_idle_gatherers(world, owner, Some(scarce_build));
         }
+        if !food_surplus && (stock.wood - stock.stone).abs() > 80 {
+            let glut = if stock.wood > stock.stone { ResourceType::Wood } else { ResourceType::Stone };
+            if steer_to(world, &mut moved, scarce_build, Some(&[glut]), 3) {
+                assign_idle_gatherers(world, owner, Some(scarce_build));
+            }
+        }
+        // Whoever is still idle — new peasants, and anyone whose node ran out —
+        // takes the balanced mix, biased only while the larder is genuinely
+        // short of its half.
+        let idle_bias = if food_emergency && on_food < want_food {
+            Some(ResourceType::Food)
+        } else if food_surplus {
+            Some(scarce_build)
+        } else {
+            None
+        };
         assign_idle_gatherers(world, owner, idle_bias);
         staff_jobs(world, owner, &units, &lifecycles, tune.builders_per_site);
 
@@ -548,12 +616,13 @@ pub fn ai_brain(world: &mut World) {
             kind: UnitKind,
             role: SquadRole,
             at_home: bool,
+            idle: bool,
         }
         let army: Vec<FieldUnit> = units
             .iter()
             .filter(|u| {
                 u.owner == owner
-                    && (is_combat(u.kind) || u.kind == UnitKind::Imam)
+                    && (is_combat(u.kind) || is_support(u.kind))
                     && !u.routing
                     && u.garrisoned_in == 0
             })
@@ -564,8 +633,11 @@ pub fn ai_brain(world: &mut World) {
                 kind: u.kind,
                 role: squad_role(u.kind),
                 at_home: owned_b_pos.iter().any(|b| dist(u.pos, *b) <= HOME_RADIUS),
+                idle: u.idle,
             })
             .collect();
+
+        let mut army_paths = ARMY_PATHS_PER_BRAIN_TICK;
 
         // ── defensive recall: pull part of the field army home under sustained
         //    attack. Closest field units come back first. Units at home stay.
@@ -630,22 +702,15 @@ pub fn ai_brain(world: &mut World) {
         if under_attack {
             let n = recall_count(&th, &tac);
             let mut by_closest: Vec<&FieldUnit> = army.iter().filter(|a| !a.at_home).collect();
-            by_closest.sort_by_key(|a| dist(a.pos, keep_pos));
-            let recalls: Vec<(Entity, V2)> =
-                by_closest.iter().take(n.max(0) as usize).map(|a| (a.entity, a.pos)).collect();
-            for (e, pos) in recalls {
-                let path = path_to(world, owner, pos, keep_pos);
-                if let Some(mut u) = world.get_mut::<Unit>(e) {
-                    u.attack_target = 0;
-                    u.stance = Stance::Defensive;
-                    u.gather_state = GatherState::Idle;
-                    u.target_node = 0;
-                    u.home = keep_pos;
-                    if !path.is_empty() {
-                        u.target = path[0];
-                        u.path = path;
-                        u.path_idx = 0;
-                        u.has_target = true;
+            by_closest.sort_by_key(|a| (dist(a.pos, keep_pos), a.id));
+            let recalls: Vec<(Entity, u64)> =
+                by_closest.iter().take(n.max(0) as usize).map(|a| (a.entity, a.id)).collect();
+            if !recalls.is_empty() {
+                let ids: Vec<u64> = recalls.iter().map(|(_, id)| *id).collect();
+                group_move(world, owner, &ids, keep_pos, FORMATION_LOOSE, &mut army_paths);
+                for (e, _) in recalls {
+                    if let Some(mut u) = world.get_mut::<Unit>(e) {
+                        u.stance = Stance::Defensive;
                     }
                 }
             }
@@ -668,8 +733,17 @@ pub fn ai_brain(world: &mut World) {
             && mustered(soldiers, prof.wave_size)
             && strong_enough
             && wave_timer <= Fx::ZERO;
+        // A wave in the field that has run out of things to hit is a wave that
+        // has FORGOTTEN its objective: it killed what it met on the road, the
+        // named target went with `attack_target = 0`, and it stands there until
+        // the next muster interval. Re-pointing only the idle men keeps a siege
+        // pressed without re-pathing the whole army every second.
+        let recommit = !wants_assault
+            && wave_launched > 0
+            && !under_attack
+            && army.iter().any(|a| !a.at_home && a.idle);
         let mut launched = false;
-        if wants_assault {
+        if wants_assault || recommit {
             let intel = assault_intel(&units, &buildings, &faction_of, owner, bot.faction, bot.match_id);
             if intel.keep.is_some() || !intel.buildings.is_empty() {
                 let mut raiders: Vec<&FieldUnit> =
@@ -681,60 +755,67 @@ pub fn ai_brain(world: &mut World) {
                 let raid_set: StdSet<u64> =
                     raiders.iter().take(raids.max(0) as usize).map(|a| a.id).collect();
 
-                let orders: Vec<(Entity, V2, SquadRole, bool)> =
-                    army.iter().map(|a| (a.entity, a.pos, a.role, raid_set.contains(&a.id))).collect();
-                for (e, pos, role, raiding) in orders {
+                // Squads, not a crowd of singletons. Men sharing an objective
+                // march as ONE group order: one path instead of N, formation
+                // slots so they do not stack on a single tile, and the column
+                // paces itself to its slowest man so the ram arrives with its
+                // escort. `ORDER_ATTACK` is also what keeps the wave committed —
+                // an aggro pickup is leashed to `home`, a named target is not.
+                let mut squads: Vec<(u64, Vec<u64>)> = Vec::new();
+                let mut stances: Vec<Entity> = Vec::new();
+                for a in &army {
+                    // a re-commit moves the men who have stopped, and nobody else
+                    if !wants_assault && (a.at_home || !a.idle) {
+                        continue;
+                    }
                     // A raider not picked for the raid marches as Main so the
                     // assault keeps its punch.
-                    let eff_role = if raiding {
+                    let eff_role = if raid_set.contains(&a.id) {
                         SquadRole::Raider
-                    } else if role == SquadRole::Raider {
+                    } else if a.role == SquadRole::Raider {
                         SquadRole::Main
                     } else {
-                        role
+                        a.role
                     };
-                    if let Some(t) = target_for_role(eff_role, pos, &intel).or(intel.keep) {
-                        let path = path_to(world, owner, pos, t.pos);
-                        if let Some(mut u) = world.get_mut::<Unit>(e) {
-                            u.attack_target = t.id;
-                            u.stance = Stance::Aggressive;
-                            u.gather_state = GatherState::Idle;
-                            u.target_node = 0;
-                            if !path.is_empty() {
-                                u.target = path[0];
-                                u.path = path;
-                                u.path_idx = 0;
-                                u.has_target = true;
-                            }
-                        }
+                    let Some(t) = target_for_role(eff_role, a.pos, &intel).or(intel.keep) else {
+                        continue;
+                    };
+                    stances.push(a.entity);
+                    match squads.iter_mut().find(|(id, _)| *id == t.id) {
+                        Some((_, members)) => members.push(a.id),
+                        None => squads.push((t.id, vec![a.id])),
                     }
                 }
-                wave_timer = prof.wave_interval;
-                wave_launched = soldiers;
-                launched = true;
+                squads.sort_unstable_by_key(|(id, _)| *id);
+                for (target, members) in &squads {
+                    group_attack(world, owner, members, *target, &mut army_paths);
+                }
+                for e in stances {
+                    if let Some(mut u) = world.get_mut::<Unit>(e) {
+                        u.stance = Stance::Aggressive;
+                    }
+                }
+                if wants_assault {
+                    wave_timer = prof.wave_interval;
+                    wave_launched = soldiers;
+                    launched = true;
+                }
             }
         }
 
         // ── retreat: a wave bled below the threshold breaks off and regroups
         //    at the keep instead of trickling into the meat grinder.
-        let field_units: Vec<(Entity, V2)> =
-            army.iter().filter(|a| !a.at_home).map(|a| (a.entity, a.pos)).collect();
+        let field_units: Vec<(Entity, u64)> =
+            army.iter().filter(|a| !a.at_home).map(|a| (a.entity, a.id)).collect();
         if !launched && wave_launched > 0 {
             if field_units.is_empty() {
                 wave_launched = 0; // wave resolved (won, died, or walked home)
             } else if should_retreat(wave_launched, soldiers, tac.retreat_pct) {
-                for (e, pos) in field_units {
-                    let path = path_to(world, owner, pos, keep_pos);
+                let ids: Vec<u64> = field_units.iter().map(|(_, id)| *id).collect();
+                group_move(world, owner, &ids, keep_pos, FORMATION_LOOSE, &mut army_paths);
+                for (e, _) in field_units {
                     if let Some(mut u) = world.get_mut::<Unit>(e) {
-                        u.attack_target = 0;
                         u.stance = Stance::Defensive;
-                        u.home = keep_pos;
-                        if !path.is_empty() {
-                            u.target = path[0];
-                            u.path = path;
-                            u.path_idx = 0;
-                            u.has_target = true;
-                        }
                     }
                 }
                 wave_launched = 0;
@@ -760,20 +841,13 @@ pub fn ai_brain(world: &mut World) {
                 .iter()
                 .filter(|u| u.owner == owner && u.kind == UnitKind::Peasant && u.garrisoned_in == 0)
                 .min_by_key(|u| u.id)
-                .map(|u| (u.entity, u.pos, u.id));
-            if let (Some(tpos), Some((e, pos, id))) = (target, best) {
-                let path = path_to(world, owner, pos, tpos);
-                if let Some(mut u) = world.get_mut::<Unit>(e) {
-                    u.gather_state = GatherState::Idle;
-                    u.target_node = 0;
-                    if !path.is_empty() {
-                        u.target = path[0];
-                        u.path = path;
-                        u.path_idx = 0;
-                        u.has_target = true;
-                    }
-                    scout_id = id;
-                }
+                .map(|u| u.id);
+            if let (Some(tpos), Some(id)) = (target, best) {
+                // the same order a human gives; `move_unit` already clears the
+                // job_site a scout would otherwise keep booked at a site it is
+                // walking away from, forever
+                move_unit(world, owner, id, tpos);
+                scout_id = id;
             }
         } else if scout_id != 0 && !scout_alive {
             scout_id = 0; // scout died — clear so a fresh one can go out later
@@ -787,6 +861,7 @@ pub fn ai_brain(world: &mut World) {
             b.scout_id = scout_id;
             b.wave_launched = wave_launched;
             b.fishing_blocked = fishing_blocked;
+            b.famine = food_emergency;
         }
     }
 }
@@ -911,7 +986,12 @@ fn assault_intel(
         if *kind == BuildingKind::Keep {
             intel.keep = Some(t);
         }
-        if matches!(*kind, BuildingKind::Wall | BuildingKind::Gatehouse | BuildingKind::Tower | BuildingKind::Watchtower) {
+        // What a siege train marches AT — the things that shoot back and the
+        // door. A plain wall segment is what an engine breaks THROUGH on its way
+        // there; listing it here sent every ram at the nearest five wood of
+        // masonry while the tower behind it kept firing. Walls stay in
+        // `buildings`, so a defence-free town still gives the engines a target.
+        if matches!(*kind, BuildingKind::Gatehouse | BuildingKind::Tower | BuildingKind::Watchtower) {
             intel.defenses.push(t);
         }
     }

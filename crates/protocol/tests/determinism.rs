@@ -1,7 +1,7 @@
 use bevy_app::prelude::*;
 use saladin_sim::{
     AiDifficulty, BuildingKind, Faction, Fx, GatherState, ResourceType, START_FOOD,
-    START_GOLD, START_STONE, START_WOOD, Stance, Stockpile, UnitKind, V2, WORLD_SIZE, ZERO, is_passable,
+    START_GOLD, START_STONE, START_WOOD, Stockpile, UnitKind, V2, WORLD_SIZE, ZERO, is_passable,
     unit_def,
 };
 use saladin_protocol::*;
@@ -21,26 +21,12 @@ fn spawn_unit(app: &mut App, id: u64, pos: V2, target: V2) {
         MatchId(1),
         Pos { pos, facing: ZERO },
         Unit {
-            kind: UnitKind::Peasant,
             target,
             has_target: true,
             speed: Fx::lit("2.5"),
-            gather_state: GatherState::Idle,
-            target_node: 0,
-            carrying: 0,
-            carry_type: ResourceType::Wood,
-            harvest_timer: ZERO,
             hp: 30,
-            attack_target: 0,
-            attack_cooldown: ZERO,
-            stance: Stance::Aggressive,
-            morale: Fx::ONE,
-            routing: false,
-            home: pos,
-            garrisoned_in: 0,
-            job_site: 0,
             path: vec![target],
-            path_idx: 0,
+            ..Unit::new(UnitKind::Peasant, pos)
         },
     ));
 }
@@ -90,26 +76,9 @@ fn spawn_soldier(app: &mut App, id: u64, owner: u64) {
         MatchId(1),
         Pos { pos, facing: ZERO },
         Unit {
-            kind: UnitKind::Spearman,
-            target: pos,
-            has_target: false,
             speed: unit_def(UnitKind::Spearman).speed,
-            gather_state: GatherState::Idle,
-            target_node: 0,
-            carrying: 0,
-            carry_type: ResourceType::Wood,
-            harvest_timer: ZERO,
             hp: unit_def(UnitKind::Spearman).max_hp,
-            attack_target: 0,
-            attack_cooldown: ZERO,
-            stance: Stance::Aggressive,
-            morale: Fx::ONE,
-            routing: false,
-            home: pos,
-            garrisoned_in: 0,
-            job_site: 0,
-            path: vec![],
-            path_idx: 0,
+            ..Unit::new(UnitKind::Spearman, pos)
         },
     ));
 }
@@ -131,7 +100,8 @@ fn starvation_drains_soldiers() {
         let mut pq = world.query::<&Player>();
         assert_eq!(pq.iter(world).next().unwrap().stock.food, 0);
         let mut uq = world.query::<&Unit>();
-        assert_eq!(uq.iter(world).next().unwrap().hp, 70, "no attrition during the grace");
+        let full = unit_def(UnitKind::Spearman).max_hp;
+        assert_eq!(uq.iter(world).next().unwrap().hp, full, "no attrition during the grace");
     }
     // past the grace the famine ramp bleeds hp every economy tick
     for _ in 0..40 * 11 {
@@ -140,7 +110,8 @@ fn starvation_drains_soldiers() {
     let world = app.world_mut();
     let mut uq = world.query::<&Unit>();
     let hp = uq.iter(world).next().unwrap().hp;
-    assert!(hp < 70, "sustained famine must drain hp (got {hp})");
+    let full = unit_def(UnitKind::Spearman).max_hp;
+    assert!(hp < full, "sustained famine must drain hp (got {hp})");
 }
 
 fn find_land_block(seed: u32) -> (i32, i32) {
@@ -190,26 +161,11 @@ fn peasant_harvests_tree_and_banks_at_keep() {
         MatchId(1),
         Pos { pos: pe_pos, facing: ZERO },
         Unit {
-            kind: UnitKind::Peasant,
-            target: pe_pos,
-            has_target: false,
             speed: unit_def(UnitKind::Peasant).speed,
             gather_state: GatherState::ToResource,
             target_node: 20,
-            carrying: 0,
-            carry_type: ResourceType::Wood,
-            harvest_timer: ZERO,
             hp: 30,
-            attack_target: 0,
-            attack_cooldown: ZERO,
-            stance: Stance::Aggressive,
-            morale: Fx::ONE,
-            routing: false,
-            home: pe_pos,
-            garrisoned_in: 0,
-            job_site: 0,
-            path: vec![],
-            path_idx: 0,
+            ..Unit::new(UnitKind::Peasant, pe_pos)
         },
     ));
 
@@ -230,26 +186,9 @@ fn spawn_combatant(app: &mut App, id: u64, owner: u64, pos: V2) {
         MatchId(1),
         Pos { pos, facing: ZERO },
         Unit {
-            kind: UnitKind::Spearman,
-            target: pos,
-            has_target: false,
             speed: unit_def(UnitKind::Spearman).speed,
-            gather_state: GatherState::Idle,
-            target_node: 0,
-            carrying: 0,
-            carry_type: ResourceType::Wood,
-            harvest_timer: ZERO,
             hp: unit_def(UnitKind::Spearman).max_hp,
-            attack_target: 0,
-            attack_cooldown: ZERO,
-            stance: Stance::Aggressive,
-            morale: Fx::ONE,
-            routing: false,
-            home: pos,
-            garrisoned_in: 0,
-            job_site: 0,
-            path: vec![],
-            path_idx: 0,
+            ..Unit::new(UnitKind::Spearman, pos)
         },
     ));
 }
@@ -400,4 +339,134 @@ fn units_reach_their_target() {
     let (pos, unit) = q.iter(world).next().unwrap();
     assert!(!unit.has_target, "unit should have arrived");
     assert_eq!(pos.pos, target, "arrived unit snaps to target");
+}
+
+/// The desync detector was blind to the entire combat/order layer: mutating
+/// stance, morale, routing, attack_target, garrisoned_in or home left the state
+/// hash bit-identical, so a peer that fought differently only showed up ticks
+/// later as drifted positions. Every field a system writes must move the hash.
+#[test]
+fn every_written_unit_field_moves_the_state_hash() {
+    type Mutation = (&'static str, fn(&mut Unit));
+    let cases: &[Mutation] = &[
+        ("stance", |u| u.stance = saladin_sim::Stance::HoldGround),
+        ("morale", |u| u.morale = Fx::lit("0.4")),
+        ("routing", |u| u.routing = true),
+        ("attack_target", |u| u.attack_target = 99),
+        ("garrisoned_in", |u| u.garrisoned_in = 77),
+        ("home", |u| u.home = V2::new(Fx::lit("3"), Fx::lit("4"))),
+        ("heading", |u| u.heading = 5),
+        ("order", |u| u.order = ORDER_ATTACK_MOVE),
+        ("order_target", |u| u.order_target = V2::new(Fx::lit("9"), Fx::lit("9"))),
+        ("anchor", |u| u.anchor = V2::new(Fx::lit("7"), Fx::lit("1"))),
+        ("engage_slot", |u| u.engage_slot = 3),
+        ("charge_cd", |u| u.charge_cd = 4),
+        ("rally_cd", |u| u.rally_cd = 6),
+        ("setup_timer", |u| u.setup_timer = Fx::lit("1.5")),
+        ("ration", |u| u.ration = Fx::lit("0.5")),
+        ("attack_cd", |u| u.attack_cd = 3),
+        ("target_node", |u| u.target_node = 42),
+        ("carrying", |u| u.carrying = 7),
+        ("carry_type", |u| u.carry_type = ResourceType::Gold),
+        ("harvest_timer", |u| u.harvest_timer = Fx::lit("0.3")),
+        ("path", |u| u.path = vec![V2::new(Fx::lit("2"), Fx::lit("2"))]),
+        ("path_idx", |u| {
+            u.path = vec![V2::ZERO, V2::ZERO];
+            u.path_idx = 1;
+        }),
+    ];
+    for &(name, mutate) in cases {
+        let (mut a, mut b) = (build(), build());
+        for app in [&mut a, &mut b] {
+            spawn_soldier(app, 1, 1);
+        }
+        {
+            let world = b.world_mut();
+            let mut q = world.query::<&mut Unit>();
+            let mut u = q.iter_mut(world).next().expect("the soldier");
+            mutate(&mut u);
+        }
+        // one base tick: combat/gather are sub-rate and do not run at tick 1,
+        // so the hash reflects exactly the field under test
+        step(a.world_mut());
+        step(b.world_mut());
+        assert_ne!(
+            a.world().resource::<StateHash>().0,
+            b.world().resource::<StateHash>().0,
+            "mutating {name} left the state hash identical — a desync there is invisible"
+        );
+    }
+}
+
+/// A tower's reload is command-driven sim state too: two peers whose garrisons
+/// fired on different ticks must not agree.
+#[test]
+fn a_buildings_reload_moves_the_state_hash() {
+    let (mut a, mut b) = (build(), build());
+    let pos = V2::new(Fx::lit("20"), Fx::lit("20"));
+    for app in [&mut a, &mut b] {
+        app.world_mut().spawn((
+            GameId(1),
+            Owner(1),
+            MatchId(1),
+            Pos { pos, facing: ZERO },
+            Building::new(BuildingKind::Tower, 500, pos),
+        ));
+    }
+    {
+        let world = b.world_mut();
+        let mut q = world.query::<&mut Building>();
+        q.iter_mut(world).next().expect("the tower").cooldown = Fx::lit("0.4");
+    }
+    step(a.world_mut());
+    step(b.world_mut());
+    assert_ne!(
+        a.world().resource::<StateHash>().0,
+        b.world().resource::<StateHash>().0,
+        "a tower's reload state was invisible to the desync detector"
+    );
+}
+
+/// Two worlds fed the same army must agree every single tick through a real
+/// battle — charge, wounds, rout and rally — not just at the end.
+#[test]
+fn a_forty_on_forty_battle_hashes_identically_every_tick() {
+    let seed = 1u32;
+    let (cx, cy) = find_land_block(seed);
+    let f = |n: i32| Fx::from_num(n) + Fx::lit("0.5");
+    let kinds = [UnitKind::Spearman, UnitKind::Archer, UnitKind::Knight, UnitKind::Crossbowman];
+    let (mut a, mut b) = (build(), build());
+    for app in [&mut a, &mut b] {
+        app.world_mut().insert_resource(WorldConfig { seed });
+        let mut id = 1u64;
+        for i in 0..40 {
+            let kind = kinds[i % kinds.len()];
+            let (dx, dy) = ((i % 8) as i32, (i / 8) as i32);
+            spawn_kind(app, id, 1, kind, V2::new(f(cx + dx), f(cy + dy)));
+            spawn_kind(app, id + 1, 2, kind, V2::new(f(cx + dx), f(cy + dy + 7)));
+            id += 2;
+        }
+    }
+    for i in 0..600 {
+        step(a.world_mut());
+        step(b.world_mut());
+        assert_eq!(
+            a.world().resource::<StateHash>().0,
+            b.world().resource::<StateHash>().0,
+            "the two armies diverged at tick {i}"
+        );
+    }
+    let world = a.world_mut();
+    let mut q = world.query::<&Unit>();
+    assert!(q.iter(world).count() < 80, "no one so much as died in 30 s of battle");
+}
+
+fn spawn_kind(app: &mut App, id: u64, owner: u64, kind: UnitKind, pos: V2) {
+    app.world_mut().spawn((
+        GameId(id),
+        Owner(owner),
+        MatchId(1),
+        Pos { pos, facing: ZERO },
+        Unit::new(kind, pos),
+    ));
 }

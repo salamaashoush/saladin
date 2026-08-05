@@ -146,7 +146,7 @@ const BUILDING_DEFS: [BuildingDef; 16] = [
         accepts: ACCEPTS_ALL,
         defeat_on_death: true,
         morale_radius: crate::fx!("5"),
-        siege_resist: crate::fx!("0.35"),
+        siege_resist: crate::fx!("0.3"),
         ..DEFAULT
     },
     // 1 Barracks
@@ -158,10 +158,15 @@ const BUILDING_DEFS: [BuildingDef; 16] = [
         height: crate::fx!("1.4"),
         cost: ResourceCost::new(70, 20, 0, 0),
         max_hp: 500,
-        trains: &[UnitKind::Spearman, UnitKind::Archer, UnitKind::Crossbowman],
+        trains: &[
+            UnitKind::Spearman,
+            UnitKind::Archer,
+            UnitKind::Crossbowman,
+            UnitKind::Sergeant,
+            UnitKind::Naffatun,
+        ],
         armor_class: ArmorClass::Leather,
         build_time: crate::fx!("25"),
-        siege_resist: crate::fx!("2"),
         ..DEFAULT
     },
     // 2 Tower
@@ -231,13 +236,12 @@ const BUILDING_DEFS: [BuildingDef; 16] = [
         garrison_cap: 3,
         garrison_survives_death: true,
         build_time: crate::fx!("12"),
-        siege_resist: crate::fx!("2"),
         ..DEFAULT
     },
     // 6 Stable
     BuildingDef {
         label: "Stable",
-        blurb: "Cavalry hall: knights, horse archers, mamluks.",
+        blurb: "Cavalry hall: the mounted arm, whichever one your banner fields.",
         icon: "🐴",
         footprint: 2,
         height: crate::fx!("1.4"),
@@ -248,7 +252,6 @@ const BUILDING_DEFS: [BuildingDef; 16] = [
         requires: Some(BuildingKind::Barracks),
         prereqs: &[BuildingKind::Blacksmith],
         build_time: crate::fx!("30"),
-        siege_resist: crate::fx!("2"),
         ..DEFAULT
     },
     // 7 Blacksmith
@@ -260,10 +263,10 @@ const BUILDING_DEFS: [BuildingDef; 16] = [
         height: crate::fx!("1.5"),
         cost: ResourceCost::new(90, 60, 0, 0),
         max_hp: 550,
+        armor_class: ArmorClass::Leather,
         requires: Some(BuildingKind::Barracks),
         hosts_research: true,
         build_time: crate::fx!("30"),
-        siege_resist: crate::fx!("2"),
         ..DEFAULT
     },
     // 8 Market
@@ -278,7 +281,6 @@ const BUILDING_DEFS: [BuildingDef; 16] = [
         armor_class: ArmorClass::Leather,
         enables_trade: true,
         build_time: crate::fx!("25"),
-        siege_resist: crate::fx!("2"),
         ..DEFAULT
     },
     // 9 Granary
@@ -299,7 +301,6 @@ const BUILDING_DEFS: [BuildingDef; 16] = [
             regen: 3,
         }),
         build_time: crate::fx!("20"),
-        siege_resist: crate::fx!("2"),
         ..DEFAULT
     },
     // 10 FishingHut
@@ -321,7 +322,6 @@ const BUILDING_DEFS: [BuildingDef; 16] = [
             regen: crate::FISH_REGEN_PER_TICK,
         }),
         build_time: crate::fx!("12"),
-        siege_resist: crate::fx!("2"),
         ..DEFAULT
     },
     // 11 SiegeWorkshop
@@ -338,7 +338,6 @@ const BUILDING_DEFS: [BuildingDef; 16] = [
         requires: Some(BuildingKind::Blacksmith),
         prereqs: &[BuildingKind::Barracks],
         build_time: crate::fx!("40"),
-        siege_resist: crate::fx!("2"),
         ..DEFAULT
     },
     // 12 Watchtower — never built, only upgraded into from a standing Tower.
@@ -374,7 +373,6 @@ const BUILDING_DEFS: [BuildingDef; 16] = [
         armor_class: ArmorClass::Unarmored,
         min_fertility: crate::FARM_MIN_FERTILITY,
         build_time: crate::fx!("12"),
-        siege_resist: crate::fx!("2.4"),
         ..DEFAULT
     },
     // 14 Storehouse
@@ -389,23 +387,22 @@ const BUILDING_DEFS: [BuildingDef; 16] = [
         armor_class: ArmorClass::Leather,
         accepts: ACCEPTS_ALL,
         build_time: crate::fx!("16"),
-        siege_resist: crate::fx!("1.6"),
         ..DEFAULT
     },
     // 15 Mosque
     BuildingDef {
         label: "Mosque",
-        blurb: "Trains imams, and steadies every soldier holding the ground around it.",
+        blurb: "Faith hall: trains your banner's preacher and steadies the ground.",
         icon: "🕌",
         footprint: 2,
         height: crate::fx!("1.9"),
         cost: ResourceCost::new(90, 40, 0, 60),
         max_hp: 600,
-        trains: &[UnitKind::Imam],
+        trains: &[UnitKind::Imam, UnitKind::Chaplain],
         requires: Some(BuildingKind::Barracks),
         morale_radius: crate::MOSQUE_MORALE_RANGE,
         build_time: crate::fx!("30"),
-        siege_resist: crate::fx!("0.5"),
+        siege_resist: crate::fx!("0.75"),
         max_count: 1,
         ..DEFAULT
     },
@@ -644,6 +641,56 @@ mod tests {
         let soft = hits(BuildingKind::Farm).max(hits(BuildingKind::House));
         for k in [BuildingKind::Tower, BuildingKind::Wall, BuildingKind::Gatehouse] {
             assert!(hits(k) > soft, "{k:?} is no sturdier than a hut");
+        }
+    }
+
+    /// The ordering over EVERY kind, which is what the old two-clause check
+    /// missed: it compared the Keep against everything and the three
+    /// fortifications against a hut, so a Stone-classed Blacksmith carrying
+    /// `siege_resist: 2.0` — 200 damage a hit, three hits, softer than a house,
+    /// and the Siege Workshop's own prerequisite — shipped green.
+    #[test]
+    fn every_structure_sits_where_it_belongs_under_a_ram() {
+        let ram = crate::units::unit_def(crate::enums::UnitKind::Ram);
+        let atk = crate::combat::Attacker::new(Fx::from_num(ram.attack), ram.damage_type);
+        let hits = |k: BuildingKind| {
+            let d = building_def(k);
+            let per = crate::combat::building_damage(&atk, d).max(1);
+            (d.max_hp + per - 1) / per
+        };
+        const FORTS: [BuildingKind; 5] = [
+            BuildingKind::Keep,
+            BuildingKind::Watchtower,
+            BuildingKind::Tower,
+            BuildingKind::Gatehouse,
+            BuildingKind::Wall,
+        ];
+        let weakest_fort = FORTS.iter().map(|k| hits(*k)).min().unwrap();
+        for &k in BuildingKind::ALL {
+            if FORTS.contains(&k) {
+                continue;
+            }
+            assert!(
+                hits(k) < weakest_fort,
+                "{k:?} takes {} ram hits, no less than the weakest fortification ({weakest_fort})",
+                hits(k)
+            );
+        }
+        // fortifications rank in the order their walls look
+        for pair in FORTS.windows(2) {
+            assert!(
+                hits(pair[0]) > hits(pair[1]),
+                "{:?} ({}) does not outlast {:?} ({})",
+                pair[0],
+                hits(pair[0]),
+                pair[1],
+                hits(pair[1])
+            );
+        }
+        // the forge that unlocks the siege shed is not the softest thing in town
+        assert!(hits(BuildingKind::Blacksmith) > hits(BuildingKind::House));
+        for &k in BuildingKind::ALL {
+            assert!(hits(k) >= 2, "{k:?} falls to a single ram blow");
         }
     }
 

@@ -1,7 +1,7 @@
 use bevy_ecs::prelude::*;
 use saladin_sim::{
-    AiDifficulty, AiPhase, BuildingKind, Faction, Fx, GatherState, MatchStatus, ResourceType,
-    Stance, Stockpile, UnitKind, V2,
+    AiDifficulty, AiPhase, BuildingKind, Faction, Fx, GatherState, MORALE_MAX, MatchStatus,
+    ResourceType, Stance, Stockpile, UnitKind, V2, unit_def,
 };
 use serde::{Deserialize, Serialize};
 
@@ -27,6 +27,22 @@ pub struct Pos {
     pub facing: Fx,
 }
 
+/// What a unit was last told to do. Kept as a `u8` (not an enum) because it
+/// rides in `Unit` and is hashed; the constants are the vocabulary.
+pub const ORDER_NONE: u8 = 0;
+pub const ORDER_MOVE: u8 = 1;
+pub const ORDER_ATTACK_MOVE: u8 = 2;
+pub const ORDER_ATTACK: u8 = 3;
+pub const ORDER_STOP: u8 = 4;
+
+/// 16-way facing: `heading` counts sixteenths of a turn counter-clockwise from
+/// +X. Integer by construction — no trig anywhere in the sim.
+pub const HEADINGS: u8 = 16;
+
+fn v2_zero() -> V2 {
+    V2::ZERO
+}
+
 /// A mobile unit: ownership + movement intent + gather/combat state.
 #[derive(Component, Clone, Debug, Serialize, Deserialize)]
 pub struct Unit {
@@ -41,7 +57,12 @@ pub struct Unit {
     pub harvest_timer: Fx,
     pub hp: i32,
     pub attack_target: u64,
-    pub attack_cooldown: Fx,
+    /// Combat ticks until the next blow. An `Fx` decremented by `COMBAT_DT`
+    /// rounded every attack_rate UP to the next tick — a Spearman's declared
+    /// 1.0 s was really 1.2 s — and cost a fixed-point subtract per unit per
+    /// combat tick for the privilege.
+    #[serde(default)]
+    pub attack_cd: i32,
     pub stance: Stance,
     pub morale: Fx,
     pub routing: bool,
@@ -53,6 +74,75 @@ pub struct Unit {
     pub job_site: u64,
     pub path: Vec<V2>,
     pub path_idx: usize,
+    #[serde(default)]
+    pub heading: u8,
+    /// `ORDER_*` — what the player/AI last asked for, as opposed to where the
+    /// unit happens to be walking this tick.
+    #[serde(default)]
+    pub order: u8,
+    #[serde(default = "v2_zero")]
+    pub order_target: V2,
+    /// Where the standing order was issued from. `home` cannot serve: Move,
+    /// SetStance and the rout all overwrite it, so it is three things at once.
+    #[serde(default = "v2_zero")]
+    pub anchor: V2,
+    #[serde(default)]
+    pub engage_slot: u8,
+    #[serde(default)]
+    pub charge_cd: i32,
+    #[serde(default)]
+    pub rally_cd: i32,
+    #[serde(default)]
+    pub setup_timer: Fx,
+    /// Fraction of this unit's ration actually issued last supply tick.
+    #[serde(default)]
+    pub ration: Fx,
+}
+
+impl Unit {
+    /// A fresh unit of `kind` standing at `pos`, at full health and idle. Every
+    /// construction site spreads from this (`..Unit::new(kind, pos)`) so a new
+    /// field lands in one place instead of thirty.
+    pub fn new(kind: UnitKind, pos: V2) -> Unit {
+        let def = unit_def(kind);
+        Unit {
+            kind,
+            target: pos,
+            has_target: false,
+            speed: def.speed,
+            gather_state: GatherState::Idle,
+            target_node: 0,
+            carrying: 0,
+            carry_type: ResourceType::Wood,
+            harvest_timer: Fx::ZERO,
+            hp: def.max_hp,
+            attack_target: 0,
+            attack_cd: 0,
+            stance: Stance::Aggressive,
+            morale: MORALE_MAX,
+            routing: false,
+            home: pos,
+            garrisoned_in: 0,
+            job_site: 0,
+            path: Vec::new(),
+            path_idx: 0,
+            heading: 0,
+            order: ORDER_NONE,
+            order_target: pos,
+            anchor: pos,
+            engage_slot: 0,
+            charge_cd: 0,
+            rally_cd: 0,
+            setup_timer: Fx::ZERO,
+            ration: Fx::ONE,
+        }
+    }
+}
+
+impl Default for Unit {
+    fn default() -> Self {
+        Unit::new(UnitKind::Peasant, V2::ZERO)
+    }
 }
 
 /// Where a structure is in its life. `Damaged` is derived (`Complete` with
@@ -181,6 +271,11 @@ pub struct Bot {
     /// planner stops asking for one instead of stalling its build ladder.
     #[serde(default)]
     pub fishing_blocked: bool,
+    /// Latch for the famine steer's hysteresis: entered at the food cushion,
+    /// left at half again. Without it the whole workforce changes trade every
+    /// time the larder crosses one number.
+    #[serde(default)]
+    pub famine: bool,
 }
 
 /// One in-flight/completed research, attached to a player entity (one per tech).

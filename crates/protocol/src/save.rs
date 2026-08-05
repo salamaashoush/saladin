@@ -30,7 +30,7 @@ struct SaveRow {
 /// old bytes as garbage (or EOF) rather than defaulting, and `#[serde(default)]`
 /// cannot save it. The magic+version header turns that into a clean refusal.
 pub const SAVE_MAGIC: u64 = 0x5361_6C61_4469_6E00;
-pub const SAVE_VERSION: u32 = 1;
+pub const SAVE_VERSION: u32 = 2;
 
 #[derive(Serialize, Deserialize)]
 pub struct SaveGame {

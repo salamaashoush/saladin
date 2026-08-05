@@ -49,16 +49,119 @@ pub fn nearest_passable_grid<P: Fn(i32, i32) -> bool>(passable: &P, x: Fx, y: Fx
     V2::new(x, y)
 }
 
+/// Retained BFS buffers for `nearest_reachable_passable_grid`. Generation
+/// stamps reset it in O(1); the alternative is a 147k-element `vec![false; _]`
+/// on every call, and this one is called per walker per replan.
+pub struct Flood {
+    seen: Vec<u32>,
+    cur_gen: u32,
+    queue: Vec<u32>,
+}
+
+impl Default for Flood {
+    fn default() -> Self {
+        Flood { seen: vec![0; N_CELLS], cur_gen: 0, queue: Vec::with_capacity(1024) }
+    }
+}
+
+impl Flood {
+    pub fn new() -> Self {
+        Self::default()
+    }
+    fn begin(&mut self) {
+        self.cur_gen = self.cur_gen.wrapping_add(1);
+        if self.cur_gen == 0 {
+            self.seen.iter_mut().for_each(|v| *v = 0);
+            self.cur_gen = 1;
+        }
+        self.queue.clear();
+    }
+    fn mark(&mut self, i: usize) -> bool {
+        if self.seen[i] == self.cur_gen {
+            return false;
+        }
+        self.seen[i] = self.cur_gen;
+        true
+    }
+
+    /// Flood the walker's whole reachable region and KEEP the stamps, so the
+    /// caller can then ask `saw` about any tile it likes. One flood answers
+    /// "which of these nodes can I actually get to" for every candidate at once
+    /// — asking per candidate means an A* per candidate.
+    ///
+    /// Returns false when the walker stands nowhere passable.
+    pub fn explore<P: Fn(i32, i32) -> bool>(&mut self, passable: &P, from: V2, max_tiles: usize) -> bool {
+        let start = nearest_passable_grid(passable, from.x, from.y);
+        let (sx, sy) = (floor_i(start.x), floor_i(start.y));
+        if !passable(sx, sy) {
+            return false;
+        }
+        self.begin();
+        let s = idx(sx, sy);
+        self.mark(s);
+        self.queue.push(s as u32);
+        let mut head = 0usize;
+        while head < self.queue.len() && head < max_tiles {
+            let cur = self.queue[head] as i32;
+            head += 1;
+            let (cx, cy) = (cur % W, cur / W);
+            for (dx, dy) in ORTHO {
+                let (nx, ny) = (cx + dx, cy + dy);
+                if nx < 0 || ny < 0 || nx >= W || ny >= W {
+                    continue;
+                }
+                let ni = idx(nx, ny);
+                if !passable(nx, ny) || !self.mark(ni) {
+                    continue;
+                }
+                self.queue.push(ni as u32);
+            }
+        }
+        true
+    }
+
+    /// Was this tile reached by the last `explore`?
+    pub fn saw(&self, tx: i32, ty: i32) -> bool {
+        if tx < 0 || ty < 0 || tx >= W || ty >= W {
+            return false;
+        }
+        self.seen[idx(tx, ty)] == self.cur_gen
+    }
+}
+
+/// The closest a walker can get to a goal, and whether the flood ran out of
+/// budget with ground still unexplored.
+pub struct Reach {
+    pub at: V2,
+    /// `true` means "as close as I looked", NOT "as close as you can ever get".
+    /// Reading the second into the first is what pins a gatherer on the tile it
+    /// is already standing on: the flood runs out short of a ridge, hands back
+    /// the start tile, and the caller concludes the node is unreachable.
+    pub truncated: bool,
+}
+
+/// Flood budget for a walk of `d` tiles. A detour costs on the order of the
+/// square of the direct distance, so the budget scales that way; the floor
+/// keeps one ridge from defeating a short hop and the ceiling keeps a hopeless
+/// goal from walking the whole map.
+pub fn reach_budget(d: Fx) -> usize {
+    const MIN: usize = 6144;
+    const MAX: usize = 32768;
+    let t = d.to_num::<i64>().clamp(0, 512) as usize;
+    (t * t * 64).clamp(MIN, MAX)
+}
+
 /// The passable tile closest to the target that is actually reachable on foot
 /// from `from` (same connected region). Flood-fills the mover's region and
 /// returns the in-region tile nearest the goal. `None` only if the mover stands
 /// on an impassable tile with no passable neighbour.
 pub fn nearest_reachable_passable_grid<P: Fn(i32, i32) -> bool>(
+    flood: &mut Flood,
     passable: &P,
     from: V2,
     target: V2,
     max_tiles: usize,
-) -> Option<V2> {
+) -> Option<Reach> {
     let start = nearest_passable_grid(passable, from.x, from.y);
     let sx = floor_i(start.x);
     let sy = floor_i(start.y);
@@ -68,19 +171,25 @@ pub fn nearest_reachable_passable_grid<P: Fn(i32, i32) -> bool>(
     let gx = floor_i(target.x);
     let gy = floor_i(target.y);
 
-    let mut seen = vec![false; N_CELLS];
-    let mut queue: Vec<usize> = vec![idx(sx, sy)];
-    seen[idx(sx, sy)] = true;
+    flood.begin();
+    let s = idx(sx, sy);
+    flood.mark(s);
+    flood.queue.push(s as u32);
     let (mut best_x, mut best_y) = (sx, sy);
     let mut best_d = (sx - gx) * (sx - gx) + (sy - gy) * (sy - gy);
     let mut visited = 0usize;
     let mut head = 0usize;
-    while head < queue.len() && visited < max_tiles {
-        let cur = queue[head];
+    let mut truncated = false;
+    while head < flood.queue.len() {
+        if visited >= max_tiles {
+            truncated = true;
+            break;
+        }
+        let cur = flood.queue[head] as i32;
         head += 1;
         visited += 1;
-        let cx = (cur as i32) % W;
-        let cy = (cur as i32) / W;
+        let cx = cur % W;
+        let cy = cur / W;
         let d = (cx - gx) * (cx - gx) + (cy - gy) * (cy - gy);
         if d < best_d {
             best_d = d;
@@ -96,15 +205,62 @@ pub fn nearest_reachable_passable_grid<P: Fn(i32, i32) -> bool>(
                 continue;
             }
             let ni = idx(nx, ny);
-            if seen[ni] || !passable(nx, ny) {
+            if !passable(nx, ny) || !flood.mark(ni) {
                 continue;
             }
-            seen[ni] = true;
-            queue.push(ni);
+            flood.queue.push(ni as u32);
         }
     }
     let half = crate::fx!("0.5");
-    Some(V2::new(Fx::from_num(best_x) + half, Fx::from_num(best_y) + half))
+    Some(Reach { at: V2::new(Fx::from_num(best_x) + half, Fx::from_num(best_y) + half), truncated })
+}
+
+/// The tile a walker standing at `from` should occupy to work at `to`: the free
+/// tile nearest `to` that shares the walker's own terrain region.
+///
+/// This is the answer the flood was being asked for and could not afford to
+/// give. `region_grid` already knows, exactly and for free, which tiles a walker
+/// can ever stand on; a bounded flood only knows which tiles it had budget to
+/// look at, and the two disagree the moment a ridge makes the route longer than
+/// the budget. `None` means the terrain itself separates them — buildings can
+/// still seal a pocket the terrain leaves open, so a caller that gets `Some`
+/// must still check that A* found a route.
+pub fn approach_tile<P: Fn(i32, i32) -> bool>(
+    seed: u32,
+    passable: &P,
+    from: V2,
+    to: V2,
+    radius: i32,
+) -> Option<V2> {
+    let region = crate::terrain::region_at(seed, from.x, from.y);
+    if region == u16::MAX {
+        return None;
+    }
+    let grid = crate::terrain::region_grid(seed);
+    let (tx, ty) = (floor_i(to.x), floor_i(to.y));
+    let half = crate::fx!("0.5");
+    let mut best: Option<(Fx, Fx, V2)> = None;
+    for dy in -radius..=radius {
+        for dx in -radius..=radius {
+            let (nx, ny) = (tx + dx, ty + dy);
+            if nx < 0 || ny < 0 || nx >= W || ny >= W {
+                continue;
+            }
+            if grid[idx(nx, ny)] != region || !passable(nx, ny) {
+                continue;
+            }
+            let c = V2::new(Fx::from_num(nx) + half, Fx::from_num(ny) + half);
+            let d = crate::math::dist2(c, to);
+            // Closest to the goal wins; among equals, the side the walker is
+            // already on. Without the tie-break a crew raising a wall picks the
+            // far face of it and marches around the whole line to reach it.
+            let near = crate::math::dist2(c, from);
+            if best.is_none_or(|(bd, bn, _)| d < bd || (d == bd && near < bn)) {
+                best = Some((d, near, c));
+            }
+        }
+    }
+    best.map(|(_, _, p)| p)
 }
 
 /// Sampled line-of-sight: every sampled tile along the segment is passable.
@@ -444,6 +600,7 @@ mod tests {
     fn reachable_region_picks_nearest_in_region() {
         let pass = |x: i32, _y: i32| x != 10;
         let r = nearest_reachable_passable_grid(
+            &mut Flood::new(),
             &pass,
             V2::new(crate::fx!("5.5"), crate::fx!("5.5")),
             V2::new(crate::fx!("15.5"), crate::fx!("5.5")),
@@ -451,6 +608,44 @@ mod tests {
         );
         let r = r.unwrap();
         // best reachable tile hugs the wall on the start side (x==9)
-        assert_eq!(floor_i(r.x), 9);
+        assert_eq!(floor_i(r.at.x), 9);
+        assert!(!r.truncated, "a full-budget flood of a closed region is never truncated");
+    }
+
+    #[test]
+    fn a_truncated_flood_says_so() {
+        // open field, goal far away, budget for a handful of tiles: the answer
+        // is "as close as I looked", and the flag has to say that or the caller
+        // reads a budget failure as an unreachable goal.
+        let pass = |_: i32, _: i32| true;
+        let mut f = Flood::new();
+        let short = nearest_reachable_passable_grid(
+            &mut f,
+            &pass,
+            V2::new(crate::fx!("5.5"), crate::fx!("5.5")),
+            V2::new(crate::fx!("120.5"), crate::fx!("5.5")),
+            64,
+        )
+        .unwrap();
+        assert!(short.truncated);
+        let full = nearest_reachable_passable_grid(
+            &mut f,
+            &pass,
+            V2::new(crate::fx!("5.5"), crate::fx!("5.5")),
+            V2::new(crate::fx!("120.5"), crate::fx!("5.5")),
+            N_CELLS,
+        )
+        .unwrap();
+        assert!(!full.truncated);
+        assert_eq!(floor_i(full.at.x), 120);
+        // and the retained buffers survive back-to-back searches
+        assert!(crate::math::dist2(short.at, full.at) > crate::math::dist2(full.at, full.at));
+    }
+
+    #[test]
+    fn reach_budget_grows_with_the_walk() {
+        assert_eq!(reach_budget(crate::fx!("1")), reach_budget(crate::fx!("2")));
+        assert!(reach_budget(crate::fx!("40")) > reach_budget(crate::fx!("10")));
+        assert_eq!(reach_budget(crate::fx!("400")), reach_budget(crate::fx!("500")));
     }
 }

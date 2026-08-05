@@ -18,7 +18,8 @@ pub(crate) use build_cmds::{
 };
 pub(crate) use economy_cmds::{market_buy_cmd, market_trade, start_research};
 pub(crate) use garrison_cmds::{garrison, ungarrison};
-pub(crate) use unit_cmds::{assign_idle_gatherers, path_to};
+pub(crate) use unit_cmds::{assign_idle_gatherers, group_attack, group_move, move_unit};
+pub use unit_cmds::path_to;
 
 /// Player intents. Under lockstep these are the ONLY thing shipped over the wire;
 /// every client applies the same ordered batch each tick and re-simulates. The
@@ -58,6 +59,13 @@ pub enum PlayerCommand {
     UpgradeBuilding { player_id: u64, building: u64 },
     TrainAt { player_id: u64, building: u64, kind: UnitKind },
     CancelTrain { player_id: u64, building: u64 },
+    /// One click, one message, ONE path. `formation` indexes `FormationShape`;
+    /// anything outside it marches loose, every man on the destination.
+    GroupMove { player_id: u64, units: Vec<u64>, target: V2, formation: u8 },
+    /// March and fight what turns up; the march resumes when the fight ends.
+    AttackMove { player_id: u64, units: Vec<u64>, target: V2, formation: u8 },
+    GroupAttack { player_id: u64, units: Vec<u64>, target: u64 },
+    Stop { player_id: u64, units: Vec<u64> },
 }
 
 #[derive(Resource, Default)]
@@ -69,6 +77,7 @@ pub struct CommandQueue(pub Vec<PlayerCommand>);
 pub fn apply_commands(world: &mut World) {
     world.resource_mut::<crate::CommandFeedback>().0.clear();
     let cmds = std::mem::take(&mut world.resource_mut::<CommandQueue>().0);
+    let mut paths = unit_cmds::GROUP_PATHS_PER_TICK;
     for cmd in cmds {
         match cmd {
             PlayerCommand::Join { player_id, name, faction, match_id } => {
@@ -142,6 +151,18 @@ pub fn apply_commands(world: &mut World) {
             }
             PlayerCommand::CancelTrain { player_id, building } => {
                 build_cmds::cancel_train(world, player_id, building)
+            }
+            PlayerCommand::GroupMove { player_id, units, target, formation } => {
+                unit_cmds::group_move(world, player_id, &units, target, formation, &mut paths)
+            }
+            PlayerCommand::AttackMove { player_id, units, target, formation } => {
+                unit_cmds::attack_move(world, player_id, &units, target, formation, &mut paths)
+            }
+            PlayerCommand::GroupAttack { player_id, units, target } => {
+                unit_cmds::group_attack(world, player_id, &units, target, &mut paths)
+            }
+            PlayerCommand::Stop { player_id, units } => {
+                unit_cmds::stop(world, player_id, &units)
             }
         }
     }

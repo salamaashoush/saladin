@@ -32,11 +32,18 @@ fn fair_starts_hold_for_100_seeds_across_presets() {
             let r2 = FAIR_RADIUS * FAIR_RADIUS;
             for slot in 0..8 {
                 let start = start_point(seed, slot);
+                let region = region_at(seed, start.x, start.y);
                 let mut have = [0usize; 3];
                 for n in &all {
                     let dx = n.pos.x - start.x;
                     let dy = n.pos.y - start.y;
                     if dx * dx + dy * dy > r2 {
+                        continue;
+                    }
+                    // REACHABLE, not merely near: the guarantee is what a
+                    // peasant can walk to. This test counted across cliffs and
+                    // rivers, so it passed on starts with no wood at all.
+                    if region_at(seed, n.pos.x, n.pos.y) != region {
                         continue;
                     }
                     match n.res_type {

@@ -25,6 +25,10 @@ macro_rules! u8_enum {
     };
 }
 
+// Discriminants are load-bearing: `UNIT_DEFS[kind as usize]`, bincode's variant
+// index, `Building.queue: [u8; QUEUE_CAP]` and `Census` all index by them.
+// APPEND only — removing a kind renumbers every kind after it and turns every
+// saved Knight into a Horse Archer.
 u8_enum!(UnitKind {
     Peasant = 0,
     Spearman = 1,
@@ -36,7 +40,24 @@ u8_enum!(UnitKind {
     Ram = 7,
     Mangonel = 8,
     Imam = 9,
+    Sergeant = 10,
+    Chaplain = 11,
+    Naffatun = 12,
 } default Peasant);
+
+// What a unit is FOR. Every capability the upgrade table, the supply ledger and
+// the tactical layer gate on reads this instead of re-deriving a role from the
+// stat SHAPE — `attack > 0 && !ranged && range <= 2` also describes a Battering
+// Ram, which is how a siege engine came to be issued plate barding.
+u8_enum!(UnitRole {
+    Worker = 0,
+    Foot = 1,
+    Archer = 2,
+    Cavalry = 3,
+    HorseArcher = 4,
+    Siege = 5,
+    Support = 6,
+} default Worker);
 
 u8_enum!(DamageType {
     Slash = 0,

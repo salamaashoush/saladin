@@ -3,10 +3,10 @@ use crate::{GameIndex, MatchStatuses, PathScratch, WorldConfig};
 use bevy_ecs::prelude::*;
 use bevy_platform::collections::HashMap;
 use saladin_sim::{
-    AStar, AuraTarget, DEPOSIT_RANGE, Fx, GatherState, harvest_reach,
-    HARVEST_TIME, MAX_EXPANSIONS, Occupant, ResourceType, V2, WorkAura, building_def, dist, is_passable, move_cost_at,
-    gate_blocks, nearest_passable_grid, nearest_reachable_passable_grid, occupancy_set, operational,
-    res_bit, tile_key, unit_def,
+    AuraTarget, DEPOSIT_RANGE, Fx, GatherState, harvest_reach,
+    HARVEST_TIME, MAX_EXPANSIONS, Occupant, ResourceType, V2, WorkAura, approach_tile, building_def, dist, is_passable, move_cost_at,
+    gate_blocks, nearest_reachable_passable_grid, occupancy_set, operational,
+    reach_budget, res_bit, tile_key, unit_def,
 };
 
 const AI_DT: Fx = saladin_sim::AI_DT;
@@ -19,14 +19,20 @@ struct MovePatch {
     end: V2,
 }
 
-/// Cap on the reachable-region flood. The snapped target/approach tile is always
-/// near the goal, so a bounded flood finds it; the full-map flood (MAX_EXPANSIONS)
-/// is what made large maps crawl — it visited the whole connected region on EVERY
-/// gather/deposit tick.
-const REACH_CAP: usize = 1024;
+/// How far from the goal an approach tile may sit. A crop is sown at its farm's
+/// own centre, under the whole footprint, so the ring has to clear it.
+const APPROACH_RADIUS: i32 = 4;
 
+/// Plan a walk to `to`.
+///
+/// The terrain regions answer "which tiles can this walker ever stand on"
+/// exactly and in O(1), so the approach tile is a small ring scan around the
+/// goal, not a flood. The flood is the fallback for the one case regions cannot
+/// see — buildings sealing a pocket the terrain leaves open — and it now reports
+/// whether it ran out of budget, because a walker must never conclude a node is
+/// unreachable from a search that simply stopped looking.
 fn move_patch(
-    astar: &mut AStar,
+    scratch: &mut PathScratch,
     seed: u32,
     occ: &std::collections::HashSet<i32>,
     gates: &[(i32, u64)],
@@ -38,16 +44,37 @@ fn move_patch(
         let k = tile_key(tx, ty);
         is_passable(seed, tx, ty) && !occ.contains(&k) && !gate_blocks(gates, k, viewer)
     };
-    let snap = nearest_reachable_passable_grid(&passable, from, to, REACH_CAP)
-        .unwrap_or_else(|| nearest_passable_grid(&passable, to.x, to.y));
     let cost = |tx: i32, ty: i32| move_cost_at(seed, tx, ty);
-    let path = astar.find_path_costed(&passable, &cost, from.x, from.y, snap.x, snap.y, MAX_EXPANSIONS);
+    if let Some(goal) = approach_tile(seed, &passable, from, to, APPROACH_RADIUS) {
+        let path =
+            scratch.0.find_path_costed(&passable, &cost, from.x, from.y, goal.x, goal.y, MAX_EXPANSIONS);
+        if !path.is_empty() {
+            return Some(MovePatch { target: path[0], path, end: goal });
+        }
+    }
+    let mut reach =
+        nearest_reachable_passable_grid(&mut scratch.1, &passable, from, to, reach_budget(dist(from, to)))?;
+    // A truncated flood that found nothing better than the tile underfoot has
+    // not answered the question, it has run out of time asking it. Escalate ONCE
+    // to the whole map rather than hand back "you are already as close as you
+    // can get" — that answer is what turns ToResource into an absorbing state.
+    if reach.truncated && saladin_sim::dist2(reach.at, to) >= saladin_sim::dist2(tile_centre(from), to) {
+        reach = nearest_reachable_passable_grid(&mut scratch.1, &passable, from, to, MAX_EXPANSIONS)?;
+    }
+    let path =
+        scratch.0.find_path_costed(&passable, &cost, from.x, from.y, reach.at.x, reach.at.y, MAX_EXPANSIONS);
     if path.is_empty() {
         None
     } else {
-        let target = path[0];
-        Some(MovePatch { path, target, end: snap })
+        Some(MovePatch { target: path[0], path, end: reach.at })
     }
+}
+
+/// The centre of the tile a position sits in. Approach tiles are tile CENTRES,
+/// so a progress test that measures them against a raw position is comparing two
+/// different things and can be off by most of a tile.
+fn tile_centre(p: V2) -> V2 {
+    V2::new(p.x.floor() + saladin_sim::fx!("0.5"), p.y.floor() + saladin_sim::fx!("0.5"))
 }
 
 #[derive(Clone, Copy)]
@@ -146,12 +173,7 @@ pub fn gather(
     let mut node_map: HashMap<u64, (V2, Fx)> = HashMap::new();
     let mut nodes_list: Vec<(u64, V2, u64)> = Vec::new();
     for (gid, p, _n, m) in q_nodes.iter() {
-        let span = match field_nodes.get(&gid.0) {
-            Some(fp) => *fp,
-            None if !is_passable(seed, p.pos.x.to_num::<i32>(), p.pos.y.to_num::<i32>()) => 1,
-            None => 0,
-        };
-        node_map.insert(gid.0, (p.pos, harvest_reach(span)));
+        node_map.insert(gid.0, (p.pos, node_reach(seed, p.pos, field_nodes.get(&gid.0).copied())));
         nodes_list.push((gid.0, p.pos, m.0));
     }
 
@@ -179,28 +201,9 @@ pub fn gather(
         best
     };
 
-    // nearest node id in `match_id`, optionally skipping `skip`. Filtered to the
-    // walker's connected region so a gatherer never locks onto an island it can
-    // not reach (the old skip-one retarget ping-ponged between two unreachable
-    // nodes forever).
-    let nearest_node = |from: V2, match_id: u64, skip: u64| -> Option<u64> {
-        let mut best: Option<u64> = None;
-        let mut best_d = Fx::MAX;
-        for (id, pos, mid) in &nodes_list {
-            if *mid != match_id || *id == skip {
-                continue;
-            }
-            if !saladin_sim::node_reachable(seed, from, *pos) {
-                continue;
-            }
-            let dd = saladin_sim::dist2(from, *pos);
-            if dd < best_d {
-                best_d = dd;
-                best = Some(*id);
-            }
-        }
-        best
-    };
+
+    let look =
+        Look { seed, occ: &occ, gates: &gates, nodes: &nodes_list, node_map: &node_map };
 
     // ── mutate units ─────────────────────────────────────────────────────────
     for (_gid, pos, owner, mid, mut u) in &mut q_units {
@@ -213,14 +216,14 @@ pub fn gather(
         match u.gather_state {
             GatherState::ToResource => {
                 let Some((node_pos, reach)) = node_map.get(&u.target_node).copied() else {
-                    retarget(&mut u, here, mid, 0, &nearest_node);
+                    retarget(&mut u, best_node(&mut scratch.1, &look, here, mid, owner.0, 0));
                     continue;
                 };
                 if !saladin_sim::node_reachable(seed, here, node_pos) {
                     // across water — retarget (region-filtered) instead of
                     // marching to the shore and discovering it there
                     let skip = u.target_node;
-                    retarget(&mut u, here, mid, skip, &nearest_node);
+                    retarget(&mut u, best_node(&mut scratch.1, &look, here, mid, owner.0, skip));
                     continue;
                 }
                 if dist(here, node_pos) <= reach {
@@ -228,9 +231,8 @@ pub fn gather(
                     u.harvest_timer = Fx::ZERO;
                     u.has_target = false;
                 } else if !u.has_target {
-                    let patch =
-                        move_patch(&mut scratch.0, seed, &occ, &gates, owner.0, here, node_pos)
-                            .filter(|p| !stuck(here, p.end, node_pos, reach));
+                    let patch = move_patch(&mut scratch, seed, &occ, &gates, owner.0, here, node_pos)
+                        .filter(|p| !stuck(here, p.end, node_pos, reach));
                     match patch {
                         Some(p) => {
                             u.path = p.path;
@@ -238,26 +240,32 @@ pub fn gather(
                             u.target = p.target;
                             u.has_target = true;
                         }
+                        // Out of reach for good — the region says the ground
+                        // connects, so something BUILT is in the way. Take other
+                        // work. This used to ping-pong between two siblings
+                        // forever, but only because a truncated flood called
+                        // both of them unreachable when neither was; the
+                        // judgement here is now A* actually failing.
                         None => {
                             let skip = u.target_node;
-                            retarget(&mut u, here, mid, skip, &nearest_node);
+                            retarget(&mut u, best_node(&mut scratch.1, &look, here, mid, owner.0, skip));
                         }
                     }
                 }
             }
             GatherState::Harvesting => {
                 let Some(node_e) = index.get(u.target_node) else {
-                    retarget(&mut u, here, mid, 0, &nearest_node);
+                    retarget(&mut u, best_node(&mut scratch.1, &look, here, mid, owner.0, 0));
                     continue;
                 };
                 let Ok((_, npos, mut node, _)) = q_nodes.get_mut(node_e) else {
-                    retarget(&mut u, here, mid, 0, &nearest_node);
+                    retarget(&mut u, best_node(&mut scratch.1, &look, here, mid, owner.0, 0));
                     continue;
                 };
                 // another harvester may have emptied it earlier THIS tick (its
                 // despawn is deferred): treat 0-remaining as gone, never dupe
                 if node.remaining <= 0 {
-                    retarget(&mut u, here, mid, 0, &nearest_node);
+                    retarget(&mut u, best_node(&mut scratch.1, &look, here, mid, owner.0, 0));
                     continue;
                 }
                 // a hut's nets over its fishery, a granary's hands over its
@@ -322,10 +330,10 @@ pub fn gather(
                     if node_map.contains_key(&u.target_node) {
                         u.gather_state = GatherState::ToResource;
                     } else {
-                        retarget(&mut u, here, mid, 0, &nearest_node);
+                        retarget(&mut u, best_node(&mut scratch.1, &look, here, mid, owner.0, 0));
                     }
                 } else if !u.has_target {
-                    match move_patch(&mut scratch.0, seed, &occ, &gates, owner.0, here, drop.pos) {
+                    match move_patch(&mut scratch, seed, &occ, &gates, owner.0, here, drop.pos) {
                         Some(p) => {
                             u.path = p.path;
                             u.path_idx = 0;
@@ -348,32 +356,30 @@ pub fn gather(
     }
 }
 
-/// True when walking cannot help. `end` is the standable tile nearest the node
-/// that this walker can actually reach; the flood never returns one worse than
-/// the tile it started on, so "no closer than where I stand, and still out of
-/// working range" means the node is behind something and no amount of marching
-/// will change that.
+/// True when walking cannot help: the best tile this walker can reach is itself
+/// out of working range, and the walker is already standing on it.
 ///
-/// Without this, `ToResource` is an absorbing state: the walk re-plans to the
-/// tile the walker already occupies, forever. It is not theoretical — a Hard
-/// bot funnels every peasant onto one food node under a famine bias, and one
-/// node it cannot reach froze all fourteen of them, and the whole economy with
-/// them, for the rest of the match. The slack of a tile keeps a walker that is
-/// practically there from throwing its node away over a rounding bit.
+/// The test is about `end`, the approach tile — not about how far the walker
+/// currently is. Asking "am I still far from the node" instead needs a slack
+/// term to stop a walker that is practically there from throwing its node away
+/// over a rounding bit, and that slack blinds it to the case that actually
+/// happens: a node whose every standable neighbour is a full tile off while
+/// `harvest_reach` is seven tenths, because something got BUILT on the one tile
+/// that would have worked. That node can never be harvested by anyone, and the
+/// walker used to march at it for the rest of the match.
+///
+/// Both distances come from TILE CENTRES. Measuring an approach tile's centre
+/// against a walker's raw position compares two different things — a walker
+/// standing a little off-centre reads as closer than any tile it can reach, so
+/// every patch looks like a step backwards and `ToResource` becomes absorbing.
 fn stuck(here: V2, end: V2, node: V2, reach: Fx) -> bool {
-    dist(here, node) > reach + Fx::ONE
-        && saladin_sim::dist2(end, node) >= saladin_sim::dist2(here, node)
+    dist(end, node) > reach
+        && saladin_sim::dist2(end, node) >= saladin_sim::dist2(tile_centre(here), node)
 }
 
-/// Head to the nearest remaining node in the unit's own match, else idle.
-fn retarget(
-    u: &mut Unit,
-    here: V2,
-    match_id: u64,
-    skip: u64,
-    nearest_node: &impl Fn(V2, u64, u64) -> Option<u64>,
-) {
-    match nearest_node(here, match_id, skip) {
+/// Take the offered node, or stand down.
+fn retarget(u: &mut Unit, node: Option<u64>) {
+    match node {
         Some(id) => {
             u.gather_state = GatherState::ToResource;
             u.target_node = id;
@@ -384,5 +390,113 @@ fn retarget(
             u.has_target = false;
             u.target_node = 0;
         }
+    }
+}
+
+/// How far a harvester must be able to get to work a node. The span of
+/// unstandable ground UNDER the node is what the reach has to clear: a farm's
+/// whole footprint for a crop, the water tile itself for a school of fish.
+pub(crate) fn node_reach(seed: u32, pos: V2, field_footprint: Option<i32>) -> Fx {
+    let span = match field_footprint {
+        Some(fp) => fp,
+        None if !is_passable(seed, pos.x.to_num::<i32>(), pos.y.to_num::<i32>()) => 1,
+        None => 0,
+    };
+    harvest_reach(span)
+}
+
+/// Can a walker whose reachable region is already flooded into `flood` stand
+/// close enough to work this node?
+pub(crate) fn workable(flood: &saladin_sim::Flood, npos: V2, reach: Fx) -> bool {
+    let r = reach.ceil().to_num::<i32>().max(1);
+    let tx = npos.x.floor().to_num::<i32>();
+    let ty = npos.y.floor().to_num::<i32>();
+    let half = saladin_sim::fx!("0.5");
+    for dy in -r..=r {
+        for dx in -r..=r {
+            let (nx, ny) = (tx + dx, ty + dy);
+            if !flood.saw(nx, ny) {
+                continue;
+            }
+            let c = V2::new(Fx::from_num(nx) + half, Fx::from_num(ny) + half);
+            if dist(c, npos) <= reach {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Everything `best_node` needs to judge a node without touching the world.
+struct Look<'a> {
+    seed: u32,
+    occ: &'a std::collections::HashSet<i32>,
+    gates: &'a [(i32, u64)],
+    nodes: &'a [(u64, V2, u64)],
+    node_map: &'a HashMap<u64, (V2, Fx)>,
+}
+
+/// How many nearest candidates to try before standing the walker down. Each
+/// rejection is a node it can see and cannot work.
+const NODE_TRIES: usize = 8;
+
+/// The nearest node in `match_id` this walker can actually WORK, skipping
+/// `skip`.
+///
+/// "Nearest reachable node" is not the same question as "nearest node I can
+/// stand close enough to". A node whose every standable neighbour is out of
+/// harvest range — because a hut got raised on the one tile that would have
+/// worked — or one sealed behind a wall ring reads as a perfectly good target
+/// to a distance test, and a walker handed it will march at it, give up, and be
+/// handed its equally hopeless neighbour, forever.
+///
+/// So this floods the walker's region ONCE, occupancy and gates included, and
+/// then asks of each candidate in ascending distance whether any tile it reached
+/// is inside that node's harvest reach. One flood answers it for every
+/// candidate; an A* per candidate would not be affordable.
+fn best_node(
+    flood: &mut saladin_sim::Flood,
+    look: &Look,
+    from: V2,
+    match_id: u64,
+    owner: u64,
+    skip: u64,
+) -> Option<u64> {
+    let seed = look.seed;
+    let passable = |tx: i32, ty: i32| {
+        let k = tile_key(tx, ty);
+        is_passable(seed, tx, ty) && !look.occ.contains(&k) && !gate_blocks(look.gates, k, owner)
+    };
+    if !flood.explore(&passable, from, MAX_EXPANSIONS) {
+        return None;
+    }
+    let mut rejected = [0u64; NODE_TRIES];
+    let mut n_rej = 0usize;
+    loop {
+        let mut best: Option<u64> = None;
+        let mut best_d = Fx::MAX;
+        for (id, pos, mid) in look.nodes {
+            if *mid != match_id || *id == skip || rejected[..n_rej].contains(id) {
+                continue;
+            }
+            if !saladin_sim::node_reachable(seed, from, *pos) {
+                continue;
+            }
+            let dd = saladin_sim::dist2(from, *pos);
+            if dd < best_d {
+                best_d = dd;
+                best = Some(*id);
+            }
+        }
+        let id = best?;
+        let (npos, reach) = look.node_map.get(&id).copied()?;
+        if workable(flood, npos, reach) {
+            return Some(id);
+        }
+        if n_rej == NODE_TRIES {
+            return None;
+        }
+        rejected[n_rej] = id;
+        n_rej += 1;
     }
 }

@@ -57,6 +57,18 @@ pub(crate) fn train(world: &mut World, owner: u64, kind: UnitKind) -> bool {
 /// through the queue.
 pub(crate) fn train_at(world: &mut World, owner: u64, building: u64, kind: UnitKind) -> bool {
     let def = unit_def(kind);
+    // Faction exclusivity is a RULE, not a HUD filter. `BuildingDef.trains` is
+    // the union of both rosters (it has to be — the discriminant is an index),
+    // so without this the command layer happily queues a Mamluk for a Crusader
+    // and the whole faction design is decoration a hand-built packet ignores.
+    let faction = {
+        let mut q = world.query::<&Player>();
+        q.iter(world).find(|p| p.player_id == owner).map(|p| p.faction)
+    };
+    match faction {
+        Some(f) if fields_unit(kind, f) => {}
+        _ => return false,
+    }
     let owned = super::owned_building_kinds(world, owner);
     if !has_prereq(&owned, def.requires) {
         return false;
@@ -158,9 +170,14 @@ pub(crate) fn spawn_trained(world: &mut World, building: u64) -> bool {
             let mut scratch = world.resource_mut::<PathScratch>();
             scratch.0.find_path(&passable, snap.x, snap.y, rally.x, rally.y, MAX_EXPANSIONS)
         };
-        if !path.is_empty() {
-            let mut q = world.query::<(&GameId, &mut Unit)>();
-            if let Some((_, mut u)) = q.iter_mut(world).find(|(g, _)| g.0 == id) {
+        let mut q = world.query::<(&GameId, &mut Unit)>();
+        if let Some((_, mut u)) = q.iter_mut(world).find(|(g, _)| g.0 == id) {
+            // The flag is the ground this man is posted on. Without this his
+            // home stays the hall door, so both leashes measure a rallied unit
+            // against a building it was sent away from and it walks back to it
+            // the moment it sees an enemy.
+            u.home = rally;
+            if !path.is_empty() {
                 u.target = path[0];
                 u.path = path;
                 u.path_idx = 0;

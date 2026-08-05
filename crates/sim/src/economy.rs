@@ -133,20 +133,15 @@ pub struct UpkeepResult {
     pub morale_drain: Fx,
 }
 
-/// Empty-larder grace: this many consecutive starving economy ticks pass
-/// before any hp attrition (men march on empty stomachs for a while).
-pub const STARVE_GRACE_TICKS: i32 = 5;
-/// After the grace, attrition ramps from 0 to full STARVE_DPS over this many
-/// further ticks — a worsening famine, not an instant plague.
-pub const STARVE_RAMP_TICKS: i32 = 10;
-/// Morale bled per starving economy tick (outweighs ally/keep recovery, so a
-/// starving army routs before it dies).
-pub const STARVE_MORALE_DRAIN: Fx = crate::fx!("0.3");
+pub use crate::supply::{STARVE_GRACE_TICKS, STARVE_MORALE_DRAIN, STARVE_RAMP_TICKS};
 
+/// SUPERSEDED by `supply::apply_supply`, which rations proportionally. This is
+/// the all-or-nothing rule — one unit over the line starves the whole army — and
+/// it stays only until `systems::economy` is moved across.
+///
 /// One economy tick of food upkeep. Every ration-drawing unit eats
 /// FOOD_PER_UNIT; `hunger` counts consecutive starving ticks (persisted by the
-/// caller). Starvation escalates realistically: morale collapses first, then
-/// hp attrition ramps in after the grace period.
+/// caller).
 pub fn apply_upkeep(food: i32, unit_count: i32, hunger: i32, dt: Fx) -> UpkeepResult {
     let bill = unit_count * FOOD_PER_UNIT;
     let starving = bill > food;

@@ -61,16 +61,43 @@ pub fn effective_damage(atk: &Attacker, armor: ArmorClass) -> i32 {
     dealt.max(1)
 }
 
-/// Damage one hit deals to a STRUCTURE. Siege damage is scaled by the
-/// building's own `siege_resist`, which is why stone works can be made hard
-/// against rams without touching the Leather/Mail cells of DAMAGE_MATRIX that
-/// units share — a ram must never become anti-infantry.
+/// Damage one hit deals to a unit, after its armour class AND the flat
+/// reduction its armour research bought. Never below 1.
+pub fn effective_damage_vs(atk: &Attacker, target: &crate::units::UnitDef) -> i32 {
+    (effective_damage(atk, target.armor_class) - target.damage_reduction).max(1)
+}
+
+/// What a siege engine does to each STRUCTURAL material. This is a
+/// building-only column: `DAMAGE_MATRIX` cannot carry it, because its Leather
+/// and Mail cells are shared with archers and knights, and a ram that burned
+/// timber halls properly through that table would also be anti-infantry.
+/// Thatch and timber burn; masonry has to be broken.
+pub const SIEGE_VS_STRUCTURE: [Fx; 4] = [
+    crate::fx!("5"),    // Unarmored — thatch and standing crop
+    crate::fx!("3"),    // Leather   — timber halls
+    crate::fx!("2.75"), // Mail      — reinforced
+    crate::fx!("2.5"),  // Stone     — masonry
+];
+
+/// Damage one hit deals to a STRUCTURE. `siege_resist` is HARDENING ONLY
+/// (0 < r <= 1) — it used to do two opposite jobs at once, so a stone Wall was
+/// the softest thing on the map at 10 ram hits while a Barracks took 13, and a
+/// Stone-classed Blacksmith at `siege_resist: 2.0` fell in three. Timber
+/// softness now lives in the material column alone.
 pub fn building_damage(atk: &Attacker, def: &crate::buildings_defs::BuildingDef) -> i32 {
-    let base = effective_damage(atk, def.armor_class);
     if atk.damage_type != DamageType::Siege {
-        return base;
+        return effective_damage(atk, def.armor_class);
     }
-    (Fx::from_num(base) * def.siege_resist).floor().to_num::<i32>().max(1)
+    let material = SIEGE_VS_STRUCTURE[def.armor_class as usize];
+    let bonus = atk.bonus_vs_armor[def.armor_class as usize];
+    (atk.attack * material * bonus * def.siege_resist).floor().to_num::<i32>().max(1)
+}
+
+/// The multiplier a charging rider actually lands. A braced spear taken
+/// FRONTALLY cancels it outright — that is what makes the charge a position
+/// problem rather than a damage stat.
+pub fn charge_multiplier(charge_mult: Fx, target_braced: bool, frontal: bool) -> Fx {
+    if target_braced && frontal { Fx::ONE } else { charge_mult.max(Fx::ONE) }
 }
 
 /// Auto-acquisition target for a combatant at `pos` with `aggro_range`. Siege
@@ -146,6 +173,52 @@ mod tests {
         // and never below one
         let pebble = Attacker::new(crate::fx!("1"), DamageType::Siege);
         assert!(building_damage(&pebble, wall) >= 1);
+    }
+
+    /// The shipped inversion: `siege_resist` above 1 SOFTENED, so the Stone
+    /// column of a shared unit matrix decided how a hall burned. Hardening only,
+    /// materials in their own column.
+    #[test]
+    fn hardening_only_and_the_material_column_carries_the_softness() {
+        use crate::buildings_defs::building_def;
+        use crate::enums::BuildingKind;
+        for &k in BuildingKind::ALL {
+            let r = building_def(k).siege_resist;
+            assert!(r > Fx::ZERO && r <= Fx::ONE, "{k:?} siege_resist {r} is not hardening");
+        }
+        // thatch burns fastest, masonry burns slowest, per point of attack
+        let mut last = Fx::MAX;
+        for ac in [ArmorClass::Unarmored, ArmorClass::Leather, ArmorClass::Mail, ArmorClass::Stone] {
+            let m = SIEGE_VS_STRUCTURE[ac as usize];
+            assert!(m < last, "{ac:?} is no softer than the material above it");
+            last = m;
+        }
+    }
+
+    #[test]
+    fn a_braced_spear_cancels_a_charge_only_from_the_front() {
+        let knight = crate::fx!("3");
+        assert_eq!(charge_multiplier(knight, true, true), Fx::ONE);
+        assert_eq!(charge_multiplier(knight, true, false), knight, "the flank is open");
+        assert_eq!(charge_multiplier(knight, false, true), knight, "unset spears are trampled");
+        // a unit with no charge never gets one from the geometry
+        assert_eq!(charge_multiplier(Fx::ONE, false, false), Fx::ONE);
+    }
+
+    #[test]
+    fn armour_research_is_flat_reduction_not_a_class_promotion() {
+        use crate::enums::UnitKind;
+        use crate::research::{Tech, effective_unit_def, set_tech};
+        let mail = set_tech(0, Tech::ArmorMail);
+        let plain = *crate::units::unit_def(UnitKind::Archer);
+        let armoured = effective_unit_def(UnitKind::Archer, mail);
+        assert_eq!(armoured.armor_class, plain.armor_class, "the Leather column must survive");
+        assert!(armoured.damage_reduction > plain.damage_reduction);
+        let a = Attacker::new(crate::fx!("9"), DamageType::Pierce);
+        assert!(effective_damage_vs(&a, &armoured) < effective_damage_vs(&a, &plain));
+        // and never to nothing
+        let pebble = Attacker::new(crate::fx!("1"), DamageType::Slash);
+        assert_eq!(effective_damage_vs(&pebble, &armoured), 1);
     }
 
     #[test]

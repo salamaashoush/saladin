@@ -157,6 +157,23 @@ fn aim(state: &CameraState, tf: &mut Transform) {
 }
 
 /// WASD/arrows + screen-edge pan, in iso screen space (TS panCamera mapping).
+/// Keys the camera already owns, mirrored from `pan_camera`/`rotate_camera` for
+/// `input`'s collision test: WASD both pans and, if an order took the same
+/// letter, would fire that order on every scroll.
+#[cfg(test)]
+pub const CAMERA_KEYS: &[KeyCode] = &[
+    KeyCode::KeyW,
+    KeyCode::KeyA,
+    KeyCode::KeyS,
+    KeyCode::KeyD,
+    KeyCode::KeyQ,
+    KeyCode::KeyE,
+    KeyCode::ArrowUp,
+    KeyCode::ArrowDown,
+    KeyCode::ArrowLeft,
+    KeyCode::ArrowRight,
+];
+
 pub fn pan_camera(
     keys: Res<ButtonInput<KeyCode>>,
     windows: Query<&Window>,

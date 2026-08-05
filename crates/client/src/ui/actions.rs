@@ -2,13 +2,14 @@
 //! turns presses into lockstep commands / input-mode changes / state moves.
 
 use super::widgets::Disabled;
-use crate::input::InputMode;
-use crate::selection::{SelectedBuilding, Selection};
+use crate::input::{InputMode, MarchQueue};
+use crate::selection::{FormationPick, SelectedBuilding, Selection};
 use crate::{LocalInput, LocalPlayer};
 use bevy::prelude::*;
 use saladin_protocol::{GameId, Owner, PlayerCommand, Pos, Unit};
 use saladin_sim::{
-    BuildingKind, GatherState, MAX_BUILDERS, ResourceType, Stance, UnitKind, dist2, unit_def,
+    BuildingKind, FormationShape, GatherState, MAX_BUILDERS, ResourceType, Stance, UnitKind, dist2,
+    unit_def,
 };
 
 pub const MARKET_LOT: i32 = 20;
@@ -33,6 +34,11 @@ pub enum UiAction {
     SendBuilders,
     UpgradeSelected,
     CancelSite,
+    /// Shape the next group order marches in.
+    Formation(FormationShape),
+    /// Arm attack-move; the next ground click spends it.
+    ArmAttackMove,
+    StopSelected,
 }
 
 /// Which build-bar tab is open.
@@ -58,7 +64,7 @@ fn crew_for(
         })
     };
     let picked: Vec<u64> =
-        carriers().filter(|(g, ..)| selection.units.contains(&g.0)).map(|(g, ..)| g.0).collect();
+        carriers().filter(|(g, ..)| selection.contains(&g.0)).map(|(g, ..)| g.0).collect();
     if !picked.is_empty() {
         let mut ids = picked;
         ids.sort_unstable();
@@ -87,6 +93,8 @@ pub fn handle_actions(
     mut tab: ResMut<BuildTab>,
     mut mode: ResMut<InputMode>,
     mut input: ResMut<LocalInput>,
+    mut shape: ResMut<FormationPick>,
+    mut march: ResMut<MarchQueue>,
 ) {
     let me = local.0;
     for (interaction, action, disabled) in &q {
@@ -151,8 +159,25 @@ pub fn handle_actions(
                 }
             }
             UiAction::Stance(stance) => {
-                for &unit in &selection.units {
+                for &unit in selection.iter() {
                     input.0.push(PlayerCommand::SetStance { player_id: me, unit, stance });
+                }
+            }
+            UiAction::Formation(s) => shape.0 = s,
+            UiAction::ArmAttackMove => {
+                *mode = if *mode == InputMode::AttackMove {
+                    InputMode::Normal
+                } else {
+                    InputMode::AttackMove
+                };
+            }
+            UiAction::StopSelected => {
+                if !selection.is_empty() {
+                    march.0.clear();
+                    input.0.push(PlayerCommand::Stop {
+                        player_id: me,
+                        units: selection.ids().to_vec(),
+                    });
                 }
             }
         }

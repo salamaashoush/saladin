@@ -3,29 +3,32 @@
 //! into lockstep `PlayerCommand`s — never mutates sim state directly.
 
 use crate::camera::{GameCamera, pick_ground};
-use crate::selection::{ControlGroups, Selection};
+use crate::selection::{ControlGroups, FormationPick, Selection};
 use crate::terrain::{HeightField, height_at};
 use crate::ui::hud::HudRects;
 use crate::{LocalInput, LocalPlayer};
 use bevy::prelude::*;
 use saladin_protocol::{Building, GameId, Owner, Player, PlayerCommand, Pos, ResourceNode, Unit};
 use saladin_sim::{
-    BuildingKind, Fx, GatherState, PlaceError, Stockpile, V2, building_def, can_garrison,
+    BuildingKind, Fx, GatherState, PlaceError, Stance, Stockpile, V2, building_def, can_garrison,
     can_host_garrison,
     check_build, footprint_center, garrison_free_slots, occupancy_set, operational, tile_key,
     unit_def,
 };
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
 
 pub const MAX_WALL_LEN: i32 = 40;
 
-/// What the pointer currently does. Build/Demolish come from the build bar.
+/// What the pointer currently does. Build/Demolish come from the build bar;
+/// AttackMove is armed by `ATTACK_MOVE_KEY` (or the card) and spent on the next
+/// ground click.
 #[derive(Resource, Default, Clone, Copy, PartialEq, Eq, Debug)]
 pub enum InputMode {
     #[default]
     Normal,
     Build(BuildingKind),
     Demolish,
+    AttackMove,
 }
 
 #[derive(Resource, Default)]
@@ -93,22 +96,28 @@ pub fn line_tiles(s: (i32, i32), e: (i32, i32)) -> Vec<(i32, i32)> {
     out
 }
 
-/// Grid offsets spreading `n` move targets around a click so units don't stack.
-pub fn formation(n: usize) -> Vec<(f32, f32)> {
-    let cols = (n as f32).sqrt().ceil().max(1.0) as usize;
-    let rows = n.div_ceil(cols);
-    let s = 0.85_f32;
-    (0..n)
-        .map(|i| {
-            let c = (i % cols) as f32;
-            let r = (i / cols) as f32;
-            (
-                (c - (cols as f32 - 1.0) / 2.0) * s,
-                (r - (rows as f32 - 1.0) / 2.0) * s,
-            )
-        })
-        .collect()
+/// One queued leg of a march: who walks it, where to, and how. The FRONT leg is
+/// the one being walked; the rest wait. Only the owning client issues these, so
+/// they ride the wire as ordinary commands and lockstep never sees a difference
+/// between a queued leg and a hand-clicked one.
+pub struct MarchLeg {
+    pub units: Vec<u64>,
+    pub target: V2,
+    pub attack_move: bool,
+    /// Sim tick the leg was issued on — arrival is not asked about until the
+    /// order has had time to reach the sim and be applied.
+    pub issued: u64,
 }
+
+/// Shift+right-click waypoints. Capped: a queue is a route, not a program.
+#[derive(Resource, Default)]
+pub struct MarchQueue(pub VecDeque<MarchLeg>);
+
+pub const MAX_MARCH_LEGS: usize = 8;
+/// Sim ticks a leg is given before its arrival is believed. A command issued
+/// this frame has not reached `SimSchedule` yet, so every man still reads
+/// `has_target == false` and the whole queue would drain in one frame.
+const LEG_SETTLE_TICKS: u64 = 3;
 
 fn unit_world(field: &HeightField, p: V2) -> Vec3 {
     let x = p.x.to_num::<f32>();
@@ -185,7 +194,7 @@ fn selected_kind(
     selection: &Selection,
     q_units: &Query<(&GameId, &Owner, &Pos, &Unit)>,
 ) -> Option<saladin_sim::UnitKind> {
-    let id = selection.units.iter().min()?;
+    let id = selection.ids().first()?;
     q_units.iter().find(|(g, ..)| g.0 == *id).map(|(_, _, _, u)| u.kind)
 }
 
@@ -319,6 +328,7 @@ pub fn pointer_input(
         ResMut<DemolishDrag>,
         ResMut<LastClick>,
     ),
+    (shape, tick, mut march): (Res<FormationPick>, Res<saladin_protocol::Tick>, ResMut<MarchQueue>),
     hud: Res<HudRects>,
     q_units: Query<(&GameId, &Owner, &Pos, &Unit)>,
     q_buildings: Query<(&GameId, &Owner, &Pos, &Building)>,
@@ -395,6 +405,34 @@ pub fn pointer_input(
         return;
     }
 
+    // ── attack-move mode (armed by A) ─────────────────────────────────────────
+    if *mode == InputMode::AttackMove {
+        if keys.just_pressed(KeyCode::Escape) || selection.is_empty() {
+            *mode = InputMode::Normal;
+            return;
+        }
+        let clicked = mouse.just_pressed(MouseButton::Left) || mouse.just_pressed(MouseButton::Right);
+        if clicked && !on_hud {
+            *mode = InputMode::Normal;
+            if mouse.just_pressed(MouseButton::Left)
+                && let Some(Picked::Unit(target, owner)) =
+                    pick(cursor, camera, cam_tf, field_ref, &q_units, &q_buildings, &q_nodes)
+                && owner != me
+            {
+                command_attack(&selection, me, target, &mut input);
+                return;
+            }
+            if let Some(g) = pick_ground(camera, cam_tf, cursor, field_ref) {
+                march.0.clear();
+                command_march(&selection, me, g.x, g.z, shape.0, true, &mut input);
+                if let Some(k) = selected_kind(&selection, &q_units) {
+                    voice.0.push((k, crate::audio::Bark::Attack));
+                }
+            }
+        }
+        return;
+    }
+
     // ── normal mode ───────────────────────────────────────────────────────────
     // right-click: rally (building selected) or context command
     if mouse.just_pressed(MouseButton::Right) && !on_hud {
@@ -408,19 +446,34 @@ pub fn pointer_input(
             }
             return;
         }
-        if selection.units.is_empty() {
+        if selection.is_empty() {
             return;
         }
+        // Shift+right-click on ground APPENDS a leg instead of replacing the
+        // march. Shift used to be read only in the left-click branch, so it was
+        // silently identical to a plain right-click.
+        let queueing = keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight);
+        if queueing
+            && let Some(Picked::Ground(g)) =
+                pick(cursor, camera, cam_tf, field_ref, &q_units, &q_buildings, &q_nodes)
+        {
+            queue_leg(&selection, me, g.x, g.z, shape.0, tick.0, &mut march, &mut input);
+            if let Some(k) = selected_kind(&selection, &q_units) {
+                voice.0.push((k, crate::audio::Bark::Ack));
+            }
+            return;
+        }
+        march.0.clear();
         match pick(cursor, camera, cam_tf, field_ref, &q_units, &q_buildings, &q_nodes) {
             Some(Picked::Unit(target, owner)) if owner != me => {
-                command_attack(&selection, &q_units, me, target, &mut input);
+                command_attack(&selection, me, target, &mut input);
                 if let Some(k) = selected_kind(&selection, &q_units) {
                     voice.0.push((k, crate::audio::Bark::Attack));
                 }
             }
             Some(Picked::Node(node)) => {
                 let mut any = false;
-                for &id in &selection.units {
+                for &id in selection.iter() {
                     if let Some((_, _, _, u)) = q_units.iter().find(|(g, ..)| g.0 == id) {
                         if unit_def(u.kind).carry > 0 {
                             input.0.push(PlayerCommand::Gather { player_id: me, unit: id, node });
@@ -441,7 +494,7 @@ pub fn pointer_input(
             }
             Some(Picked::Building(target, owner)) => {
                 if owner != me {
-                    command_attack(&selection, &q_units, me, target, &mut input);
+                    command_attack(&selection, me, target, &mut input);
                     if let Some(k) = selected_kind(&selection, &q_units) {
                         voice.0.push((k, crate::audio::Bark::Attack));
                     }
@@ -458,9 +511,7 @@ pub fn pointer_input(
                     });
                     let mut crew: HashSet<u64> = HashSet::new();
                     if wants_work {
-                        let mut ids: Vec<u64> = selection.units.iter().copied().collect();
-                        ids.sort_unstable();
-                        for id in ids {
+                        for &id in selection.iter() {
                             if crew.len() >= saladin_sim::MAX_BUILDERS as usize {
                                 break;
                             }
@@ -482,7 +533,7 @@ pub fn pointer_input(
                             q_units.iter().filter(|(_, _, _, u)| u.garrisoned_in == target).count() as i32;
                         let mut free = garrison_free_slots(def, occupants);
                         let mut any = false;
-                        for &id in &selection.units {
+                        for &id in selection.iter() {
                             if free <= 0 {
                                 break;
                             }
@@ -504,17 +555,23 @@ pub fn pointer_input(
                             && let Some((_, _, p, _)) =
                                 q_buildings.iter().find(|(g, ..)| g.0 == target)
                         {
-                            command_move(&selection, me, p.pos.x.to_num(), p.pos.y.to_num(), &mut input);
+                            command_march(
+                                &selection, me, p.pos.x.to_num(), p.pos.y.to_num(), shape.0, false,
+                                &mut input,
+                            );
                         }
                     } else if crew.is_empty()
                         && let Some((_, _, p, _)) = q_buildings.iter().find(|(g, ..)| g.0 == target)
                     {
-                        command_move(&selection, me, p.pos.x.to_num(), p.pos.y.to_num(), &mut input);
+                        command_march(
+                            &selection, me, p.pos.x.to_num(), p.pos.y.to_num(), shape.0, false,
+                            &mut input,
+                        );
                     }
                 }
             }
             Some(Picked::Ground(g)) => {
-                command_move(&selection, me, g.x, g.z, &mut input);
+                command_march(&selection, me, g.x, g.z, shape.0, false, &mut input);
                 if let Some(k) = selected_kind(&selection, &q_units) {
                     voice.0.push((k, crate::audio::Bark::Ack));
                 }
@@ -541,7 +598,7 @@ pub fn pointer_input(
             // box select own field units
             let (lo, hi) = (start.min(cursor), start.max(cursor));
             if !additive {
-                selection.units.clear();
+                selection.clear();
             }
             selection.building = None;
             if let Some(f) = field_ref {
@@ -551,7 +608,7 @@ pub fn pointer_input(
                     }
                     if let Ok(sp) = camera.world_to_viewport(cam_tf, unit_world(f, p.pos)) {
                         if sp.x >= lo.x && sp.x <= hi.x && sp.y >= lo.y && sp.y <= hi.y {
-                            selection.units.insert(g.0);
+                            selection.insert(g.0);
                         }
                     }
                 }
@@ -568,7 +625,7 @@ pub fn pointer_input(
                         // select every own unit of the same kind on screen
                         let kind = q_units.iter().find(|(g, ..)| g.0 == id).map(|(_, _, _, u)| u.kind);
                         if let (Some(kind), Some(f)) = (kind, field_ref) {
-                            selection.units.clear();
+                            selection.clear();
                             for (g, o, p, u) in &q_units {
                                 if o.0 != me || u.kind != kind || u.garrisoned_in != 0 {
                                     continue;
@@ -579,25 +636,25 @@ pub fn pointer_input(
                                         && sp.x <= window.width()
                                         && sp.y <= window.height()
                                     {
-                                        selection.units.insert(g.0);
+                                        selection.insert(g.0);
                                     }
                                 }
                             }
                         }
                     } else {
                         if !additive {
-                            selection.units.clear();
+                            selection.clear();
                         }
-                        selection.units.insert(id);
+                        selection.insert(id);
                     }
                 }
                 Some(Picked::Building(id, owner)) if owner == me => {
-                    selection.units.clear();
+                    selection.clear();
                     selection.building = Some(id);
                 }
                 _ => {
                     if !additive {
-                        selection.units.clear();
+                        selection.clear();
                         selection.building = None;
                     }
                 }
@@ -607,37 +664,123 @@ pub fn pointer_input(
     }
 }
 
-fn command_attack(
+/// ONE message per click. Every unit used to get its own `Attack`, so ordering
+/// forty men onto a keep put forty commands on the wire and ran forty pursuit
+/// searches; `GroupAttack` lays one path and shares it. The sim filters out
+/// whoever cannot fight, so the client no longer needs the unit query at all.
+fn command_attack(selection: &Selection, me: u64, target: u64, input: &mut LocalInput) {
+    if selection.is_empty() {
+        return;
+    }
+    input.0.push(PlayerCommand::GroupAttack {
+        player_id: me,
+        units: selection.ids().to_vec(),
+        target,
+    });
+}
+
+fn command_march(
     selection: &Selection,
-    q_units: &Query<(&GameId, &Owner, &Pos, &Unit)>,
     me: u64,
-    target: u64,
+    gx: f32,
+    gz: f32,
+    shape: saladin_sim::FormationShape,
+    attack_move: bool,
     input: &mut LocalInput,
 ) {
-    for &id in &selection.units {
-        if let Some((_, _, _, u)) = q_units.iter().find(|(g, ..)| g.0 == id) {
-            if unit_def(u.kind).attack > 0 {
-                input.0.push(PlayerCommand::Attack { player_id: me, unit: id, target });
-            }
-        }
+    if selection.is_empty() {
+        return;
+    }
+    let units = selection.ids().to_vec();
+    let target = V2::new(Fx::from_num(gx), Fx::from_num(gz));
+    let formation = shape as u8;
+    input.0.push(if attack_move {
+        PlayerCommand::AttackMove { player_id: me, units, target, formation }
+    } else {
+        PlayerCommand::GroupMove { player_id: me, units, target, formation }
+    });
+}
+
+fn command_stop(selection: &Selection, me: u64, input: &mut LocalInput) {
+    if selection.is_empty() {
+        return;
+    }
+    input.0.push(PlayerCommand::Stop { player_id: me, units: selection.ids().to_vec() });
+}
+
+/// Append a waypoint. The first leg goes out at once; the rest wait for the one
+/// in front to finish.
+#[allow(clippy::too_many_arguments)]
+fn queue_leg(
+    selection: &Selection,
+    me: u64,
+    gx: f32,
+    gz: f32,
+    shape: saladin_sim::FormationShape,
+    tick: u64,
+    march: &mut MarchQueue,
+    input: &mut LocalInput,
+) {
+    if selection.is_empty() || march.0.len() >= MAX_MARCH_LEGS {
+        return;
+    }
+    let leg = MarchLeg {
+        units: selection.ids().to_vec(),
+        target: V2::new(Fx::from_num(gx), Fx::from_num(gz)),
+        attack_move: false,
+        issued: tick,
+    };
+    let first = march.0.is_empty();
+    march.0.push_back(leg);
+    if first {
+        command_march(selection, me, gx, gz, shape, false, input);
     }
 }
 
-fn command_move(selection: &Selection, me: u64, gx: f32, gz: f32, input: &mut LocalInput) {
-    let ids: Vec<u64> = {
-        let mut v: Vec<u64> = selection.units.iter().copied().collect();
-        v.sort();
-        v
-    };
-    let offs = formation(ids.len());
-    for (i, id) in ids.iter().enumerate() {
-        let (ox, oz) = offs[i];
-        input.0.push(PlayerCommand::Move {
-            player_id: me,
-            unit: *id,
-            target: V2::new(Fx::from_num(gx + ox), Fx::from_num(gz + oz)),
-        });
+/// Walk the waypoint queue: when everyone on the leg in front has stopped
+/// walking, the next leg goes out. Only the owning client runs this, and the
+/// order it produces rides the wire exactly like a hand-clicked one.
+pub fn advance_march_queue(
+    local: Res<LocalPlayer>,
+    tick: Res<saladin_protocol::Tick>,
+    shape: Res<FormationPick>,
+    mut march: ResMut<MarchQueue>,
+    mut input: ResMut<LocalInput>,
+    q_units: Query<(&GameId, &Owner, &Unit)>,
+) {
+    let Some(front) = march.0.front() else { return };
+    if tick.0 < front.issued + LEG_SETTLE_TICKS {
+        return;
     }
+    let mut alive = 0;
+    let mut walking = 0;
+    for (g, o, u) in &q_units {
+        if o.0 != local.0 || front.units.binary_search(&g.0).is_err() {
+            continue;
+        }
+        alive += 1;
+        if u.has_target {
+            walking += 1;
+        }
+    }
+    if alive > 0 && walking > 0 {
+        return;
+    }
+    march.0.pop_front();
+    let me = local.0;
+    let Some(next) = march.0.front_mut() else { return };
+    next.issued = tick.0;
+    let (units, target, attack) = (next.units.clone(), next.target, next.attack_move);
+    if alive == 0 {
+        march.0.clear();
+        return;
+    }
+    let formation = shape.0 as u8;
+    input.0.push(if attack {
+        PlayerCommand::AttackMove { player_id: me, units, target, formation }
+    } else {
+        PlayerCommand::GroupMove { player_id: me, units, target, formation }
+    });
 }
 
 /// R rotates the placement ghost a quarter turn (build mode, non-wall).
@@ -675,7 +818,7 @@ fn selected_builders(
         })
     };
     let mut ids: Vec<u64> =
-        hands().filter(|(g, ..)| selection.units.contains(&g.0)).map(|(g, ..)| g.0).collect();
+        hands().filter(|(g, ..)| selection.contains(&g.0)).map(|(g, ..)| g.0).collect();
     if !ids.is_empty() {
         ids.sort_unstable();
         ids.truncate(saladin_sim::MAX_BUILDERS as usize);
@@ -737,13 +880,64 @@ fn commit_build(
     }
 }
 
-// ── keyboard: control groups + mode cancel ───────────────────────────────────
+// ── keyboard: orders + control groups ────────────────────────────────────────
 
+/// Every order key, and what it does. Not one keystroke in the game issued an
+/// order before this: the whole command surface was the mouse.
+///
+/// WASD, the arrows, Q and E already pan and rotate the camera, so the usual
+/// A-for-attack-move / S-for-stop bindings would fire an order AND scroll the
+/// map on the same press.
+pub const HOTKEY_HELP: &[(&str, &str)] = &[
+    ("V", "advance (click a spot)"),
+    ("X", "stop"),
+    ("H", "hold ground"),
+    ("F", "defend"),
+    ("G", "aggressive"),
+    ("Shift+RMB", "queue a waypoint"),
+];
+
+pub const ATTACK_MOVE_KEY: KeyCode = KeyCode::KeyV;
+pub const STOP_KEY: KeyCode = KeyCode::KeyX;
+pub const STANCE_KEYS: [(KeyCode, Stance); 3] = [
+    (KeyCode::KeyH, Stance::HoldGround),
+    (KeyCode::KeyF, Stance::Defensive),
+    (KeyCode::KeyG, Stance::Aggressive),
+];
+
+#[allow(clippy::too_many_arguments)]
 pub fn keyboard_input(
     keys: Res<ButtonInput<KeyCode>>,
+    local: Res<LocalPlayer>,
     mut groups: ResMut<ControlGroups>,
     mut selection: ResMut<Selection>,
+    mut mode: ResMut<InputMode>,
+    mut march: ResMut<MarchQueue>,
+    mut input: ResMut<LocalInput>,
+    mut voice: ResMut<crate::audio::VoiceQueue>,
+    q_units: Query<(&GameId, &Owner, &Pos, &Unit)>,
 ) {
+    let me = local.0;
+    if !selection.is_empty() {
+        if keys.just_pressed(ATTACK_MOVE_KEY) && !matches!(*mode, InputMode::Build(_)) {
+            *mode = InputMode::AttackMove;
+        }
+        if keys.just_pressed(STOP_KEY) {
+            march.0.clear();
+            command_stop(&selection, me, &mut input);
+            if let Some(k) = selected_kind(&selection, &q_units) {
+                voice.0.push((k, crate::audio::Bark::Ack));
+            }
+        }
+        for (key, stance) in STANCE_KEYS {
+            if keys.just_pressed(key) {
+                for &unit in selection.iter() {
+                    input.0.push(PlayerCommand::SetStance { player_id: me, unit, stance });
+                }
+            }
+        }
+    }
+
     const DIGITS: [KeyCode; 9] = [
         KeyCode::Digit1,
         KeyCode::Digit2,
@@ -761,10 +955,10 @@ pub fn keyboard_input(
             continue;
         }
         if ctrl {
-            groups.0[i + 1] = selection.units.iter().copied().collect();
+            groups.0[i + 1] = selection.ids().to_vec();
         } else if !groups.0[i + 1].is_empty() {
             selection.building = None;
-            selection.units = groups.0[i + 1].iter().copied().collect();
+            selection.set(groups.0[i + 1].iter().copied());
         }
     }
 }
@@ -825,6 +1019,25 @@ mod tests {
                 assert_eq!(d, 1, "orthogonally connected (seals): {a:?} -> {b:?}");
             }
         }
+    }
+
+    /// An order key that is also a camera key fires the order on every scroll.
+    /// A and S are the RTS-standard attack-move/stop bindings and both pan the
+    /// map here, which is why the orders sit on V and X.
+    #[test]
+    fn no_order_key_is_already_a_camera_key() {
+        let bound: Vec<KeyCode> = [ATTACK_MOVE_KEY, STOP_KEY]
+            .into_iter()
+            .chain(STANCE_KEYS.iter().map(|(k, _)| *k))
+            .collect();
+        for k in &bound {
+            assert!(
+                !crate::camera::CAMERA_KEYS.contains(k),
+                "{k:?} both issues an order and moves the camera"
+            );
+            assert_ne!(*k, KeyCode::KeyR, "R already rotates the build ghost");
+        }
+        assert_eq!(bound.len() + 1, HOTKEY_HELP.len(), "a bound key with no help line");
     }
 
     #[test]

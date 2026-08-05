@@ -9,7 +9,7 @@
 use bevy_app::prelude::*;
 use saladin_protocol::*;
 use saladin_sim::{
-    BuildState, BuildingKind, Faction, Fx, GatherState, ResourceType, Stance, Stockpile, UnitKind,
+    BuildState, BuildingKind, Faction, Fx, Stance, Stockpile, UnitKind,
     V2, ZERO, building_def, compose_seed, is_buildable_tile, unit_def,
 };
 
@@ -69,26 +69,10 @@ fn spawn_unit(app: &mut App, id: u64, owner: u64, kind: UnitKind, pos: V2, stanc
         MatchId(1),
         Pos { pos, facing: ZERO },
         Unit {
-            kind,
-            target: pos,
-            has_target: false,
             speed: def.speed,
-            gather_state: GatherState::Idle,
-            target_node: 0,
-            carrying: 0,
-            carry_type: ResourceType::Wood,
-            harvest_timer: ZERO,
             hp: def.max_hp,
-            attack_target: 0,
-            attack_cooldown: ZERO,
             stance,
-            morale: Fx::ONE,
-            routing: false,
-            home: pos,
-            garrisoned_in: 0,
-            job_site: 0,
-            path: vec![],
-            path_idx: 0,
+            ..Unit::new(kind, pos)
         },
     ));
 }

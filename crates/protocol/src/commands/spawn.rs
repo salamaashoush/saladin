@@ -90,26 +90,11 @@ pub(crate) fn spawn_unit(
         MatchId(match_id),
         Pos { pos, facing: Fx::ZERO },
         Unit {
-            kind,
-            target: pos,
-            has_target: false,
             speed: def.speed,
             gather_state,
             target_node,
-            carrying: 0,
-            carry_type: ResourceType::Wood,
-            harvest_timer: Fx::ZERO,
             hp: def.max_hp,
-            attack_target: 0,
-            attack_cooldown: Fx::ZERO,
-            stance: Stance::Aggressive,
-            morale: MORALE_MAX,
-            routing: false,
-            home: pos,
-            garrisoned_in: 0,
-            job_site: 0,
-            path: vec![],
-            path_idx: 0,
+            ..Unit::new(kind, pos)
         },
     ));
     id
@@ -142,6 +127,7 @@ pub(crate) fn spawn_ai(
             threat_timer: Fx::ZERO,
             wave_launched: 0,
             fishing_blocked: false,
+            famine: false,
         });
     }
 }

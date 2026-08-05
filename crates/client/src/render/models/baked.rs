@@ -205,6 +205,9 @@ fn unit_kind_name(kind: saladin_sim::UnitKind) -> &'static str {
         UnitKind::Ram => "ram",
         UnitKind::Mangonel => "mangonel",
         UnitKind::Imam => "imam",
+        UnitKind::Sergeant => "sergeant",
+        UnitKind::Chaplain => "chaplain",
+        UnitKind::Naffatun => "naffatun",
     }
 }
 

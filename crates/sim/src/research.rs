@@ -3,6 +3,7 @@ use crate::economy::{ResourceCost, Stockpile};
 use crate::enums::{ArmorClass, BuildingKind};
 use crate::math::Fx;
 use crate::tech::has_prereq;
+use crate::enums::UnitRole;
 use crate::units::{UnitDef, unit_def};
 use crate::enums::UnitKind;
 use serde::{Deserialize, Serialize};
@@ -21,15 +22,17 @@ pub enum Tech {
     SharpenedBlades = 3,
     Masonry = 4,
     Conscription = 5,
+    SiegeEngineering = 6,
 }
 
-pub const ALL_TECHS: [Tech; 6] = [
+pub const ALL_TECHS: [Tech; 7] = [
     Tech::ArmorMail,
     Tech::ArmorPlate,
     Tech::FletchedArrows,
     Tech::SharpenedBlades,
     Tech::Masonry,
     Tech::Conscription,
+    Tech::SiegeEngineering,
 ];
 
 impl Tech {
@@ -44,10 +47,15 @@ pub struct UnitDelta {
     pub attack: i32,
     pub max_hp: i32,
     pub range: Fx,
-    pub armor_tier: i32,
+    /// Flat damage soaked per incoming hit. Armour research USED to promote the
+    /// unit's armour CLASS, which emptied the Leather column of DAMAGE_MATRIX
+    /// halfway through every match and handed the one dominant unit a universal
+    /// bonus exactly as the game progressed.
+    pub damage_reduction: i32,
 }
 
-const NO_DELTA: UnitDelta = UnitDelta { attack: 0, max_hp: 0, range: crate::fx!("0"), armor_tier: 0 };
+const NO_DELTA: UnitDelta =
+    UnitDelta { attack: 0, max_hp: 0, range: crate::fx!("0"), damage_reduction: 0 };
 
 #[derive(Clone, Copy, Debug)]
 pub struct BuildingDelta {
@@ -68,23 +76,33 @@ pub struct UpgradeDef {
     pub applies_to_buildings: bool,
 }
 
+// Upgrade eligibility reads the unit's ROLE. The shape-derived predicates it
+// replaces (`attack > 0 && !ranged && range <= 2`) also matched a Battering Ram,
+// which duly received Sharpened Blades and Plate Barding, while the Mangonel
+// matched nothing at all and never got an attack upgrade in its life.
 fn is_combatant(d: &UnitDef) -> bool {
-    d.attack > 0
+    !matches!(d.role, UnitRole::Worker | UnitRole::Support)
 }
 fn is_ranged(d: &UnitDef) -> bool {
-    d.ranged
+    matches!(d.role, UnitRole::Archer | UnitRole::HorseArcher)
 }
 fn is_melee(d: &UnitDef) -> bool {
-    d.attack > 0 && !d.ranged && d.range <= crate::fx!("2")
+    matches!(d.role, UnitRole::Foot | UnitRole::Cavalry)
+}
+fn is_mounted(d: &UnitDef) -> bool {
+    matches!(d.role, UnitRole::Cavalry | UnitRole::HorseArcher)
+}
+fn is_siege(d: &UnitDef) -> bool {
+    d.role == UnitRole::Siege
 }
 fn troops_not_siege(d: &UnitDef) -> bool {
-    is_combatant(d) && !d.prefers_buildings
+    is_combatant(d) && !is_siege(d)
 }
 fn never(_: &UnitDef) -> bool {
     false
 }
 
-const UPGRADE_DEFS: [UpgradeDef; 6] = [
+const UPGRADE_DEFS: [UpgradeDef; 7] = [
     // ArmorMail
     UpgradeDef {
         label: "Mail Armor",
@@ -93,19 +111,19 @@ const UPGRADE_DEFS: [UpgradeDef; 6] = [
         research_time: crate::fx!("30"),
         requires: None,
         applies_to: troops_not_siege,
-        delta: UnitDelta { armor_tier: 1, ..NO_DELTA },
+        delta: UnitDelta { damage_reduction: 2, ..NO_DELTA },
         building_delta: None,
         applies_to_buildings: false,
     },
-    // ArmorPlate
+    // ArmorPlate — barding is horse armour, and it is bought at the Stable.
     UpgradeDef {
         label: "Plate Barding",
         icon: "🛡️",
         cost: ResourceCost::new(40, 30, 0, 60),
         research_time: crate::fx!("45"),
         requires: Some(BuildingKind::Stable),
-        applies_to: is_melee,
-        delta: UnitDelta { max_hp: 25, ..NO_DELTA },
+        applies_to: is_mounted,
+        delta: UnitDelta { max_hp: 25, damage_reduction: 2, ..NO_DELTA },
         building_delta: None,
         applies_to_buildings: false,
     },
@@ -157,6 +175,18 @@ const UPGRADE_DEFS: [UpgradeDef; 6] = [
         building_delta: None,
         applies_to_buildings: false,
     },
+    // SiegeEngineering — the engines were the one role no upgrade could reach.
+    UpgradeDef {
+        label: "Siege Engineering",
+        icon: "🛠️",
+        cost: ResourceCost::new(60, 40, 0, 40),
+        research_time: crate::fx!("40"),
+        requires: Some(BuildingKind::SiegeWorkshop),
+        applies_to: is_siege,
+        delta: UnitDelta { attack: 8, ..NO_DELTA },
+        building_delta: None,
+        applies_to_buildings: false,
+    },
 ];
 
 pub fn upgrade_def(tech: Tech) -> &'static UpgradeDef {
@@ -191,8 +221,6 @@ pub fn effective_unit_def(kind: UnitKind, mask: u64) -> UnitDef {
         return base;
     }
     let mut out = base;
-    let mut tier = base.armor_class as i32;
-    let mut changed = false;
     for tech in techs_in_mask(mask) {
         let up = upgrade_def(tech);
         if !(up.applies_to)(&base) {
@@ -201,13 +229,8 @@ pub fn effective_unit_def(kind: UnitKind, mask: u64) -> UnitDef {
         out.attack += up.delta.attack;
         out.max_hp += up.delta.max_hp;
         out.range += up.delta.range;
-        tier += up.delta.armor_tier;
-        changed = true;
+        out.damage_reduction += up.delta.damage_reduction;
     }
-    if !changed {
-        return base;
-    }
-    out.armor_class = clamp_tier(tier, ArmorClass::Mail);
     out
 }
 
@@ -338,17 +361,64 @@ mod tests {
     #[test]
     fn fletched_arrows_boosts_only_ranged() {
         let m = set_tech(0, Tech::FletchedArrows);
-        assert_eq!(effective_unit_def(UnitKind::Archer, m).attack, 12); // 9 + 3
-        assert_eq!(effective_unit_def(UnitKind::Spearman, m).attack, 12); // unchanged (melee)
+        let base = unit_def(UnitKind::Archer).attack;
+        assert_eq!(effective_unit_def(UnitKind::Archer, m).attack, base + 3);
+        assert_eq!(
+            effective_unit_def(UnitKind::Spearman, m).attack,
+            unit_def(UnitKind::Spearman).attack,
+            "melee gains nothing from fletching"
+        );
     }
 
+    /// Armour research must never move a unit between DAMAGE_MATRIX columns:
+    /// promoting every Leather unit to Mail deleted a whole column of the matrix
+    /// mid-match and handed the anti-mail specialist a universal bonus exactly
+    /// as the game progressed.
     #[test]
-    fn mail_armor_bumps_tier_clamped() {
+    fn mail_armor_soaks_damage_and_leaves_the_column_alone() {
         let m = set_tech(0, Tech::ArmorMail);
-        // Archer Leather(1) -> Mail(2)
-        assert_eq!(effective_unit_def(UnitKind::Archer, m).armor_class, ArmorClass::Mail);
-        // Knight already Mail(2) -> clamp keeps Mail
-        assert_eq!(effective_unit_def(UnitKind::Knight, m).armor_class, ArmorClass::Mail);
+        for &k in UnitKind::ALL {
+            assert_eq!(
+                effective_unit_def(k, m).armor_class,
+                unit_def(k).armor_class,
+                "{k:?} changed armour column"
+            );
+        }
+        assert_eq!(effective_unit_def(UnitKind::Archer, m).damage_reduction, 2);
+        // engines and workers are not issued mail
+        assert_eq!(effective_unit_def(UnitKind::Ram, m).damage_reduction, 0);
+        assert_eq!(effective_unit_def(UnitKind::Peasant, m).damage_reduction, 0);
+    }
+
+    /// The shipped mis-issue: the Ram matched a SHAPE-derived `is_melee`, so a
+    /// battering ram drew Sharpened Blades AND Plate Barding, while the Mangonel
+    /// matched nothing at all and could never be upgraded.
+    #[test]
+    fn every_fighting_kind_gets_an_attack_upgrade_and_no_engine_gets_barding() {
+        let all: u64 = ALL_TECHS.iter().fold(0, |m, t| set_tech(m, *t));
+        for &k in UnitKind::ALL {
+            let base = unit_def(k);
+            if base.attack <= 0 {
+                continue;
+            }
+            assert!(
+                effective_unit_def(k, all).attack > base.attack,
+                "{k:?} can never sharpen anything"
+            );
+        }
+        let barding = upgrade_def(Tech::ArmorPlate);
+        for &k in UnitKind::ALL {
+            let d = unit_def(k);
+            if d.role == crate::enums::UnitRole::Siege {
+                assert!(!(barding.applies_to)(d), "{k:?} was issued horse armour");
+                assert!(
+                    !(upgrade_def(Tech::SharpenedBlades).applies_to)(d),
+                    "{k:?} was issued a whetstone"
+                );
+            }
+        }
+        assert!((barding.applies_to)(unit_def(UnitKind::Knight)));
+        assert!((upgrade_def(Tech::SiegeEngineering).applies_to)(unit_def(UnitKind::Mangonel)));
     }
 
     #[test]
@@ -358,7 +428,10 @@ mod tests {
         assert_eq!(keep.max_hp, 1750); // 1500 + 250
         assert_eq!(keep.armor_class, building_def(BuildingKind::Keep).armor_class);
         // unit unaffected
-        assert_eq!(effective_unit_def(UnitKind::Spearman, m).max_hp, 70);
+        assert_eq!(
+            effective_unit_def(UnitKind::Spearman, m).max_hp,
+            unit_def(UnitKind::Spearman).max_hp
+        );
     }
 
     /// The old `+1 armor tier` was a measured NO-OP on every Stone kind and a

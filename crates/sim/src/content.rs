@@ -365,6 +365,7 @@ const AI_PROFILES: [AiProfile; 3] = [
             Tech::FletchedArrows,
             Tech::ArmorPlate,
             Tech::Conscription,
+            Tech::SiegeEngineering,
             Tech::Masonry,
         ],
     },

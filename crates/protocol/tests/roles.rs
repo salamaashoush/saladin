@@ -10,7 +10,7 @@ use bevy_app::prelude::*;
 use bevy_ecs::prelude::Entity;
 use saladin_protocol::*;
 use saladin_sim::{
-    BuildingKind, Faction, Fx, GatherState, MORALE_MIN, ResourceType, Stance, Stockpile, UnitKind,
+    BuildingKind, Faction, Fx, MORALE_MIN, Stance, Stockpile, UnitKind,
     V2, ZERO, building_def, compose_seed, is_buildable_tile, unit_def,
 };
 
@@ -66,26 +66,12 @@ fn spawn_shaken(app: &mut App, id: u64, owner: u64, pos: V2) {
         MatchId(1),
         Pos { pos, facing: ZERO },
         Unit {
-            kind: UnitKind::Spearman,
-            target: pos,
-            has_target: false,
             speed: def.speed,
-            gather_state: GatherState::Idle,
-            target_node: 0,
-            carrying: 0,
-            carry_type: ResourceType::Wood,
-            harvest_timer: ZERO,
             hp: def.max_hp,
-            attack_target: 0,
-            attack_cooldown: ZERO,
             stance: Stance::Defensive,
             morale: MORALE_MIN,
             routing: true,
-            home: pos,
-            garrisoned_in: 0,
-            job_site: 0,
-            path: vec![],
-            path_idx: 0,
+            ..Unit::new(UnitKind::Spearman, pos)
         },
     ));
 }

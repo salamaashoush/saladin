@@ -103,9 +103,10 @@ impl Default for WorldConfig {
     }
 }
 
-/// Reusable A* scratch so pathfinding never reallocates per unit.
+/// Reusable A* + reachability-flood scratch so pathfinding never reallocates
+/// per unit.
 #[derive(Resource, Default)]
-pub struct PathScratch(pub AStar);
+pub struct PathScratch(pub AStar, pub saladin_sim::Flood);
 
 /// The deterministic state checksum of the most recent tick (desync detection).
 #[derive(Resource, Clone, Copy, Default, Debug)]

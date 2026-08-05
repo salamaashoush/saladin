@@ -1,7 +1,9 @@
 use crate::buildings_defs::building_def;
 use crate::combat::{Attacker, effective_damage};
 use crate::constants::{MARKET_BUY_RATE, MARKET_RATE};
-use crate::enums::{BuildingKind, ResourceType, UnitKind};
+use crate::constants::COMBAT_DT;
+use crate::enums::{BuildingKind, Faction, ResourceType, UnitKind, UnitRole};
+use crate::roster::fields_unit;
 use crate::math::{Fx, V2};
 use crate::units::unit_def;
 use serde::{Deserialize, Serialize};
@@ -13,7 +15,11 @@ use std::collections::HashSet;
 /// a human's commands use. No cheats.
 
 /// A tally of units by `UnitKind` (index == kind).
-pub type Census = [i32; 10];
+pub type Census = [i32; UnitKind::ALL.len()];
+
+/// An empty tally. Written as a const because `[0; 10]` stops compiling the
+/// moment the roster grows — which is exactly what it should do.
+pub const EMPTY_CENSUS: Census = [0; UnitKind::ALL.len()];
 
 pub fn census_total(c: &Census) -> i32 {
     c.iter().map(|n| (*n).max(0)).sum()
@@ -35,6 +41,7 @@ pub enum AiPhase {
 /// The planner's view of one bot, filled from a per-tick scan.
 #[derive(Clone, Debug)]
 pub struct PlannerState {
+    pub faction: Faction,
     pub peasants: i32,
     pub pop: i32,
     pub cap: i32,
@@ -123,16 +130,20 @@ pub fn food_crisis(s: &PlannerState, tune: &PlannerTuning) -> bool {
     s.upkeep > 0 && s.food <= tune.food_floor
 }
 
-/// A trained kind that draws food upkeep (combat units + the Imam).
+/// A trained kind that draws rations. ROLE, not `attack > 0`: the muster roll
+/// must not change the day a peasant is given a knife.
 pub fn eats_food(kind: UnitKind) -> bool {
-    unit_def(kind).attack > 0 || kind == UnitKind::Imam
+    unit_def(kind).draws_rations()
 }
 
-/// Combat units a bot can field, in rough tech order (Peasants/Imams excluded).
-pub const FIELD_UNITS: [UnitKind; 8] = [
+/// Combat units a bot can field, in rough tech order (workers and support
+/// excluded). Faction filters this, it does not shorten it.
+pub const FIELD_UNITS: [UnitKind; 10] = [
     UnitKind::Spearman,
     UnitKind::Archer,
     UnitKind::Crossbowman,
+    UnitKind::Naffatun,
+    UnitKind::Sergeant,
     UnitKind::Knight,
     UnitKind::HorseArcher,
     UnitKind::Mamluk,
@@ -156,7 +167,10 @@ fn trainer_for(kind: UnitKind) -> BuildingKind {
     BuildingKind::Barracks
 }
 
-fn can_train(kind: UnitKind, owned: &HashSet<BuildingKind>) -> bool {
+fn can_train(kind: UnitKind, owned: &HashSet<BuildingKind>, faction: Faction) -> bool {
+    if !fields_unit(kind, faction) {
+        return false;
+    }
     if !owned.contains(&trainer_for(kind)) {
         return false;
     }
@@ -166,31 +180,56 @@ fn can_train(kind: UnitKind, owned: &HashSet<BuildingKind>) -> bool {
     }
 }
 
-/// DPS-weighted score of how well attacker `a` answers the enemy mix, using the
-/// SAME damage matrix the live combat loop uses.
-pub fn counter_score(a: UnitKind, enemy: &Census) -> Fx {
+/// Damage per second `a` lands on the enemy MIX, at the cadence the engine can
+/// actually deliver (`attack_ticks`, not the nominal `attack_rate` — eight kinds
+/// disagreed by up to 20%). With no enemy on the board, its raw output.
+pub fn counter_dps(a: UnitKind, enemy: &Census) -> Fx {
     let adef = unit_def(a);
-    if adef.attack <= 0 || adef.attack_rate <= Fx::ZERO {
+    if adef.attack <= 0 || adef.attack_ticks <= 0 {
         return Fx::ZERO;
     }
+    let cadence = Fx::from_num(adef.attack_ticks) * COMBAT_DT;
     let atk = Attacker {
         attack: Fx::from_num(adef.attack),
         damage_type: adef.damage_type,
         bonus_vs_armor: adef.bonus_vs_armor,
     };
-    let mut score = Fx::ZERO;
+    let mut dmg_sum = Fx::ZERO;
     let mut total = 0;
     for ek in UnitKind::ALL {
         let n = enemy[*ek as usize];
         if n <= 0 {
             continue;
         }
-        let edef = unit_def(*ek);
         total += n;
-        let dmg = effective_damage(&atk, edef.armor_class);
-        score += (Fx::from_num(dmg) / adef.attack_rate) * Fx::from_num(n);
+        dmg_sum += Fx::from_num(effective_damage(&atk, unit_def(*ek).armor_class)) * Fx::from_num(n);
     }
-    if total == 0 { Fx::ZERO } else { score / Fx::from_num(total) }
+    let per_hit = if total == 0 {
+        Fx::from_num(effective_damage(&atk, crate::enums::ArmorClass::Leather))
+    } else {
+        dmg_sum / Fx::from_num(total)
+    };
+    per_hit / cadence
+}
+
+/// Absolute fighting strength of one of `a` against the enemy mix: what it deals
+/// times how long it lives. Scaled down by 100 so a tower's static contribution
+/// stays a readable number.
+pub fn unit_power(a: UnitKind, enemy: &Census) -> Fx {
+    let d = unit_def(a);
+    counter_dps(a, enemy) * Fx::from_num(d.max_hp) / Fx::from_num(100)
+}
+
+/// VALUE of adding one `a` against the enemy mix — strength per resource spent.
+/// The old score was cost-BLIND, so a planner comparing 16 Mamluks with 51
+/// Spearmen preferred the Mamluks on a per-unit reading of the same pile of
+/// wood.
+pub fn counter_score(a: UnitKind, enemy: &Census) -> Fx {
+    let d = unit_def(a);
+    if d.attack <= 0 {
+        return Fx::ZERO;
+    }
+    unit_power(a, enemy) / Fx::from_num(d.resource_cost())
 }
 
 /// Best trainable unit to add next against the enemy mix. Ties break toward the
@@ -198,19 +237,24 @@ pub fn counter_score(a: UnitKind, enemy: &Census) -> Fx {
 pub fn counter_composition(
     enemy: &Census,
     owned: &HashSet<BuildingKind>,
+    faction: Faction,
     wants_siege: bool,
     enemy_has_walls: bool,
 ) -> UnitKind {
-    next_army_kind(enemy, &[0; 10], owned, wants_siege, enemy_has_walls, 1, i32::MAX)
+    next_army_kind(enemy, &EMPTY_CENSUS, owned, faction, wants_siege, enemy_has_walls, 1, i32::MAX)
 }
 
 /// Non-siege trainable counters ranked by score, best first. Ties break toward
 /// FIELD_UNITS order (stable sort over a tech-ordered scan), so deterministic.
-pub fn ranked_counters(enemy: &Census, owned: &HashSet<BuildingKind>) -> Vec<(UnitKind, Fx)> {
+pub fn ranked_counters(
+    enemy: &Census,
+    owned: &HashSet<BuildingKind>,
+    faction: Faction,
+) -> Vec<(UnitKind, Fx)> {
     let mut v: Vec<(UnitKind, Fx)> = FIELD_UNITS
         .iter()
         .copied()
-        .filter(|k| can_train(*k, owned) && !unit_def(*k).prefers_buildings)
+        .filter(|k| can_train(*k, owned, faction) && unit_def(*k).role != UnitRole::Siege)
         .map(|k| (k, counter_score(k, enemy)))
         .collect();
     v.sort_by(|a, b| b.1.cmp(&a.1));
@@ -222,24 +266,28 @@ pub fn ranked_counters(enemy: &Census, owned: &HashSet<BuildingKind>) -> Vec<(Un
 /// Kinds whose gold cost exceeds `gold` are skipped when an affordable
 /// candidate exists — a bot with no gold engine must never deadlock its
 /// training on a cavalry pick it can't pay for.
+#[allow(clippy::too_many_arguments)]
 pub fn next_army_kind(
     enemy: &Census,
     own: &Census,
     owned: &HashSet<BuildingKind>,
+    faction: Faction,
     wants_siege: bool,
     enemy_has_walls: bool,
     mix_size: i32,
     gold: i32,
 ) -> UnitKind {
     if enemy_has_walls && wants_siege {
-        if can_train(UnitKind::Mangonel, owned) && unit_def(UnitKind::Mangonel).cost.gold <= gold {
+        if can_train(UnitKind::Mangonel, owned, faction)
+            && unit_def(UnitKind::Mangonel).cost.gold <= gold
+        {
             return UnitKind::Mangonel;
         }
-        if can_train(UnitKind::Ram, owned) {
+        if can_train(UnitKind::Ram, owned, faction) {
             return UnitKind::Ram;
         }
     }
-    let ranked = ranked_counters(enemy, owned);
+    let ranked = ranked_counters(enemy, owned, faction);
     if ranked.is_empty() {
         return UnitKind::Spearman;
     }
@@ -341,8 +389,9 @@ pub fn next_trade(s: &PlannerState, tune: &PlannerTuning) -> Option<TradeDecisio
     None
 }
 
-/// Power a defensive tower adds to the defender side of the assault gate.
-pub const TOWER_POWER: Fx = crate::fx!("12");
+/// Power a defensive tower adds to the defender side of the assault gate, in the
+/// same units as `unit_power` (roughly one line infantryman).
+pub const TOWER_POWER: Fx = crate::fx!("7");
 
 /// HP-weighted counter-DPS of `mine` against `vs` — the strength estimate both
 /// sides of the assault go/no-go use. Durable units count for more than glass.
@@ -353,12 +402,7 @@ pub fn army_power(mine: &Census, vs: &Census) -> Fx {
         if n <= 0 {
             continue;
         }
-        let dps = counter_score(*k, vs);
-        if dps <= Fx::ZERO {
-            continue;
-        }
-        let durability = Fx::from_num(unit_def(*k).max_hp + 100) / Fx::from_num(200);
-        total += dps * durability * Fx::from_num(n);
+        total += unit_power(*k, vs) * Fx::from_num(n);
     }
     total
 }
@@ -491,6 +535,7 @@ pub fn next_build(s: &PlannerState, tune: &PlannerTuning) -> Option<BuildDecisio
             &s.enemy,
             &s.army_composition,
             &s.owned,
+            s.faction,
             tune.wants_siege,
             s.enemy_has_walls,
             tune.mix_size,
@@ -612,15 +657,16 @@ pub fn next_build(s: &PlannerState, tune: &PlannerTuning) -> Option<BuildDecisio
 
     // 5) Imam support once an army forms — which needs the mosque that trains
     // them and steadies the ground they hold.
+    let preacher = if s.faction == Faction::Crusader { UnitKind::Chaplain } else { UnitKind::Imam };
     if tune.imam_target > 0
         && s.soldiers >= 2
-        && count_own_kind(&s.army_composition, UnitKind::Imam) < tune.imam_target
+        && count_own_kind(&s.army_composition, preacher) < tune.imam_target
     {
         if need(BuildingKind::Mosque) {
             return Some(build(BuildingKind::Mosque));
         }
         if has(BuildingKind::Mosque) {
-            return Some(train(UnitKind::Imam, BuildingKind::Mosque));
+            return Some(train(preacher, BuildingKind::Mosque));
         }
     }
 
@@ -630,9 +676,9 @@ pub fn next_build(s: &PlannerState, tune: &PlannerTuning) -> Option<BuildDecisio
         && s.sieges < tune.siege_target
         && (s.soldiers >= 2 || s.enemy_has_walls)
     {
-        let siege = if s.enemy_has_walls && can_train(UnitKind::Mangonel, &s.owned) {
+        let siege = if s.enemy_has_walls && can_train(UnitKind::Mangonel, &s.owned, s.faction) {
             UnitKind::Mangonel
-        } else if can_train(UnitKind::Ram, &s.owned) {
+        } else if can_train(UnitKind::Ram, &s.owned, s.faction) {
             UnitKind::Ram
         } else {
             UnitKind::Mangonel
@@ -793,6 +839,7 @@ mod tests {
 
     fn state(owned: HashSet<BuildingKind>) -> PlannerState {
         PlannerState {
+            faction: Faction::Ayyubid,
             peasants: 10,
             pop: 10,
             cap: 20,
@@ -802,11 +849,11 @@ mod tests {
             gold: 100,
             upkeep: 0,
             soldiers: 0,
-            army_composition: [0; 10],
+            army_composition: EMPTY_CENSUS,
             sieges: 0,
             towers: 0,
             owned,
-            enemy: [0; 10],
+            enemy: EMPTY_CENSUS,
             enemy_has_walls: false,
             threat_near_home: 0,
             shore_near: false,
@@ -858,9 +905,9 @@ mod tests {
     fn counters_archers_with_cavalry_when_available() {
         let mut owned = barracks_only();
         owned.insert(BuildingKind::Stable);
-        let mut enemy: Census = [0; 10];
+        let mut enemy: Census = EMPTY_CENSUS;
         enemy[UnitKind::Archer as usize] = 5;
-        let pick = counter_composition(&enemy, &owned, false, false);
+        let pick = counter_composition(&enemy, &owned, Faction::Ayyubid, false, false);
         // a fast slasher (Knight/Mamluk) should out-DPS infantry vs leather archers
         assert!(matches!(pick, UnitKind::Knight | UnitKind::Mamluk | UnitKind::Spearman));
     }
@@ -870,8 +917,8 @@ mod tests {
         let mut owned = barracks_only();
         owned.insert(BuildingKind::Blacksmith);
         owned.insert(BuildingKind::SiegeWorkshop);
-        let enemy: Census = [0; 10];
-        let pick = counter_composition(&enemy, &owned, true, true);
+        let enemy: Census = EMPTY_CENSUS;
+        let pick = counter_composition(&enemy, &owned, Faction::Ayyubid, true, true);
         assert!(matches!(pick, UnitKind::Mangonel | UnitKind::Ram));
     }
 
@@ -904,14 +951,14 @@ mod tests {
     fn mix_spreads_across_top_counters() {
         let mut owned = barracks_only();
         owned.insert(BuildingKind::Stable);
-        let mut enemy: Census = [0; 10];
+        let mut enemy: Census = EMPTY_CENSUS;
         enemy[UnitKind::Spearman as usize] = 6;
         enemy[UnitKind::Archer as usize] = 6;
         // train up an army one pick at a time; with mix_size 3 the result must
         // not be a monoculture
-        let mut own: Census = [0; 10];
+        let mut own: Census = EMPTY_CENSUS;
         for _ in 0..12 {
-            let k = next_army_kind(&enemy, &own, &owned, false, false, 3, i32::MAX);
+            let k = next_army_kind(&enemy, &own, &owned, Faction::Ayyubid, false, false, 3, i32::MAX);
             own[k as usize] += 1;
         }
         let kinds_used = own.iter().filter(|n| **n > 0).count();
@@ -922,10 +969,10 @@ mod tests {
     fn broke_bot_never_picks_a_gold_unit() {
         let mut owned = barracks_only();
         owned.insert(BuildingKind::Stable);
-        let mut enemy: Census = [0; 10];
+        let mut enemy: Census = EMPTY_CENSUS;
         enemy[UnitKind::Archer as usize] = 8;
         for _ in 0..8 {
-            let k = next_army_kind(&enemy, &[0; 10], &owned, false, false, 3, 0);
+            let k = next_army_kind(&enemy, &EMPTY_CENSUS, &owned, Faction::Ayyubid, false, false, 3, 0);
             assert_eq!(unit_def(k).cost.gold, 0, "picked unaffordable {k:?} with 0 gold");
         }
     }
@@ -981,8 +1028,8 @@ mod tests {
 
     #[test]
     fn assault_gate_demands_an_edge_and_retreat_triggers() {
-        let mut mine: Census = [0; 10];
-        let mut enemy: Census = [0; 10];
+        let mut mine: Census = EMPTY_CENSUS;
+        let mut enemy: Census = EMPTY_CENSUS;
         mine[UnitKind::Spearman as usize] = 4;
         enemy[UnitKind::Spearman as usize] = 12;
         assert!(!should_assault(&mine, &enemy, 0, 10), "4 v 12 must not launch");

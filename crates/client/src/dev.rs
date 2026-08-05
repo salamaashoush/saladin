@@ -108,7 +108,8 @@ pub fn setup(app: &mut App) {
             app.add_systems(Update, auto_screenshot);
         }
         Ok("research") | Ok("market") | Ok("keep") | Ok("hut") | Ok("granary") | Ok("store")
-        | Ok("mosque") | Ok("tower") | Ok("house") | Ok("site") => {
+        | Ok("mosque") | Ok("tower") | Ok("house") | Ok("site") | Ok("barracks")
+        | Ok("stable") => {
             // conjure + select a building so the screenshot shows its panel
             // (research on the blacksmith / trade on the market)
             app.insert_state(GameState::Playing);
@@ -128,6 +129,15 @@ pub fn setup(app: &mut App) {
             // conjure one of every unit kind beside the keep (model verification)
             app.insert_state(GameState::Playing);
             app.add_systems(Update, (auto_screenshot, auto_spawn_units));
+        }
+        Ok("battle") => {
+            // conjure two armies facing each other and let them fight — what an
+            // engagement actually LOOKS like, without playing to first contact
+            app.insert_state(GameState::Playing);
+            app.add_systems(Update, (auto_screenshot, auto_battle));
+            if std::env::var("SALADIN_SELECT").is_ok() {
+                app.add_systems(Update, auto_select_units);
+            }
         }
         Ok("lobby") => {
             let bind = format!("0.0.0.0:{HOST_PORT}");
@@ -395,7 +405,7 @@ fn keep_pos(world: &mut World, owner: u64) -> Option<saladin_sim::V2> {
 }
 
 fn spawn_dev_unit(world: &mut World, owner: u64, kind: saladin_sim::UnitKind, kp: saladin_sim::V2, i: i32) {
-    use saladin_sim::{GatherState, Stance, unit_def};
+    use saladin_sim::{Stance, unit_def};
     let def = unit_def(kind);
     let pos = saladin_sim::V2::new(
         kp.x + saladin_sim::Fx::from_num(3 + i % 6),
@@ -408,26 +418,10 @@ fn spawn_dev_unit(world: &mut World, owner: u64, kind: saladin_sim::UnitKind, kp
         MatchId(1),
         Pos { pos, facing: saladin_sim::Fx::ZERO },
         Unit {
-            kind,
-            target: pos,
-            has_target: false,
             speed: def.speed,
-            gather_state: GatherState::Idle,
-            target_node: 0,
-            carrying: 0,
-            carry_type: saladin_sim::ResourceType::Wood,
-            harvest_timer: saladin_sim::Fx::ZERO,
             hp: def.max_hp,
-            attack_target: 0,
-            attack_cooldown: saladin_sim::Fx::ZERO,
             stance: Stance::Defensive,
-            morale: saladin_sim::MORALE_MAX,
-            routing: false,
-            home: pos,
-            garrisoned_in: 0,
-            job_site: 0,
-            path: vec![],
-            path_idx: 0,
+            ..Unit::new(kind, pos)
         },
     ));
 }
@@ -768,26 +762,12 @@ pub fn auto_spawn_units(world: &mut World, mut stage: Local<u8>) {
             MatchId(1),
             Pos { pos, facing: saladin_sim::Fx::ZERO },
             Unit {
-                kind,
                 target,
                 has_target: walking,
                 speed: def.speed,
-                gather_state: GatherState::Idle,
-                target_node: 0,
-                carrying: 0,
-                carry_type: saladin_sim::ResourceType::Wood,
-                harvest_timer: saladin_sim::Fx::ZERO,
                 hp: def.max_hp,
-                attack_target: 0,
-                attack_cooldown: saladin_sim::Fx::ZERO,
                 stance: Stance::Defensive,
-                morale: saladin_sim::MORALE_MAX,
-                routing: false,
-                home: pos,
-                garrisoned_in: 0,
-                job_site: 0,
-                path: vec![],
-                path_idx: 0,
+                ..Unit::new(kind, pos)
             },
         ));
     }
@@ -798,6 +778,108 @@ pub fn auto_spawn_units(world: &mut World, mut stage: Local<u8>) {
 pub fn arm_farm_mode(mut mode: ResMut<crate::input::InputMode>) {
     if !matches!(*mode, crate::input::InputMode::Build(saladin_sim::BuildingKind::Farm)) {
         *mode = crate::input::InputMode::Build(saladin_sim::BuildingKind::Farm);
+    }
+}
+
+/// Screenshot harness only: two armies, twelve tiles apart, Aggressive, left to
+/// resolve. `SALADIN_SHOT_AT` picks the moment (contact lands around t=7).
+pub fn auto_battle(world: &mut World, mut done: Local<bool>) {
+    use saladin_protocol::{MatchId, NextEntityId, Owner, Pos, Unit};
+    use saladin_sim::{Fx, UnitKind, V2, unit_def};
+    if *done || world.resource::<Time>().elapsed_secs() < 3.0 {
+        return;
+    }
+    *done = true;
+    let Some(kp) = keep_pos(world, 1) else { return };
+    {
+        let exists = {
+            let mut q = world.query::<&saladin_protocol::Player>();
+            q.iter(world).any(|p| p.player_id == 2)
+        };
+        if !exists {
+            let id = world.resource_mut::<NextEntityId>().alloc();
+            world.spawn((
+                GameId(id),
+                MatchId(1),
+                saladin_protocol::Player {
+                    player_id: 2,
+                    name: "Foe".into(),
+                    faction: saladin_sim::Faction::Crusader,
+                    stock: saladin_sim::Stockpile::default(),
+                    color: 1,
+                    online: true,
+                    keep: 0,
+                    defeated: false,
+                    slot: 1,
+                    tech_mask: 0,
+                    hunger: 0,
+                },
+            ));
+        }
+    }
+    let mine = [
+        UnitKind::Spearman,
+        UnitKind::Spearman,
+        UnitKind::Spearman,
+        UnitKind::Archer,
+        UnitKind::Archer,
+        UnitKind::Mamluk,
+    ];
+    let theirs = [
+        UnitKind::Spearman,
+        UnitKind::Spearman,
+        UnitKind::Crossbowman,
+        UnitKind::Crossbowman,
+        UnitKind::Knight,
+        UnitKind::Knight,
+    ];
+    let place = |world: &mut World, owner: u64, kind: UnitKind, x: Fx, y: Fx| {
+        let def = unit_def(kind);
+        let pos = V2::new(x, y);
+        let id = world.resource_mut::<NextEntityId>().alloc();
+        world.spawn((
+            GameId(id),
+            Owner(owner),
+            MatchId(1),
+            Pos { pos, facing: Fx::ZERO },
+            Unit {
+                speed: def.speed,
+                hp: def.max_hp,
+                ..Unit::new(kind, pos)
+            },
+        ));
+    };
+    for row in 0..4 {
+        for (i, k) in mine.iter().enumerate() {
+            let x = kp.x + Fx::from_num(4 + i as i32);
+            let y = kp.y + Fx::from_num(4 + row);
+            place(world, 1, *k, x, y);
+        }
+        for (i, k) in theirs.iter().enumerate() {
+            let x = kp.x + Fx::from_num(4 + i as i32);
+            let y = kp.y + Fx::from_num(11 + row);
+            place(world, 2, *k, x, y);
+        }
+    }
+}
+
+/// Screenshot harness only: select every own field soldier, so a shot captures
+/// the unit command card (stances, orders, marching order, rations) instead of
+/// the no-selection help text.
+pub fn auto_select_units(
+    local: Res<LocalPlayer>,
+    mut sel: ResMut<selection::Selection>,
+    q: Query<(&GameId, &Owner, &saladin_protocol::Unit)>,
+) {
+    let want: Vec<u64> = q
+        .iter()
+        .filter(|(_, o, u)| {
+            o.0 == local.0 && u.garrisoned_in == 0 && saladin_sim::unit_def(u.kind).attack > 0
+        })
+        .map(|(g, ..)| g.0)
+        .collect();
+    if want.len() != sel.len() {
+        sel.set(want);
     }
 }
 
@@ -818,6 +900,8 @@ pub fn auto_select_building(world: &mut World) {
         Ok("tower") => BuildingKind::Tower,
         Ok("house") => BuildingKind::House,
         Ok("site") => BuildingKind::Barracks,
+        Ok("barracks") => BuildingKind::Barracks,
+        Ok("stable") => BuildingKind::Stable,
         _ => BuildingKind::Blacksmith,
     };
     let as_site = mode.as_deref() == Ok("site");

@@ -11,15 +11,16 @@ use super::assets::UiAssets;
 use super::theme::*;
 use super::widgets::*;
 use crate::input::{InputMode, PlaceHint};
-use crate::selection::{SelectedBuilding, SelectionInfo};
+use crate::selection::{FormationPick, SelectedBuilding, SelectionInfo};
 use crate::{LocalPlayer, UiFont};
 use bevy::prelude::*;
 use bevy::ui::{ComputedNode, UiGlobalTransform};
 use saladin_sim::{
-    AuraTarget, BUILD_CATEGORIES, BuildState, BuildStatus, BuildingDef, BuildingKind, Fx,
-    ResearchProgressRow, ResearchStatus, ResourceCost, ResourceType, Stance, accepts, building_def,
-    build_panel_state, can_host_garrison, cancel_refund, demolish_refund, food_low,
-    place_error_text, research_panel_state, techs_in_mask, unit_def, upgrade_def,
+    AuraTarget, BUILD_CATEGORIES, BuildState, BuildStatus, BuildingDef, BuildingKind, FULL_RATION,
+    FormationShape, Fx, ResearchProgressRow, ResearchStatus, ResourceCost, ResourceType,
+    Stance, UnitRole, accepts, building_def, build_panel_state, can_host_garrison, cancel_refund,
+    demolish_refund, draws_rations, hall_label, place_error_text, research_panel_state, roster_for,
+    techs_in_mask, unit_def, upgrade_def,
 };
 use saladin_protocol::{Building, Owner, Player, Research, Unit};
 use std::collections::HashSet;
@@ -186,6 +187,46 @@ fn my_player<'a>(players: &'a Query<&Player>, me: u64) -> Option<&'a Player> {
     players.iter().find(|p| p.player_id == me)
 }
 
+/// What the army is actually eating, straight off the sim's own `Unit.ration`.
+/// The old readout said STARVING or nothing, because the old rule was
+/// all-or-nothing; rationing is proportional now, so the bar reports the share
+/// that is being issued and how many men are on short commons.
+pub struct SupplyReadout {
+    pub eaters: i32,
+    pub short: i32,
+    /// Worst ration in the army, as a percentage.
+    pub worst: i32,
+}
+
+impl SupplyReadout {
+    pub fn line(&self, food: i32) -> (String, bool) {
+        match (self.short, self.worst) {
+            (0, _) => (format!("{food}"), false),
+            (n, 0) => (format!("{food}  NO RATIONS  {n} men"), true),
+            (n, w) => (format!("{food}  RATIONS {w}%  {n} men"), true),
+        }
+    }
+}
+
+pub fn supply_readout(rations: impl Iterator<Item = (saladin_sim::UnitKind, Fx)>) -> SupplyReadout {
+    let (mut eaters, mut short, mut worst) = (0, 0, FULL_RATION);
+    for (kind, r) in rations {
+        if !draws_rations(kind) {
+            continue;
+        }
+        eaters += 1;
+        if r < FULL_RATION {
+            short += 1;
+            worst = worst.min(r);
+        }
+    }
+    SupplyReadout {
+        eaters,
+        short,
+        worst: (worst.to_num::<f32>() * 100.0).clamp(0.0, 100.0) as i32,
+    }
+}
+
 /// Refresh the top bar texts in place.
 pub fn update_resource_bar(
     local: Res<LocalPlayer>,
@@ -204,7 +245,8 @@ pub fn update_resource_bar(
         if u.kind == saladin_sim::UnitKind::Peasant {
             peasants += 1;
         }
-        if unit_def(u.kind).attack > 0 {
+        // an Imam is in the army even though he never swings: role, not attack
+        if unit_def(u.kind).role != UnitRole::Worker {
             soldiers += 1;
         }
     }
@@ -214,17 +256,16 @@ pub fn update_resource_bar(
         .filter(|(o, b)| o.0 == local.0 && saladin_sim::operational(b.state))
         .map(|(_, b)| building_def(b.kind).pop)
         .sum();
-    let starving = food_low(p.stock.food, pop);
+    let supply =
+        supply_readout(q_units.iter().filter(|(o, _)| o.0 == local.0).map(|(_, u)| (u.kind, u.ration)));
+    let (food_line, short) = supply.line(p.stock.food);
 
     for (slot, mut text, mut color) in &mut q_text {
         let (s, c) = match slot.0 {
             0 => (format!("{}  ({:?})", p.name, p.faction), ACCENT),
             1 => (format!("{}", p.stock.wood), TEXT),
             2 => (format!("{}", p.stock.stone), TEXT),
-            3 => (
-                format!("{}{}", p.stock.food, if starving { "  STARVING" } else { "" }),
-                if starving { WARN } else { TEXT },
-            ),
+            3 => (food_line.clone(), if short { WARN } else { TEXT }),
             4 => (format!("{}", p.stock.gold), GOLD),
             5 => (format!("Peasants {peasants}"), TEXT),
             6 => (format!("Army {soldiers}"), TEXT),
@@ -248,6 +289,7 @@ pub fn update_bottom_bar(
     sel_building: Res<SelectedBuilding>,
     tab: Res<BuildTab>,
     mode: Res<InputMode>,
+    shape: Res<FormationPick>,
     mut digest: ResMut<HudDigest>,
     q_players: Query<&Player>,
     q_buildings: Query<(&Owner, &Building)>,
@@ -278,7 +320,7 @@ pub fn update_bottom_bar(
 
     let sb = &*sel_building;
     let key = format!(
-        "{:?}|{:?}|{}|{}|{:?}|{:?}|{:?}|{:?}|{:?}|{}|{:.2}|{:.2}|{}|{}/{}|{:?}|{:.2}|{}|{:?}|{:.2}|{}|{:?}",
+        "{:?}|{:?}|{}|{}|{:?}|{:?}|{:?}|{:?}|{:?}|{}|{:.2}|{:.2}|{}|{}/{}|{:?}|{:.2}|{}|{:?}|{:.2}|{}|{:?}|{:?}|{}|{}|{:?}",
         p.stock,
         info.by_kind,
         info.total,
@@ -301,6 +343,10 @@ pub fn update_bottom_bar(
         sb.train_progress,
         sb.rally.is_some(),
         sb.upgrade.map(|(k, _)| k),
+        shape.0,
+        info.short,
+        (info.worst_ration * 100.0) as i32,
+        p.faction,
     );
     if digest.0 == key {
         return;
@@ -312,7 +358,7 @@ pub fn update_bottom_bar(
     commands.entity(left).despawn_related::<Children>();
     commands.entity(center).despawn_related::<Children>();
 
-    build_command_card(&mut commands, left, &font, &assets, &info, sb, p);
+    build_command_card(&mut commands, left, &font, &assets, &info, sb, p, shape.0, *mode);
     build_build_bar(
         &mut commands, center, &font, &assets, p, &owned, &counts, &rows, sb, tab.0, *mode,
     );
@@ -355,8 +401,11 @@ fn role_lines(def: &BuildingDef, sel: &SelectedBuilding) -> Vec<String> {
         .collect();
         out.push(format!("Drops off {}", names.join(" ")));
     }
+    // the roster a hall offers is the faction's, not the table's: an Ayyubid
+    // Stable must not advertise a Knight it can never train
     if !def.trains.is_empty() {
-        let names: Vec<&str> = def.trains.iter().map(|k| unit_def(*k).label).collect();
+        let roster = roster_for(sel.kind, sel.faction);
+        let names: Vec<&str> = roster.iter().map(|k| unit_def(*k).label).collect();
         out.push(format!("Trains {}", names.join(", ")));
     }
     if let Some(a) = def.aura {
@@ -394,6 +443,16 @@ fn role_lines(def: &BuildingDef, sel: &SelectedBuilding) -> Vec<String> {
     out
 }
 
+/// Marching order names. ASCII only and short enough for a 40px chip — the
+/// embedded font has no other glyphs and the atlas pre-warm is ASCII-only.
+pub const FORMATION_NAMES: [(FormationShape, &str); 4] = [
+    (FormationShape::Line, "Line"),
+    (FormationShape::Column, "Col"),
+    (FormationShape::Wedge, "Wedge"),
+    (FormationShape::Box, "Box"),
+];
+
+#[allow(clippy::too_many_arguments)]
 fn build_command_card(
     commands: &mut Commands,
     left: Entity,
@@ -402,6 +461,8 @@ fn build_command_card(
     info: &SelectionInfo,
     sel_building: &SelectedBuilding,
     p: &Player,
+    shape: FormationShape,
+    mode: InputMode,
 ) {
     commands.entity(left).with_children(|c| {
       c.spawn((Node {
@@ -430,10 +491,10 @@ fn build_command_card(
             if info.has_combat {
                 c.spawn((Node { flex_direction: FlexDirection::Row, column_gap: Val::Px(2.0), ..default() },))
                     .with_children(|c| {
-                        for (stance, name) in [
-                            (Stance::Aggressive, "Attack"),
-                            (Stance::Defensive, "Defend"),
-                            (Stance::HoldGround, "Hold"),
+                        for (stance, name, key) in [
+                            (Stance::Aggressive, "Attack", "G"),
+                            (Stance::Defensive, "Defend", "F"),
+                            (Stance::HoldGround, "Hold", "H"),
                         ] {
                             tool_button(
                                 c,
@@ -441,11 +502,71 @@ fn build_command_card(
                                 assets,
                                 UiAction::Stance(stance),
                                 name,
-                                None,
+                                Some(key.to_string()),
                                 BtnStyle { min_width: 40.0, icon: assets.stance_icon(stance), ..default() },
                             );
                         }
                     });
+                line(c, "Orders", 12.0, TEXT_DIM);
+                c.spawn((Node { flex_direction: FlexDirection::Row, column_gap: Val::Px(2.0), ..default() },))
+                    .with_children(|c| {
+                        tool_button(
+                            c,
+                            font,
+                            assets,
+                            UiAction::ArmAttackMove,
+                            "Adv",
+                            Some("V".into()),
+                            BtnStyle {
+                                min_width: 40.0,
+                                active: mode == InputMode::AttackMove,
+                                tint: TINT_RED,
+                                ..default()
+                            },
+                        );
+                        tool_button(
+                            c,
+                            font,
+                            assets,
+                            UiAction::StopSelected,
+                            "Stop",
+                            Some("X".into()),
+                            BtnStyle { min_width: 40.0, ..default() },
+                        );
+                    });
+                line(c, "March", 12.0, TEXT_DIM);
+                // four chips at the standard 64px width overflow the 218px card
+                // and the last one is clipped off the panel
+                c.spawn((Node {
+                    flex_direction: FlexDirection::Row,
+                    flex_wrap: FlexWrap::Wrap,
+                    width: Val::Px(CARD_TEXT_W),
+                    column_gap: Val::Px(2.0),
+                    row_gap: Val::Px(2.0),
+                    ..default()
+                },))
+                    .with_children(|c| {
+                        for (s, name) in FORMATION_NAMES {
+                            tool_button(
+                                c,
+                                font,
+                                assets,
+                                UiAction::Formation(s),
+                                name,
+                                None,
+                                BtnStyle {
+                                    min_width: 50.0,
+                                    min_height: 28.0,
+                                    active: s == shape,
+                                    ..default()
+                                },
+                            );
+                        }
+                    });
+            }
+            if info.short > 0 {
+                let pct = (info.worst_ration * 100.0) as i32;
+                line(c, &format!("On {pct}% rations   {} men", info.short), 12.0, WARN);
             }
             line(c, "Health", 12.0, TEXT_DIM);
             ratio_bar(c, assets, CARD_TEXT_W, info.avg_hp, hp_color(info.avg_hp));
@@ -460,6 +581,9 @@ fn build_command_card(
             line(c, "No selection", FONT_SM, TEXT_DIM);
             line(c, "Drag to select units.", 12.0, TEXT_DIM);
             line(c, "Right-click to order.", 12.0, TEXT_DIM);
+            for (key, what) in crate::input::HOTKEY_HELP {
+                line(c, &format!("{key}  {what}"), 11.0, TEXT_DIM);
+            }
         }
       });
     });
@@ -476,12 +600,12 @@ fn building_panel(
     let line = |c: &mut ChildSpawnerCommands, t: &str, size: f32, col: Color| {
         wrap_label(c, font, t, size, col, CARD_TEXT_W);
     };
-    line(c, def.label, FONT_MD, ACCENT);
+    line(c, hall_label(sel.kind, sel.faction), FONT_MD, ACCENT);
     line(c, def.blurb, 11.0, TEXT_DIM);
     match sel.state {
         BuildState::Site => line(c, "Under construction", FONT_SM, GOLD),
         BuildState::Upgrading => {
-            line(c, &format!("Becoming {}", building_def(sel.target_kind).label), FONT_SM, GOLD)
+            line(c, &format!("Becoming {}", hall_label(sel.target_kind, sel.faction)), FONT_SM, GOLD)
         }
         BuildState::Complete if sel.damaged() => line(c, "Damaged", FONT_SM, WARN),
         BuildState::Complete => {}
@@ -553,7 +677,7 @@ fn build_build_bar(
             let bdef = building_def(sel_building.kind);
             let live = saladin_sim::operational(sel_building.state);
             if !bdef.trains.is_empty() {
-                production_group(c, font, assets, bdef, sel_building, &stock, owned, live);
+                production_group(c, font, assets, sel_building, &stock, owned, live);
             }
             orders_group(c, font, assets, bdef, sel_building, &stock);
             // trade group on the market: sell goods for gold, buy them back
@@ -599,7 +723,7 @@ fn build_build_bar(
             // research panel wherever research is hosted
             if bdef.hosts_research && live {
                 let states = research_panel_state(p.tech_mask, rows, &stock, owned);
-                group(c, font, "Research", |c, font| {
+                group_wrapping(c, font, "Research", |c, font| {
                     for r in states {
                         let (sub, disabled) = match r.status {
                             ResearchStatus::Done => (Some("Done".to_string()), true),
@@ -672,7 +796,7 @@ fn build_build_bar(
                                     font,
                                     assets,
                                     UiAction::Build(r.kind),
-                                    r.label,
+                                    hall_label(r.kind, p.faction),
                                     Some(price_line(&r.cost, r.build_time)),
                                     BtnStyle {
                                         active,
@@ -737,15 +861,17 @@ fn production_group(
     c: &mut ChildSpawnerCommands,
     font: &UiFont,
     assets: &UiAssets,
-    bdef: &BuildingDef,
     sel: &SelectedBuilding,
     stock: &saladin_sim::Stockpile,
     owned: &HashSet<BuildingKind>,
     live: bool,
 ) {
     let full = sel.queue.len() >= saladin_sim::QUEUE_CAP;
+    // faction exclusivity is a FILTER over one shared table, and the card is
+    // where a player learns it: an Ayyubid Stable offers Mamluks, never Knights
+    let roster = roster_for(sel.kind, sel.faction);
     group(c, font, "Train", |c, font| {
-        for &kind in bdef.trains {
+        for &kind in &roster {
             let u = unit_def(kind);
             let missing = u.requires.filter(|r| !owned.contains(r));
             let note = match (live, missing, full) {
@@ -883,11 +1009,34 @@ fn group(
     title: &str,
     body: impl FnOnce(&mut ChildSpawnerCommands, &UiFont),
 ) {
+    group_inner(c, font, title, false, body);
+}
+
+/// A card group whose row wraps rather than running off the bar, which clips.
+/// Opt-in: a wrapping row is line-broken against available width, not against
+/// its own content, so a three-card row breaks after two even with the bar
+/// half empty. Only the research shelf is long enough to need it.
+fn group_wrapping(
+    c: &mut ChildSpawnerCommands,
+    font: &UiFont,
+    title: &str,
+    body: impl FnOnce(&mut ChildSpawnerCommands, &UiFont),
+) {
+    group_inner(c, font, title, true, body);
+}
+
+fn group_inner(
+    c: &mut ChildSpawnerCommands,
+    font: &UiFont,
+    title: &str,
+    wrap: bool,
+    body: impl FnOnce(&mut ChildSpawnerCommands, &UiFont),
+) {
     c.spawn((Node {
         flex_direction: FlexDirection::Column,
         row_gap: Val::Px(6.0),
         flex_grow: 0.0,
-        flex_shrink: 0.0,
+        flex_shrink: if wrap { 1.0 } else { 0.0 },
         ..default()
     },))
         .with_children(|c| {
@@ -895,7 +1044,9 @@ fn group(
             c.spawn((Node {
                 flex_direction: FlexDirection::Row,
                 align_items: AlignItems::Stretch,
+                flex_wrap: if wrap { FlexWrap::Wrap } else { FlexWrap::NoWrap },
                 column_gap: Val::Px(4.0),
+                row_gap: Val::Px(4.0),
                 ..default()
             },))
                 .with_children(|c| body(c, font));
@@ -919,6 +1070,9 @@ fn mode_hint_text(mode: InputMode, refused: Option<saladin_sim::PlaceError>) -> 
         }
         (InputMode::Build(_), None) => "R rotates the building  -  Esc cancels".into(),
         (InputMode::Demolish, _) => "Click your buildings to demolish  -  Esc cancels".into(),
+        (InputMode::AttackMove, _) => {
+            "Click where to advance - they fight what they meet  -  Esc cancels".into()
+        }
         (InputMode::Normal, _) => String::new(),
     }
 }
@@ -1056,18 +1210,22 @@ pub fn watch_refusals(
 pub fn watch_toasts(
     local: Res<LocalPlayer>,
     q_players: Query<&Player>,
-    q_units: Query<&Owner, With<Unit>>,
+    q_units: Query<(&Owner, &Unit)>,
     mut toasts: ResMut<Toasts>,
-    mut prev_starving: Local<bool>,
+    mut prev_short: Local<bool>,
     mut prev_mask: Local<u64>,
 ) {
     let Some(p) = q_players.iter().find(|p| p.player_id == local.0) else { return };
-    let pop = q_units.iter().filter(|o| o.0 == local.0).count() as i32;
-    let starving = food_low(p.stock.food, pop);
-    if starving && !*prev_starving {
-        toasts.0.push(("Your army is starving! Gather food.".into(), 2.6));
+    let supply =
+        supply_readout(q_units.iter().filter(|(o, _)| o.0 == local.0).map(|(_, u)| (u.kind, u.ration)));
+    let short = supply.short > 0;
+    if short && !*prev_short {
+        toasts.0.push((
+            format!("{} of {} men on {}% rations.", supply.short, supply.eaters, supply.worst),
+            2.6,
+        ));
     }
-    *prev_starving = starving;
+    *prev_short = short;
     if p.tech_mask != *prev_mask {
         for t in techs_in_mask(p.tech_mask & !*prev_mask) {
             toasts.0.push((format!("Research complete: {}", upgrade_def(t).label), 2.6));
@@ -1079,13 +1237,14 @@ pub fn watch_toasts(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use saladin_sim::{Stockpile, UnitKind};
+    use saladin_sim::{Faction, Stockpile, UnitKind};
 
-    fn sel(kind: BuildingKind) -> SelectedBuilding {
+    fn sel_of(kind: BuildingKind, faction: Faction) -> SelectedBuilding {
         let d = building_def(kind);
         SelectedBuilding {
             id: Some(1),
             kind,
+            faction,
             target_kind: kind,
             garrison_cap: d.garrison_cap,
             max_hp: d.max_hp.max(1),
@@ -1094,13 +1253,18 @@ mod tests {
         }
     }
 
+    fn sel(kind: BuildingKind) -> SelectedBuilding {
+        sel_of(kind, Faction::Ayyubid)
+    }
+
     /// The card is generated from def FIELDS, so a kind with a capability the
     /// HUD cannot describe is a role the player is never told about.
     #[test]
     fn every_structure_says_what_it_is_for() {
+      for faction in [Faction::Ayyubid, Faction::Crusader] {
         for &kind in BuildingKind::ALL {
             let d = building_def(kind);
-            let lines = role_lines(d, &sel(kind));
+            let lines = role_lines(d, &sel_of(kind, faction));
             let has_role = d.accepts != 0
                 || !d.trains.is_empty()
                 || d.aura.is_some()
@@ -1127,6 +1291,7 @@ mod tests {
             assert!(!b.is_empty(), "{kind:?} has no blurb, so its card says nothing it does");
             assert!(b.is_ascii(), "{kind:?} blurb is not ASCII: {b:?}");
         }
+      }
     }
 
     /// The embedded font has no non-ASCII glyphs and the atlas pre-warm is
@@ -1135,24 +1300,76 @@ mod tests {
     fn every_generated_card_string_is_ascii_and_fits() {
         // widest column the card can render before a line wraps
         const MAX_CHARS: usize = 37;
-        for &kind in BuildingKind::ALL {
-            let d = building_def(kind);
-            let mut strings = role_lines(d, &sel(kind));
-            strings.push(d.blurb.to_string());
-            strings.push(price_line(&d.cost, d.build_time));
-            strings.push(price_line(&d.upgrade_cost, d.upgrade_time));
-            strings.push(crew_line(0));
-            strings.push(crew_line(3));
-            strings.push(format!("Becoming {}", building_def(d.upgrades_to.unwrap_or(kind)).label));
-            for s in strings {
-                assert!(s.is_ascii(), "{kind:?}: {s:?} is not ASCII");
-                assert!(s.len() <= MAX_CHARS * 2, "{kind:?}: {s:?} is unreadably long");
+        for faction in [Faction::Ayyubid, Faction::Crusader] {
+            for &kind in BuildingKind::ALL {
+                let d = building_def(kind);
+                let mut strings = role_lines(d, &sel_of(kind, faction));
+                strings.push(d.blurb.to_string());
+                strings.push(price_line(&d.cost, d.build_time));
+                strings.push(price_line(&d.upgrade_cost, d.upgrade_time));
+                strings.push(crew_line(0));
+                strings.push(crew_line(3));
+                strings.push(hall_label(kind, faction).to_string());
+                strings.push(format!(
+                    "Becoming {}",
+                    hall_label(d.upgrades_to.unwrap_or(kind), faction)
+                ));
+                for s in strings {
+                    assert!(s.is_ascii(), "{kind:?}: {s:?} is not ASCII");
+                    assert!(s.len() <= MAX_CHARS * 2, "{kind:?}: {s:?} is unreadably long");
+                }
             }
         }
         for &kind in UnitKind::ALL {
             let u = unit_def(kind);
             assert!(u.label.is_ascii() && price_line(&u.cost, u.train_time).is_ascii());
         }
+        // the march chips and the supply line are generated too
+        for (_, name) in FORMATION_NAMES {
+            assert!(name.is_ascii() && name.len() <= 6, "{name:?}");
+        }
+        for (short, worst) in [(0, 100), (3, 0), (12, 62)] {
+            let (line, warn) = SupplyReadout { eaters: 20, short, worst }.line(140);
+            assert!(line.is_ascii() && line.len() <= MAX_CHARS, "{line:?}");
+            assert_eq!(warn, short > 0);
+        }
+        for h in crate::input::HOTKEY_HELP {
+            assert!(h.0.is_ascii() && h.1.is_ascii(), "{h:?}");
+        }
+    }
+
+    /// The card only offers what the player's faction can actually field. This
+    /// is the whole of faction identity as far as the HUD is concerned, and it
+    /// was invisible before: both sides were shown all ten kinds.
+    #[test]
+    fn a_hall_offers_its_own_factions_roster_and_wears_its_own_name() {
+        let stable = |f| role_lines(building_def(BuildingKind::Stable), &sel_of(BuildingKind::Stable, f));
+        let ayy = stable(Faction::Ayyubid).join(" ");
+        let cru = stable(Faction::Crusader).join(" ");
+        assert!(ayy.contains("Mamluk") && !ayy.contains("Knight"), "{ayy}");
+        assert!(cru.contains("Knight") && !cru.contains("Mamluk"), "{cru}");
+        // one hall, two liturgies — the kind is index-stable, only the name moves
+        assert_eq!(hall_label(BuildingKind::Mosque, Faction::Ayyubid), "Mosque");
+        assert_eq!(hall_label(BuildingKind::Mosque, Faction::Crusader), "Chapel");
+    }
+
+    /// Hunger used to be a single word: STARVING or nothing. Rationing is
+    /// proportional, so the readout has to report a share and a count.
+    #[test]
+    fn the_supply_line_reports_a_share_not_a_verdict() {
+        use saladin_sim::UnitKind::*;
+        let full = supply_readout([(Spearman, FULL_RATION), (Peasant, Fx::ZERO)].into_iter());
+        // a peasant on nothing is not on short rations — it never drew any
+        assert_eq!((full.eaters, full.short), (1, 0));
+        assert!(!full.line(50).1);
+
+        let half = supply_readout(
+            [(Spearman, saladin_sim::fx!("0.5")), (Knight, FULL_RATION), (Chaplain, Fx::ZERO)]
+                .into_iter(),
+        );
+        assert_eq!((half.eaters, half.short, half.worst), (2, 1, 50));
+        let (line, warn) = half.line(9);
+        assert!(warn && line.contains("50%") && line.contains('9'), "{line}");
     }
 
     /// A locked card keeps its price and gains a reason — never swaps one for
@@ -1189,6 +1406,8 @@ mod tests {
         let ok = mode_hint_text(InputMode::Build(BuildingKind::House), None);
         assert!(ok.contains("rotates"));
         assert!(mode_hint_text(InputMode::Normal, None).is_empty());
+        let adv = mode_hint_text(InputMode::AttackMove, None);
+        assert!(adv.is_ascii() && adv.contains("advance"), "{adv}");
     }
 
     #[test]

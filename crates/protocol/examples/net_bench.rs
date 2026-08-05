@@ -3,14 +3,18 @@
 //! per-tick sim cost, lockstep stalls, and verifies all clients stay
 //! bit-identical.
 //!
-//! Run: `cargo run --release -p saladin-protocol --example net_bench -- [clients] [units] [ticks]`
-//! (defaults: 2 clients, 2000 units, 600 ticks = 30 s of game time)
+//! Run: `cargo run --release -p saladin-protocol --example net_bench -- [clients] [units] [ticks] [--walls N]`
+//! (defaults: 2 clients, 2000 units, 600 ticks = 30 s of game time, no walls)
+//!
+//! `--walls N` raises a defended wall line with garrisoned towers. Without it
+//! this bench spawns ZERO buildings, which hides BOTH of combat's
+//! O(units x buildings) scans — siege target acquisition and the morale-radius
+//! support scan — from the only perf tool in the repo.
 
 use bevy_app::prelude::*;
 use saladin_protocol::*;
 use saladin_sim::{
-    Faction, Fx, GatherState, ResourceType, Stance, Stockpile, UnitKind, V2, ZERO,
-    is_passable, unit_def,
+    BuildingKind, Faction, Fx, Stockpile, UnitKind, V2, ZERO, building_def, is_passable, unit_def,
 };
 use std::time::{Duration, Instant};
 
@@ -52,35 +56,73 @@ fn spawn_soldier(app: &mut App, id: u64, owner: u64, kind: UnitKind, pos: V2) {
         MatchId(1),
         Pos { pos, facing: ZERO },
         Unit {
-            kind,
-            target: pos,
-            has_target: false,
             speed: def.speed,
-            gather_state: GatherState::Idle,
-            target_node: 0,
-            carrying: 0,
-            carry_type: ResourceType::Wood,
-            harvest_timer: ZERO,
             hp: def.max_hp,
-            attack_target: 0,
-            attack_cooldown: ZERO,
-            stance: Stance::Aggressive,
-            morale: Fx::ONE,
-            routing: false,
-            home: pos,
-            garrisoned_in: 0,
-            job_site: 0,
-            path: vec![],
-            path_idx: 0,
+            ..Unit::new(kind, pos)
         },
     ));
 }
 
+/// Raise `count` wall segments in lines, every eighth of them a manned tower.
+/// Deterministic; ids sit above the army's so the two never collide.
+fn seed_walls(app: &mut App, count: usize) -> usize {
+    if count == 0 {
+        return 0;
+    }
+    let f = |n: i32| Fx::from_num(n) + Fx::lit("0.5");
+    let mut placed = 0usize;
+    let mut id = 1_000_000u64;
+    let mut garr = 2_000_000u64;
+    let mut ty = 14;
+    'outer: while ty < 132 {
+        let mut tx = 13;
+        while tx < 132 {
+            if is_passable(1, tx, ty) {
+                let pos = V2::new(f(tx), f(ty));
+                let tower = placed.is_multiple_of(8);
+                let kind = if tower { BuildingKind::Tower } else { BuildingKind::Wall };
+                let owner = 1 + (placed as u64 / 32) % 2;
+                app.world_mut().spawn((
+                    GameId(id),
+                    Owner(owner),
+                    MatchId(1),
+                    Pos { pos, facing: ZERO },
+                    Building::new(kind, building_def(kind).max_hp, pos),
+                ));
+                if tower {
+                    app.world_mut().spawn((
+                        GameId(garr),
+                        Owner(owner),
+                        MatchId(1),
+                        Pos { pos, facing: ZERO },
+                        Unit { garrisoned_in: id, ..Unit::new(UnitKind::Archer, pos) },
+                    ));
+                    garr += 1;
+                }
+                id += 1;
+                placed += 1;
+                if placed >= count {
+                    break 'outer;
+                }
+            }
+            tx += 2;
+        }
+        ty += 2;
+    }
+    placed
+}
+
 /// Seed `total` soldiers as opposing pairs across every passable tile — an
 /// instant map-wide battle (worst-case combat + morale + pathing load).
-/// Deterministic, so every client seeds the identical army.
-fn seed_battle(app: &mut App, total: usize) {
-    let kinds = [UnitKind::Spearman, UnitKind::Archer, UnitKind::Knight, UnitKind::Crossbowman];
+/// Deterministic, so every client seeds the identical army. With walls in the
+/// world every eighth pair is a ram, so siege target acquisition (a full linear
+/// scan of every building, per ram, per combat tick) is on the clock too.
+fn seed_battle(app: &mut App, total: usize, walls: usize) {
+    let kinds: &[UnitKind] = if walls > 0 {
+        &[UnitKind::Spearman, UnitKind::Archer, UnitKind::Knight, UnitKind::Crossbowman, UnitKind::Ram]
+    } else {
+        &[UnitKind::Spearman, UnitKind::Archer, UnitKind::Knight, UnitKind::Crossbowman]
+    };
     let mut id = 1u64;
     let mut placed = 0usize;
     let f = |n: i32| Fx::from_num(n) + Fx::lit("0.5");
@@ -114,6 +156,7 @@ fn seed_battle(app: &mut App, total: usize) {
 
 struct ClientReport {
     player: u64,
+    walls: usize,
     ticks: u64,
     wall: Duration,
     sim_total: Duration,
@@ -123,7 +166,7 @@ struct ClientReport {
     units_left: usize,
 }
 
-fn run_client(addr: &str, is_host: bool, want_clients: usize, units: usize, ticks: u64) -> ClientReport {
+fn run_client(addr: &str, is_host: bool, want_clients: usize, units: usize, ticks: u64, walls: usize) -> ClientReport {
     let mut t = TcpTransport::connect(addr, "bench", JoinIntent::Direct).expect("connect");
     // everyone readies up — since the wait-for-everyone lobby, all_ready()
     // includes the host
@@ -143,7 +186,8 @@ fn run_client(addr: &str, is_host: bool, want_clients: usize, units: usize, tick
     for p in 1..=2 {
         spawn_player(&mut app, p);
     }
-    seed_battle(&mut app, units);
+    let raised = seed_walls(&mut app, walls);
+    seed_battle(&mut app, units, walls);
 
     let mut driver = LockstepDriver::new(you, 3);
     let wall_start = Instant::now();
@@ -168,11 +212,33 @@ fn run_client(addr: &str, is_host: bool, want_clients: usize, units: usize, tick
     let hash = world.resource::<StateHash>().0;
     let mut q = world.query::<&Unit>();
     let units_left = q.iter(world).count();
-    ClientReport { player: you, ticks: done, wall, sim_total, sim_max, stalls, hash, units_left }
+    ClientReport { player: you, walls: raised, ticks: done, wall, sim_total, sim_max, stalls, hash, units_left }
 }
 
 fn main() {
-    let args: Vec<String> = std::env::args().skip(1).collect();
+    let raw: Vec<String> = std::env::args().skip(1).collect();
+    let walls: usize = raw
+        .iter()
+        .position(|a| a == "--walls")
+        .and_then(|i| raw.get(i + 1))
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0);
+    let args: Vec<&String> = {
+        let mut out = Vec::new();
+        let mut skip = false;
+        for a in &raw {
+            if skip {
+                skip = false;
+                continue;
+            }
+            if a == "--walls" {
+                skip = true;
+                continue;
+            }
+            out.push(a);
+        }
+        out
+    };
     let clients: usize = args.first().and_then(|s| s.parse().ok()).unwrap_or(2);
     let units: usize = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(2000);
     let ticks: u64 = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(600);
@@ -182,12 +248,12 @@ fn main() {
     spawn_host_relay(&addr).expect("relay binds");
     std::thread::sleep(Duration::from_millis(100));
 
-    println!("net_bench: {clients} clients, {units} units, {ticks} ticks (= {}s game time)", ticks / 20);
+    println!("net_bench: {clients} clients, {units} units, {walls} wall segments requested, {ticks} ticks (= {}s game time)", ticks / 20);
 
     let mut handles = Vec::new();
     for i in 0..clients {
         let addr = addr.clone();
-        handles.push(std::thread::spawn(move || run_client(&addr, i == 0, clients, units, ticks)));
+        handles.push(std::thread::spawn(move || run_client(&addr, i == 0, clients, units, ticks, walls)));
         // deterministic join order so client 0 is always the host
         std::thread::sleep(Duration::from_millis(50));
     }
@@ -208,6 +274,7 @@ fn main() {
             r.units_left,
         );
     }
+    println!("\nwalls actually raised: {}", reports[0].walls);
     let h0 = reports[0].hash;
     let in_sync = reports.iter().all(|r| r.hash == h0);
     println!();

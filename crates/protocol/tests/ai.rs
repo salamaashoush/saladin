@@ -4,7 +4,7 @@
 use bevy_app::prelude::*;
 use saladin_protocol::*;
 use saladin_sim::{
-    AiDifficulty, BuildingKind, Faction, Fx, GatherState, ResourceType, Stance, Stockpile,
+    AiDifficulty, BuildingKind, Faction, Fx, Stance, Stockpile,
     UnitKind, V2, ZERO, building_def, unit_def,
 };
 
@@ -111,26 +111,10 @@ fn spawn_unit_row(app: &mut App, id: u64, owner: u64, kind: UnitKind, pos: V2, s
         MatchId(1),
         Pos { pos, facing: ZERO },
         Unit {
-            kind,
-            target: pos,
-            has_target: false,
             speed: unit_def(kind).speed,
-            gather_state: GatherState::Idle,
-            target_node: 0,
-            carrying: 0,
-            carry_type: ResourceType::Wood,
-            harvest_timer: ZERO,
             hp: unit_def(kind).max_hp,
-            attack_target: 0,
-            attack_cooldown: ZERO,
             stance,
-            morale: Fx::ONE,
-            routing: false,
-            home: pos,
-            garrisoned_in: 0,
-            job_site: 0,
-            path: vec![],
-            path_idx: 0,
+            ..Unit::new(kind, pos)
         },
     ));
 }
@@ -524,4 +508,145 @@ fn dueling_bots_stay_in_lockstep_through_the_whole_lifecycle() {
     let mut q = world.query::<&Building>();
     let raised = q.iter(world).filter(|b| b.complete() && b.kind != BuildingKind::Keep).count();
     assert!(raised >= 2, "the bots raised nothing in 3000 ticks, so lockstep proved little");
+}
+
+/// A siege train marches at what shoots back, not at the cheapest masonry in
+/// front of it. `intel.defenses` used to list plain wall segments, so
+/// `target_for_role(Siege)` sent every engine at the nearest five wood of wall
+/// while the tower behind it kept firing. Walls stay in `buildings` — a town
+/// with no towers still gives the engines something to break.
+#[test]
+fn a_siege_train_marches_at_the_tower_not_the_nearest_wall() {
+    let mut app = build();
+    cmd(
+        &mut app,
+        PlayerCommand::AddAi {
+            player_id: 1,
+            host: 1,
+            difficulty: AiDifficulty::Hard,
+            faction: Faction::Ayyubid,
+            match_id: 1,
+        },
+    );
+    cmd(
+        &mut app,
+        PlayerCommand::AddAi {
+            player_id: 2,
+            host: 1,
+            difficulty: AiDifficulty::Hard,
+            faction: Faction::Crusader,
+            match_id: 1,
+        },
+    );
+    step(app.world_mut());
+    let enemy_keep = keep_pos_of(&mut app, 2);
+    let f = |v: Fx, d: i32| v + Fx::from_num(d);
+
+    // a wall line between us and them, and one tower further back
+    let wall_def = building_def(BuildingKind::Wall);
+    for i in 0..5 {
+        let p = V2::new(f(enemy_keep.x, -8), f(enemy_keep.y, i - 2));
+        app.world_mut().spawn((
+            GameId(7000 + i as u64),
+            Owner(2),
+            MatchId(1),
+            Pos { pos: p, facing: ZERO },
+            Building::new(BuildingKind::Wall, wall_def.max_hp, p),
+        ));
+    }
+    let tower_def = building_def(BuildingKind::Tower);
+    let tower_pos = V2::new(f(enemy_keep.x, -3), enemy_keep.y);
+    app.world_mut().spawn((
+        GameId(7100),
+        Owner(2),
+        MatchId(1),
+        Pos { pos: tower_pos, facing: ZERO },
+        Building::new(BuildingKind::Tower, tower_def.max_hp, tower_pos),
+    ));
+
+    // a ram sitting right on top of the wall line: the nearest defence by a mile
+    let ram_pos = V2::new(f(enemy_keep.x, -10), enemy_keep.y);
+    spawn_unit_row(&mut app, 7200, 1, UnitKind::Ram, ram_pos, Stance::Aggressive);
+
+    // the planner's own view of the enemy town, built the way the brain builds it
+    let world = app.world_mut();
+    let mut bq = world.query::<(&GameId, &Pos, &Owner, &Building, &MatchId)>();
+    let mut intel = saladin_sim::AssaultIntel::default();
+    for (g, p, o, b, _) in bq.iter(world) {
+        if o.0 != 2 {
+            continue;
+        }
+        let t = saladin_sim::TacticalTarget { id: g.0, pos: p.pos };
+        intel.buildings.push(t);
+        if b.kind == BuildingKind::Keep {
+            intel.keep = Some(t);
+        }
+        if matches!(
+            b.kind,
+            BuildingKind::Gatehouse | BuildingKind::Tower | BuildingKind::Watchtower
+        ) {
+            intel.defenses.push(t);
+        }
+    }
+    let picked = saladin_sim::target_for_role(saladin_sim::SquadRole::Siege, ram_pos, &intel)
+        .expect("there is an enemy town to march at");
+    assert_eq!(picked.id, 7100, "the ram picked {} instead of the tower", picked.id);
+
+    // and squad_role really does class a ram as siege, or the above proves nothing
+    assert_eq!(saladin_sim::squad_role(UnitKind::Ram), saladin_sim::SquadRole::Siege);
+}
+
+/// A unit the brain sends to war, home, or scouting must let go of its building
+/// site. `job_site` is what `spare_hands` reads to decide a peasant is spoken
+/// for, so a scout that keeps one books a crew slot at a foundation it is
+/// walking away from for the rest of the match. `move_unit` — the command a
+/// human's order goes through — has always cleared it; the brain's private
+/// order path had drifted and did not.
+#[test]
+fn a_bot_order_releases_the_builder_it_takes() {
+    let mut app = build();
+    for (id, faction) in [(1u64, Faction::Ayyubid), (2, Faction::Crusader)] {
+        cmd(
+            &mut app,
+            PlayerCommand::AddAi {
+                player_id: id,
+                host: 1,
+                difficulty: AiDifficulty::Hard,
+                faction,
+                match_id: 1,
+            },
+        );
+    }
+    step(app.world_mut());
+
+    // Every tick, book each of the bot's peasants onto a site, then let the
+    // brain run. The tick it picks a scout is the tick under test.
+    let mut checked = false;
+    for _ in 0..1200 {
+        {
+            let world = app.world_mut();
+            let mut q = world.query::<(&Owner, &mut Unit)>();
+            for (o, mut u) in q.iter_mut(world) {
+                if o.0 == 1 && u.kind == UnitKind::Peasant {
+                    u.job_site = 4242;
+                }
+            }
+        }
+        step(app.world_mut());
+        let world = app.world_mut();
+        let mut bq = world.query::<(&Player, &Bot)>();
+        let scout = bq.iter(world).find(|(p, _)| p.player_id == 1).map(|(_, b)| b.scout_id);
+        let Some(scout) = scout.filter(|s| *s != 0) else { continue };
+        let mut q = world.query::<(&GameId, &Unit)>();
+        let u = q.iter(world).find(|(g, _)| g.0 == scout).map(|(_, u)| (u.job_site, u.gather_state));
+        if let Some((job_site, state)) = u {
+            assert_eq!(
+                job_site, 0,
+                "the scout marched off still holding site {job_site} (state {state:?})"
+            );
+            checked = true;
+        }
+        break;
+    }
+    assert!(checked, "no scout was ever sent, so the release path was never exercised");
 }

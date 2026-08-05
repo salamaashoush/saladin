@@ -204,6 +204,8 @@ fn main() {
     .init_resource::<selection::SelectionInfo>()
     .init_resource::<selection::SelectedBuilding>()
     .init_resource::<selection::ControlGroups>()
+    .init_resource::<selection::FormationPick>()
+    .init_resource::<input::MarchQueue>()
     .init_resource::<input::InputMode>()
     .init_resource::<input::DragState>()
     .init_resource::<input::WallDrag>()
@@ -302,6 +304,7 @@ fn main() {
             input::pointer_input,
             input::rotate_ghost,
             input::keyboard_input.run_if(not(ui::text_input::any_input_focused)),
+            input::advance_march_queue,
             input::update_drag_box,
             selection::publish_selection,
         )

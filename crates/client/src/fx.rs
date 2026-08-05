@@ -139,14 +139,10 @@ pub fn melee_strike_dust(
         if !anim.combat {
             continue;
         }
-        let ranged = matches!(
-            anim.kind,
-            saladin_sim::UnitKind::Archer
-                | saladin_sim::UnitKind::Crossbowman
-                | saladin_sim::UnitKind::HorseArcher
-                | saladin_sim::UnitKind::Mangonel
-        );
-        if ranged {
+        // the def is the truth: the Mangonel became `ranged` (its shots fly as
+        // boulders now) and three kinds were appended since this was a list
+        let def = saladin_sim::unit_def(anim.kind);
+        if def.ranged {
             continue;
         }
         // strike apex = sin(tp*4) peaking; fire once per swing cycle
@@ -157,6 +153,26 @@ pub fn melee_strike_dust(
             continue;
         }
         let fwd = tf.rotation * Vec3::Z;
+        let splash = def.splash.to_num::<f32>();
+        if splash > 0.0 {
+            // naft: the burst is the WEAPON, so it is drawn at its real radius
+            let at = tf.translation + fwd * def.range.to_num::<f32>();
+            for i in 0..6 {
+                let ang = i as f32 / 6.0 * std::f32::consts::TAU + anim.phase;
+                commands.spawn((
+                    Particle {
+                        vel: Vec3::new(ang.cos() * splash * 1.6, 1.1, ang.sin() * splash * 1.6),
+                        age: 0.0,
+                        life: 0.45,
+                        base: 0.18,
+                    },
+                    Mesh3d(assets.flame.clone()),
+                    MeshMaterial3d(rmats.flame.clone()),
+                    Transform::from_translation(at + Vec3::Y * 0.35).with_scale(Vec3::splat(0.01)),
+                ));
+            }
+            continue;
+        }
         let at = tf.translation + fwd * 0.7;
         commands.spawn((
             Particle {

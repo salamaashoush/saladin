@@ -6,8 +6,7 @@
 use bevy_app::prelude::*;
 use saladin_protocol::*;
 use saladin_sim::{
-    BUILD_SLOPE_MAX, Biome, BuildingKind, Faction, Fx, GatherState, PlaceError, ResourceType,
-    Stance, Stockpile, UnitKind, V2, WORLD_SIZE, ZERO, building_def, check_place, compose_seed, fx,
+    BUILD_SLOPE_MAX, Biome, BuildingKind, Faction, Fx, GatherState, PlaceError, ResourceType, Stockpile, UnitKind, V2, WORLD_SIZE, ZERO, building_def, check_place, compose_seed, fx,
     is_buildable_tile, is_passable, is_water_tile, sample_terrain, slope_at, unit_def,
 };
 
@@ -235,26 +234,12 @@ fn a_storehouse_banks_a_haul_without_a_keep_nearby() {
         MatchId(1),
         Pos { pos, facing: ZERO },
         Unit {
-            kind: UnitKind::Peasant,
-            target: pos,
-            has_target: false,
             speed: def.speed,
             gather_state: GatherState::ToStockpile,
-            target_node: 0,
             carrying: 10,
             carry_type: ResourceType::Food,
-            harvest_timer: ZERO,
             hp: def.max_hp,
-            attack_target: 0,
-            attack_cooldown: ZERO,
-            stance: Stance::Aggressive,
-            morale: Fx::ONE,
-            routing: false,
-            home: pos,
-            garrisoned_in: 0,
-            job_site: 0,
-            path: vec![],
-            path_idx: 0,
+            ..Unit::new(UnitKind::Peasant, pos)
         },
     ));
 
@@ -288,26 +273,12 @@ fn a_granary_is_a_farm_hub_not_a_warehouse() {
         MatchId(1),
         Pos { pos, facing: ZERO },
         Unit {
-            kind: UnitKind::Peasant,
-            target: pos,
-            has_target: false,
             speed: def.speed,
             gather_state: GatherState::ToStockpile,
-            target_node: 0,
             carrying: 10,
             carry_type: ResourceType::Food,
-            harvest_timer: ZERO,
             hp: def.max_hp,
-            attack_target: 0,
-            attack_cooldown: ZERO,
-            stance: Stance::Aggressive,
-            morale: Fx::ONE,
-            routing: false,
-            home: pos,
-            garrisoned_in: 0,
-            job_site: 0,
-            path: vec![],
-            path_idx: 0,
+            ..Unit::new(UnitKind::Peasant, pos)
         },
     ));
 

@@ -9,7 +9,7 @@
 use bevy_app::prelude::*;
 use saladin_protocol::*;
 use saladin_sim::{
-    BuildState, BuildingKind, Faction, Fx, GatherState, MAX_BUILDERS, ResourceType, Stance,
+    BuildState, BuildingKind, Faction, Fx, MAX_BUILDERS,
     Stockpile, UnitKind, V2, ZERO, building_def, compose_seed, is_buildable_tile, unit_def,
 };
 
@@ -73,26 +73,9 @@ fn peasants(app: &mut App, owner: u64, at: V2, n: u64, first: u64) -> Vec<u64> {
                 MatchId(1),
                 Pos { pos, facing: ZERO },
                 Unit {
-                    kind: UnitKind::Peasant,
-                    target: pos,
-                    has_target: false,
                     speed: def.speed,
-                    gather_state: GatherState::Idle,
-                    target_node: 0,
-                    carrying: 0,
-                    carry_type: ResourceType::Wood,
-                    harvest_timer: ZERO,
                     hp: def.max_hp,
-                    attack_target: 0,
-                    attack_cooldown: ZERO,
-                    stance: Stance::Aggressive,
-                    morale: Fx::ONE,
-                    routing: false,
-                    home: pos,
-                    garrisoned_in: 0,
-                    job_site: 0,
-                    path: vec![],
-                    path_idx: 0,
+                    ..Unit::new(UnitKind::Peasant, pos)
                 },
             ));
             id

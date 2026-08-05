@@ -251,6 +251,9 @@ fn register(kind: UnitKind) -> (f32, f32, f32) {
         UnitKind::Mamluk => (120.0, 0.6, 0.95),
         UnitKind::Crossbowman => (145.0, 0.45, 1.0),
         UnitKind::Imam => (128.0, 0.12, 0.78),
+        UnitKind::Sergeant => (112.0, 0.58, 0.92),
+        UnitKind::Chaplain => (132.0, 0.14, 0.8),
+        UnitKind::Naffatun => (152.0, 0.5, 1.08),
         UnitKind::Ram | UnitKind::Mangonel => (0.0, 0.0, 1.0), // creak instead
     }
 }
@@ -392,6 +395,9 @@ fn kind_name(kind: UnitKind) -> &'static str {
         UnitKind::Ram => "ram",
         UnitKind::Mangonel => "mangonel",
         UnitKind::Imam => "imam",
+        UnitKind::Sergeant => "sergeant",
+        UnitKind::Chaplain => "chaplain",
+        UnitKind::Naffatun => "naffatun",
     }
 }
 

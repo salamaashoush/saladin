@@ -2,13 +2,13 @@ use crate::components::*;
 use crate::{GameIndex, MatchStatuses, SimSchedule, SimSet, StateHash, Tick, every};
 use bevy_app::prelude::*;
 use bevy_ecs::prelude::*;
-use saladin_sim::Fnv1a;
 
 mod ai_brain;
 mod combat;
 mod construction;
 mod economy;
 mod gather;
+pub(crate) use gather::{node_reach, workable};
 mod movement;
 mod research;
 mod separation;
@@ -84,11 +84,41 @@ fn maintain_match_statuses(q: Query<&MatchInfo>, mut statuses: ResMut<MatchStatu
     }
 }
 
+/// Per-row digest. FNV-1a mixes one BYTE at a time, which was affordable while
+/// a unit contributed five fields; at thirty-five fields x 20k units it was
+/// 5.6M byte-mixes a tick. This does the same job in one multiply-xorshift per
+/// field. The hash VALUE is not stable across builds and never needs to be —
+/// the only invariant is that every peer computes the same one.
+#[derive(Default)]
+struct RowHash(u64);
+
+impl RowHash {
+    #[inline]
+    fn w(&mut self, v: u64) {
+        let mut x = v ^ self.0;
+        x = x.wrapping_mul(0xff51_afd7_ed55_8ccd);
+        x ^= x >> 33;
+        x = x.wrapping_mul(0xc4ce_b9fe_1a85_ec53);
+        self.0 = x ^ (x >> 29);
+    }
+
+    #[inline]
+    fn fx(&mut self, v: saladin_sim::Fx) {
+        self.w(v.to_bits() as u64);
+    }
+
+    #[inline]
+    fn v2(&mut self, v: saladin_sim::V2) {
+        self.fx(v.x);
+        self.fx(v.y);
+    }
+}
+
 /// Fold the whole simulation state into one checksum, compared across the
 /// lockstep group to detect desync the instant it happens. Each row hashes to
-/// its own FNV-1a digest and the digests COMBINE COMMUTATIVELY (a sum of
-/// well-mixed per-row hashes), so no sort or collection is needed — O(N),
-/// zero allocation, independent of ECS iteration order by construction.
+/// its own digest and the digests COMBINE COMMUTATIVELY (a sum of well-mixed
+/// per-row hashes), so no sort or collection is needed — O(N), zero allocation,
+/// independent of ECS iteration order by construction.
 #[allow(clippy::type_complexity)]
 fn state_hash(
     mut hash: ResMut<StateHash>,
@@ -104,52 +134,84 @@ fn state_hash(
 ) {
     let mut acc: u64 = 0;
     for (id, pos, unit, bld, node, player, research) in &q {
-        let mut f = Fnv1a::default();
-        f.write_u64(id.0);
+        let mut f = RowHash::default();
+        f.w(id.0);
         if let Some(p) = pos {
-            f.write_v2(p.pos);
+            f.v2(p.pos);
         }
+        // EVERY field a system writes belongs here. The combat/morale/order
+        // layer was invisible until now: a peer could rout, garrison or
+        // re-target differently and the hash still matched, so the desync only
+        // surfaced ticks later as drifted positions — by then unrecoverable.
+        // The narrow fields are packed into words so thirty-odd of them cost a
+        // handful of mixes.
         if let Some(u) = unit {
-            f.write_u64(u.hp as u64);
-            f.write_v2(u.target);
-            f.write_u64(u.has_target as u64);
-            f.write_u64(u.gather_state as u64);
-            f.write_u64(u.job_site);
+            f.w(u.hp as u32 as u64 | (u.carrying as u32 as u64) << 32);
+            f.w(u.gather_state as u64
+                | (u.carry_type as u64) << 8
+                | (u.stance as u64) << 16
+                | (u.has_target as u64) << 24
+                | (u.routing as u64) << 32
+                | (u.heading as u64) << 40
+                | (u.order as u64) << 48
+                | (u.engage_slot as u64) << 56);
+            f.w(u.charge_cd as u32 as u64 | (u.rally_cd as u32 as u64) << 32);
+            f.w(u.attack_cd as u32 as u64);
+            f.w(u.job_site);
+            f.w(u.target_node);
+            f.w(u.attack_target);
+            f.w(u.garrisoned_in);
+            // `speed` is a column pace while a group order is running, so it is
+            // live sim state, not a copy of the unit table
+            f.fx(u.speed);
+            f.fx(u.harvest_timer);
+            f.fx(u.morale);
+            f.fx(u.setup_timer);
+            f.fx(u.ration);
+            f.v2(u.target);
+            f.v2(u.home);
+            f.v2(u.order_target);
+            f.v2(u.anchor);
+            // the path itself is sim state (a peer that pathed differently is
+            // already desynced); digest it instead of walking every waypoint
+            f.w(u.path_idx as u64 | (u.path.len() as u64) << 32);
+            if let Some(first) = u.path.first() {
+                f.v2(*first);
+            }
+            if let Some(last) = u.path.last() {
+                f.v2(*last);
+            }
         }
         if let Some(b) = bld {
-            f.write_u64(b.hp as u64);
-            f.write_u64(b.kind as u64);
-            f.write_u64(b.state as u64);
+            f.w(b.hp as u32 as u64 | (b.builders as u32 as u64) << 32);
             // what an upgrade is becoming, and where its output walks: both are
             // command-driven sim state, so both are desyncs waiting to happen
-            f.write_u64(b.target_kind as u64);
-            f.write_v2(b.rally);
-            f.write_fx(b.work);
-            f.write_u64(b.builders as u64);
-            f.write_u64(b.queue_len as u64);
-            f.write_fx(b.train_work);
+            f.w(b.kind as u64
+                | (b.state as u64) << 8
+                | (b.target_kind as u64) << 16
+                | (b.queue_len as u64) << 24);
+            f.fx(b.cooldown);
+            f.fx(b.work);
+            f.fx(b.train_work);
+            f.v2(b.rally);
             for k in b.queued() {
-                f.write_u64(*k as u64);
+                f.w(*k as u64);
             }
         }
         if let Some(n) = node {
-            f.write_u64(n.remaining as u64);
+            f.w(n.remaining as u64);
         }
         // the stockpile, the tech tree and research progress ARE sim state: a
         // desync in any of them was invisible while this query demanded a Pos
         if let Some(p) = player {
-            f.write_u64(p.stock.wood as u64);
-            f.write_u64(p.stock.stone as u64);
-            f.write_u64(p.stock.food as u64);
-            f.write_u64(p.stock.gold as u64);
-            f.write_u64(p.tech_mask);
-            f.write_u64(p.hunger as u64);
-            f.write_u64(p.defeated as u64);
+            f.w(p.stock.wood as u32 as u64 | (p.stock.stone as u32 as u64) << 32);
+            f.w(p.stock.food as u32 as u64 | (p.stock.gold as u32 as u64) << 32);
+            f.w(p.tech_mask);
+            f.w(p.hunger as u32 as u64 | (p.defeated as u64) << 32);
         }
         if let Some(r) = research {
-            f.write_u64(r.tech as u64);
-            f.write_fx(r.progress);
-            f.write_u64(r.done as u64);
+            f.w(r.tech as u64 | (r.done as u64) << 8);
+            f.fx(r.progress);
         }
         // golden-ratio mix before the commutative sum so weak per-row deltas
         // can't cancel each other out

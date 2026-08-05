@@ -6,9 +6,6 @@ use saladin_sim::*;
 use std::collections::HashSet;
 
 const DT: Fx = AI_DT;
-/// Cap on the reachable-region flood when picking an approach tile — the same
-/// bound the gather loop uses, for the same reason.
-const REACH_CAP: usize = 1024;
 /// Labour a full repair costs when the def has no build time to scale against
 /// (the Keep, and the Watchtower a Tower becomes). Without it `work_step`
 /// returns a whole job per tick and a wrecked keep snaps back on one hammer.
@@ -196,12 +193,25 @@ fn walk_to(
     // the approach tile must be one the builder can actually WALK to: snapping
     // to the nearest passable tile alone puts a crew on the far side of the
     // very wall it is raising
-    let snap = nearest_reachable_passable_grid(&passable, h.pos, to, REACH_CAP)
-        .unwrap_or_else(|| nearest_passable_grid(&passable, to.x, to.y));
     let cost = |tx: i32, ty: i32| move_cost_at(seed, tx, ty);
     let path = {
         let mut scratch = world.resource_mut::<PathScratch>();
-        scratch.0.find_path_costed(&passable, &cost, h.pos.x, h.pos.y, snap.x, snap.y, MAX_EXPANSIONS)
+        let snap = approach_tile(seed, &passable, h.pos, to, 3).or_else(|| {
+            nearest_reachable_passable_grid(
+                &mut scratch.1,
+                &passable,
+                h.pos,
+                to,
+                reach_budget(dist(h.pos, to)),
+            )
+            .map(|r| r.at)
+        });
+        match snap {
+            Some(s) => {
+                scratch.0.find_path_costed(&passable, &cost, h.pos.x, h.pos.y, s.x, s.y, MAX_EXPANSIONS)
+            }
+            None => Vec::new(),
+        }
     };
     if path.is_empty() {
         // no route to the job at all — back to the fields rather than a failing

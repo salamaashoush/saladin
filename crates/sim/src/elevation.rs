@@ -65,9 +65,33 @@ pub fn elevation_range_bonus(attacker_elev: Fx, target_elev: Fx) -> Fx {
     Fx::ONE + (delta / ELEV_BONUS_SPAN) * ELEV_BONUS_MAX
 }
 
+/// A reach — RANGE or AGGRO — adjusted for the ground the two are standing on.
+/// The bonus used to be applied to `range` alone, which left a permanent band
+/// where a unit on the high ground held a target it could see and could not
+/// reach, and then stood there holding it.
+pub fn elevation_reach(base: Fx, attacker_elev: Fx, target_elev: Fx) -> Fx {
+    base * elevation_range_bonus(attacker_elev, target_elev)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Acquisition and reach have to move together or the high ground creates a
+    /// band of targets a unit holds forever without ever swinging.
+    #[test]
+    fn the_high_ground_extends_reach_and_acquisition_alike() {
+        let (hi, lo) = (crate::fx!("1"), crate::fx!("0"));
+        let d = crate::units::unit_def(crate::enums::UnitKind::Archer);
+        let range = elevation_reach(d.range, hi, lo);
+        let aggro = elevation_reach(d.aggro_range, hi, lo);
+        assert!(range > d.range && aggro > d.aggro_range);
+        // the gap between what it holds and what it can hit is unchanged, so no
+        // new dead band opens up
+        assert_eq!(aggro / range, d.aggro_range / d.range);
+        // and downhill shortens both
+        assert!(elevation_reach(d.aggro_range, lo, hi) < d.aggro_range);
+    }
 
     #[test]
     fn uphill_helps_downhill_hurts() {

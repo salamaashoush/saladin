@@ -5,7 +5,7 @@
 use bevy_app::prelude::*;
 use saladin_protocol::*;
 use saladin_sim::{
-    BuildingKind, Faction, Fx, GatherState, ResourceType, Stance, Stockpile,
+    BuildingKind, Faction, Fx, Stockpile,
     UnitKind, V2, ZERO, building_def, is_passable, unit_def,
 };
 
@@ -76,26 +76,9 @@ fn spawn_soldier(app: &mut App, gid: u64, owner: u64, pos: V2, hp: i32) {
         MatchId(1),
         Pos { pos, facing: ZERO },
         Unit {
-            kind: UnitKind::Spearman,
-            target: pos,
-            has_target: false,
             speed: def.speed,
-            gather_state: GatherState::Idle,
-            target_node: 0,
-            carrying: 0,
-            carry_type: ResourceType::Wood,
-            harvest_timer: ZERO,
             hp,
-            attack_target: 0,
-            attack_cooldown: ZERO,
-            stance: Stance::Aggressive,
-            morale: Fx::ONE,
-            routing: false,
-            home: pos,
-            garrisoned_in: 0,
-            job_site: 0,
-            path: vec![],
-            path_idx: 0,
+            ..Unit::new(UnitKind::Spearman, pos)
         },
     ));
 }
