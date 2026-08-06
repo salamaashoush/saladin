@@ -80,6 +80,11 @@ cargo run --release -p saladin-protocol --example naval_war -- [diff] [secs] [se
                                        # NW_PRESET override the sweep.
 cargo run -p saladin-sim --example mapdump -- <base> <preset> [out.ppm]
                                        # worldgen tuning: biome map + dominant-region dump
+cargo run --release -p saladin-protocol --example farm_worth
+                                       # THE food balance table: food/s a field
+                                       # delivers at each crew size, what that
+                                       # buys in men mustered, and what the road
+                                       # costs a column at every depth
 cargo run --release -p saladin-sim --example worldstat -- [seeds] [preset|all] [--per-seed] [--seeds a,b,c]
                                        # biome/climate histogram + height/slope
                                        # quantiles + high-country share: THE
@@ -274,6 +279,52 @@ falling — is now the ONLY way a field dies.
 
 Movement costs are real: `find_path_costed` + `move_cost_at` make marsh drag
 and dunes bite. Costs clamp at 1 so the octile heuristic stays admissible.
+
+## The larder: what food is FOR (sim/supply.rs)
+
+**Food buys men and moves them; it does not tax them for existing.** ONE model,
+two halves of the same sentence, and nothing else:
+
+1. **A soldier is raised with bread.** Three quarters of every fighting man's
+   old timber price is FOOD (`UnitDef.cost`; engines, hulls and peasants have no
+   stomach and stayed on timber). This is what the whole farming and fishing
+   economy is now paid for, and it is the AoE limiter that actually works: army
+   SIZE is bounded by the pop cap and by what a man costs to muster.
+2. **THE BAGGAGE TRAIN.** A man within `SUPPLY_RADIUS` (34) of one of his own
+   drop-offs draws NOTHING — exactly zero, not "a little". Past it,
+   `strain(dist)` ramps one full ration per `SUPPLY_SPAN` (34) tiles, capped at
+   `MAX_STRAIN` (3), and `FIELD_RATION` (0.1 food per man per economy tick per
+   unit of strain) is THE ONE RATE. Sim, AI, HUD and tooling all price the road
+   through it. Supply bounds DEPTH AND DURATION, never size.
+
+Everything else in the file is consequence, and there is no hp term anywhere in
+it: a shortfall rations PROPORTIONALLY over the field force, caps morale
+(`morale_ceiling`), slows the arm (`fatigue_ticks`), and after
+`STARVE_GRACE_TICKS` the men with the least heart WALK AWAY (`deserts`). A
+column standing on a wild herd forages, thinly, and strips it.
+
+**The counterplay is a forward store** (`tests/starvation.rs::
+a_forward_store_ends_the_famine`). Strain is measured to the NEAREST own
+drop-off, so a Storehouse planted at a siege camp zeroes the bill — which is
+what a besieging camp IS, and a building the defender can sortie against.
+
+Why the flat per-head tax is gone, in one line: a flow subtracted from a STOCK
+has no band. `bill = men * FOOD_PER_UNIT` at the rate that bit was a death
+spiral; at a quarter of it, measured, ten soldiers drew 1.25 food/s against an
+1868 stockpile and the mechanic was decoration. `FOOD_PER_UNIT`, `STARVE_DPS`,
+`apply_upkeep` and the two-band near/far bill are all DELETED.
+
+Measured (`examples/farm_worth`): a 3-hand field delivers 2.53 food/s and buys a
+Spearman every 11.8 s. Twenty men at full strain cost 3.0 food/s — 1.18 fields'
+entire output — so 500 food funds a deep siege for 167 s. At home the same
+twenty men cost nothing, forever.
+
+The bot prices all of it off `campaign_reserve(soldiers)` = one campaign at full
+depth. `food_cushion` (that plus `food_floor * 4`) is ONE high-water mark with
+three users — `next_trade` sells past it, `field_labour` stops staffing the
+wheat past it, and the gatherer steer moves hands off food past it. Measured on
+three seeds, that took the bot from 1868/928/1784 food with 10/13/6 soldiers to
+327/635/867 with 11/12/12, and its wood from 10/8/6 to 200/76/44.
 
 ## The naval roster (sim/units.rs + buildings_defs.rs)
 
