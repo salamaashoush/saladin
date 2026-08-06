@@ -595,7 +595,10 @@ pub fn ai_brain(world: &mut World) {
         // wants at once: a famine bias overrode the wood steer entirely, so a
         // starving bot quarried fourteen hundred stone it could not eat while
         // sitting on twelve wood, four short of the forty-five a field costs.
-        let upkeep_food = soldiers * FOOD_PER_UNIT;
+        // the bot must price rations the way the economy charges them, or it
+        // hoards four times the food it needs and never fields an army
+        let upkeep_food =
+            (Fx::from_num(soldiers) * saladin_sim::supply::RATION_DRAW).ceil().to_num::<i32>();
         let crisis = food_crisis(&state, &tune);
         let cushion = 40 + upkeep_food * tune.food_floor_mult * 2;
         // Enter at the cushion, leave at half again: a bare threshold makes the

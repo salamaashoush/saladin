@@ -143,23 +143,24 @@ fn garrison_town(food: i32, n: u64) -> App {
     app
 }
 
-/// THE COMPLAINT, IN ONE TEST. Nineteen loaves for twenty men used to starve
-/// twenty men. Now it costs twenty men a twentieth of a loaf each.
+/// THE COMPLAINT, IN ONE TEST. One loaf short used to starve the whole company.
+/// Now it costs every man an equal share of the shortfall and nothing else.
+/// Twenty men bill five loaves, so four is one short.
 #[test]
 fn a_one_unit_shortfall_costs_one_unit_of_rations() {
-    let mut app = garrison_town(19, 20);
+    let mut app = garrison_town(4, 20);
     for _ in 0..ECON + 1 {
         step(app.world_mut());
     }
     let us = units_of(&mut app, 1);
-    assert_eq!(us.len(), 20, "nineteen loaves must not kill anybody");
+    assert_eq!(us.len(), 20, "one loaf short must not kill anybody");
     for u in &us {
-        assert!(u.ration > fx("0.94") && u.ration < fx("1"), "ration was {}", u.ration);
-        assert_eq!(u.hp, unit_def(UnitKind::Spearman).max_hp, "no attrition on 95% rations");
-        assert!(u.morale > fx("0.95"), "morale was {} on 95% rations", u.morale);
+        assert!(u.ration > fx("0.75") && u.ration < fx("1"), "ration was {}", u.ration);
+        assert_eq!(u.hp, unit_def(UnitKind::Spearman).max_hp, "short commons never cost hp");
+        assert!(u.morale > fx("0.8"), "morale was {} on four fifths rations", u.morale);
     }
     assert_eq!(food_of(&mut app, 1), 0, "the larder is emptied, not overdrawn");
-    assert_eq!(hunger_of(&mut app, 1), 0, "95% rations is not a famine");
+    assert_eq!(hunger_of(&mut app, 1), 0, "four fifths rations is not a famine");
 
     // and the contrast: the SAME company with nothing at all
     let mut empty = garrison_town(0, 20);
@@ -216,7 +217,7 @@ fn an_army_far_from_its_stores_degrades_faster_than_one_at_home() {
     spawn_company(&mut app, 100, 1, UnitKind::Spearman, V2::new(fx("66"), fx("60")), 10);
     spawn_company(&mut app, 200, 1, UnitKind::Spearman, V2::new(fx("160"), fx("160")), 10);
 
-    run_at(&mut app, 12 * ECON, 1, 8);
+    run_at(&mut app, 12 * ECON, 1, 2);
     let left = units_of(&mut app, 1);
     let home: Vec<&Unit> = left.iter().filter(|u| u.home.x < fx("100")).collect();
     let away: Vec<&Unit> = left.iter().filter(|u| u.home.x >= fx("100")).collect();
@@ -243,36 +244,37 @@ fn an_army_far_from_its_stores_degrades_faster_than_one_at_home() {
 #[test]
 fn hunger_tires_before_it_kills() {
     let max_hp = unit_def(UnitKind::Spearman).max_hp;
-    let mut app = garrison_town(3, 10);
+    let mut app = garrison_town(1, 10);
 
     // through the grace: demoralized, slowed, bodies intact
-    run_at(&mut app, 5 * ECON, 1, 3);
+    run_at(&mut app, 5 * ECON, 1, 1);
     for u in units_of(&mut app, 1) {
-        assert_eq!(u.hp, max_hp, "attrition inside the grace period");
+        assert_eq!(u.hp, max_hp, "hunger must never cost a man his hp");
         assert!(u.morale < MORALE_MAX, "hunger must bite morale immediately");
         assert!(u.attack_cd > 0, "hungry men swing slower");
     }
     assert_eq!(alive(&mut app, 1), 10);
 
     // past it: the ramp bites, and nobody has walked out yet
-    run_at(&mut app, 4 * ECON, 1, 3);
+    run_at(&mut app, 4 * ECON, 1, 1);
     let us = units_of(&mut app, 1);
     assert_eq!(us.len(), 10, "a third of a ration must not empty the ranks");
     assert_eq!(lost(&app, 1), 0, "a third of a ration is not desertion");
-    assert!(us.iter().all(|u| u.hp < max_hp), "prolonged famine must cost hp");
-    assert!(us.iter().all(|u| u.hp > 0));
+    assert!(us.iter().all(|u| u.hp == max_hp), "hunger must never cost a man his hp");
 }
 
 #[test]
 fn feeding_resets_the_starvation_spiral() {
-    let mut app = garrison_town(3, 10);
-    run_at(&mut app, 12 * ECON, 1, 3);
-    let hp_at_refeed: Vec<i32> = units_of(&mut app, 1).iter().map(|u| u.hp).collect();
-    assert!(hp_at_refeed.iter().all(|&h| h < unit_def(UnitKind::Spearman).max_hp));
+    let mut app = garrison_town(1, 10);
+    run_at(&mut app, 12 * ECON, 1, 1);
+    let max_hp = unit_def(UnitKind::Spearman).max_hp;
+    let starved = units_of(&mut app, 1);
+    assert!(starved.iter().all(|u| u.hp == max_hp), "hunger must never cost hp");
+    assert!(starved.iter().all(|u| u.morale < MORALE_MAX), "a famine must bite morale");
 
     run_at(&mut app, 10 * ECON, 1, 500);
-    let after: Vec<i32> = units_of(&mut app, 1).iter().map(|u| u.hp).collect();
-    assert_eq!(after, hp_at_refeed, "fed soldiers must stop bleeding");
+    let after = units_of(&mut app, 1);
+    assert!(after.iter().all(|u| u.hp == max_hp), "a fed man is a whole man");
     assert_eq!(hunger_of(&mut app, 1), 0, "hunger counter must reset when fed");
     for u in units_of(&mut app, 1) {
         assert_eq!(u.ration, saladin_sim::FULL_RATION);
@@ -469,7 +471,7 @@ fn hungry_men_swing_slower() {
         // the keep is a drop-off (so the company is in supply) but well out of
         // its own bow range, or the tower does the killing instead of the men
         spawn_keep(&mut app, 10, 1, V2::new(fx("40"), fx("60")));
-        spawn_company(&mut app, 100, 1, UnitKind::Spearman, V2::new(fx("66"), fx("60")), 4);
+        spawn_company(&mut app, 100, 1, UnitKind::Spearman, V2::new(fx("66"), fx("60")), 8);
         // a target that cannot answer: peasants never take a swing and never
         // draw rations, so only the attackers' cadence is under test
         let dummy = V2::new(fx("66"), fx("61"));
@@ -482,12 +484,12 @@ fn hungry_men_swing_slower() {
         ));
         run_at(&mut app, 15 * ECON, 1, food);
         let hp = units_of(&mut app, 2).first().map(|u| u.hp).unwrap_or(0);
-        assert_eq!(units_of(&mut app, 1).len(), 4, "the attackers were meant to survive");
+        assert_eq!(units_of(&mut app, 1).len(), 8, "the attackers were meant to survive");
         DUMMY_HP - hp
     };
-    // four men, two loaves: exactly half rations, exactly on the threshold
+    // eight men bill two loaves, so one loaf is exactly half rations
     let fed = damage(100);
-    let half = damage(2);
+    let half = damage(1);
     assert!(fed > 0 && half > 0, "nobody swung at all: {fed} vs {half}");
     assert!(half < fed, "half-fed men swung as often as fed ones ({half} vs {fed})");
     let ratio = half as f64 / fed as f64;

@@ -84,34 +84,49 @@ fn spawn_soldier(app: &mut App, id: u64, owner: u64) {
 }
 
 #[test]
-fn starvation_drains_soldiers() {
+fn a_famine_costs_morale_and_men_but_never_kills() {
+    // The old rule bled hp until soldiers dropped dead. Nothing in this genre
+    // does that, and an army that cannot even walk away is a punishment rather
+    // than a decision. Hunger now takes spirit, and then it takes the men
+    // themselves, who desert. It never takes their lives.
     let mut app = build();
-    spawn_player(&mut app, 7, 5); // only 5 food
+    spawn_player(&mut app, 7, 0); // an empty larder
     for i in 0..10 {
-        spawn_soldier(&mut app, 100 + i, 7); // 10 eaters, bill 10 > 5
+        spawn_soldier(&mut app, 100 + i, 7);
     }
-    // economy runs at tick 40 (every 40 base ticks)
-    for _ in 0..40 {
+    let full = unit_def(UnitKind::Spearman).max_hp;
+
+    // past the grace, while the army is still standing
+    for _ in 0..40 * 8 {
         step(app.world_mut());
     }
     {
         let world = app.world_mut();
-        // player starved to 0 food, but the grace period holds bodies together
-        let mut pq = world.query::<&Player>();
-        assert_eq!(pq.iter(world).next().unwrap().stock.food, 0);
         let mut uq = world.query::<&Unit>();
-        let full = unit_def(UnitKind::Spearman).max_hp;
-        assert_eq!(uq.iter(world).next().unwrap().hp, full, "no attrition during the grace");
+        let standing: Vec<(i32, saladin_sim::Fx)> =
+            uq.iter(world).map(|u| (u.hp, u.morale)).collect();
+        assert!(!standing.is_empty(), "the army cannot be gone this early");
+        for (hp, _) in &standing {
+            assert_eq!(*hp, full, "hunger must never cost a soldier hp (got {hp})");
+        }
+        assert!(
+            standing.iter().any(|(_, m)| *m < saladin_sim::MORALE_MAX),
+            "a starving army must lose morale"
+        );
     }
-    // past the grace the famine ramp bleeds hp every economy tick
-    for _ in 0..40 * 11 {
+
+    // a famine with no end does empty an army - by desertion, and every man who
+    // is still there is unwounded
+    for _ in 0..40 * 22 {
         step(app.world_mut());
     }
     let world = app.world_mut();
     let mut uq = world.query::<&Unit>();
-    let hp = uq.iter(world).next().unwrap().hp;
-    let full = unit_def(UnitKind::Spearman).max_hp;
-    assert!(hp < full, "sustained famine must drain hp (got {hp})");
+    let left: Vec<i32> = uq.iter(world).map(|u| u.hp).collect();
+    assert!(left.len() < 10, "a sustained famine must cost men");
+    for hp in &left {
+        assert_eq!(*hp, full, "a deserting army leaves no wounded behind (got {hp})");
+    }
 }
 
 fn find_land_block(seed: u32) -> (i32, i32) {

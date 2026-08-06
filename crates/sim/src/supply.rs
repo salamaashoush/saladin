@@ -1,4 +1,4 @@
-use crate::constants::{FOOD_PER_UNIT, STARVE_DPS};
+use crate::constants::FOOD_PER_UNIT;
 use crate::enums::UnitKind;
 use crate::math::Fx;
 use crate::units::unit_def;
@@ -28,6 +28,11 @@ pub const DESERT_RATION: Fx = crate::fx!("0.85");
 pub const DESERT_GRIT: Fx = crate::fx!("0.35");
 /// Morale bled per economy tick at a ration of ZERO; a partial shortfall bleeds
 /// its own fraction of this.
+/// What one soldier draws per economy tick. A quarter of FOOD_PER_UNIT: at the
+/// full rate a single soldier ate everything one gatherer could carry home, so
+/// an army paid for itself twice over and any fight you won bankrupted you.
+pub const RATION_DRAW: Fx = crate::fx!("0.25");
+
 pub const STARVE_MORALE_DRAIN: Fx = crate::fx!("0.3");
 /// Consecutive short-ration economy ticks before any hp attrition at all.
 pub const STARVE_GRACE_TICKS: i32 = 5;
@@ -52,7 +57,7 @@ pub fn supply_draw(in_radius: bool) -> Fx {
 pub fn supply_bill(eaters: i32, out_of_supply: i32) -> Fx {
     let far = out_of_supply.clamp(0, eaters.max(0));
     let near = (eaters.max(0) - far).max(0);
-    Fx::from_num(FOOD_PER_UNIT) * (Fx::from_num(near) + Fx::from_num(far) * OUT_OF_SUPPLY_DRAW)
+    RATION_DRAW * (Fx::from_num(near) + Fx::from_num(far) * OUT_OF_SUPPLY_DRAW)
 }
 
 /// PROPORTIONAL rationing: what fraction of a full ration each mouth gets. A
@@ -87,29 +92,20 @@ pub struct SupplyResult {
     /// Morale each ration-drawer loses — proportional to the SHORTFALL.
     pub morale_drain: Fx,
     /// Hp each ration-drawer loses, once the grace has run out.
-    pub hp_drain: i32,
     /// True while anybody is on short rations at all.
     pub short: bool,
 }
 
 /// One economy tick of supply. `hunger` counts consecutive short ticks and is
 /// persisted by the caller.
-pub fn apply_supply(food: i32, bill: Fx, hunger: i32, dt: Fx) -> SupplyResult {
+pub fn apply_supply(food: i32, bill: Fx, _hunger: i32, _dt: Fx) -> SupplyResult {
     let r = ration(food, bill);
     let shortfall = (FULL_RATION - r).max(Fx::ZERO);
     let drawn = (bill * r).ceil().to_num::<i32>().min(food.max(0));
-    let hp_drain = if shortfall > Fx::ZERO && hunger >= STARVE_GRACE_TICKS {
-        let over = (hunger - STARVE_GRACE_TICKS + 1).min(STARVE_RAMP_TICKS);
-        let ramp = Fx::from_num(over) / Fx::from_num(STARVE_RAMP_TICKS);
-        (STARVE_DPS * dt * ramp * shortfall).round().to_num::<i32>().max(1)
-    } else {
-        0
-    };
     SupplyResult {
         food: (food - drawn).max(0),
         ration: r,
         morale_drain: STARVE_MORALE_DRAIN * shortfall,
-        hp_drain,
         short: shortfall > Fx::ZERO,
     }
 }
@@ -124,13 +120,16 @@ mod tests {
     /// each.
     #[test]
     fn a_one_unit_shortfall_costs_one_unit_of_rations() {
-        let bill = supply_bill(20, 0); // 20 mouths, all in supply
-        let r = ration(19, bill);
+        // 80 mouths, all in supply: at RATION_DRAW the bill is 20, so a single
+        // integer of food is one man's share and the shortfall is expressible
+        let bill = supply_bill(80, 0);
+        let short_food = bill.to_num::<i32>() - 1;
+        let r = ration(short_food, bill);
         assert!(r > crate::fx!("0.94") && r < FULL_RATION, "ration was {r}");
-        let out = apply_supply(19, bill, 0, ECONOMY_DT);
+        let out = apply_supply(short_food, bill, 0, ECONOMY_DT);
         assert!(out.short);
         assert_eq!(out.food, 0);
-        // the morale bite is the SHORTFALL, one twentieth of the old blanket hit
+        // the morale bite is the SHORTFALL, a fraction of the old blanket hit
         assert!(out.morale_drain < STARVE_MORALE_DRAIN / Fx::from_num(15), "{}", out.morale_drain);
         assert!(out.morale_drain > Fx::ZERO);
         // and an army with an empty larder takes the full bite
@@ -146,23 +145,36 @@ mod tests {
         assert!(!out.short);
         assert_eq!(out.ration, FULL_RATION);
         assert_eq!(out.morale_drain, Fx::ZERO);
-        assert_eq!(out.hp_drain, 0);
-        assert_eq!(out.food, 490);
+        assert_eq!(out.food, 500 - bill.ceil().to_num::<i32>());
     }
 
-    /// Attrition still escalates, but it is now scaled by HOW short the ration
-    /// is, so a slightly under-fed army is tired rather than dying.
+    /// Hunger costs an army its spirit and then its men. It never costs them
+    /// their lives: no game in this genre kills a soldier with an empty larder,
+    /// and a starving force that cannot even walk away is a punishment, not a
+    /// decision. This test is the guarantee that replaced attrition-by-hp.
     #[test]
-    fn bodies_break_after_spirits_and_in_proportion() {
+    fn hunger_breaks_spirits_never_bodies() {
         let bill = supply_bill(10, 0);
-        assert_eq!(apply_supply(0, bill, 0, ECONOMY_DT).hp_drain, 0, "the grace holds");
-        let onset = apply_supply(0, bill, STARVE_GRACE_TICKS, ECONOMY_DT);
-        assert!(onset.hp_drain >= 1 && onset.hp_drain < 8);
-        let deep = apply_supply(0, bill, STARVE_GRACE_TICKS + STARVE_RAMP_TICKS, ECONOMY_DT);
-        assert_eq!(deep.hp_drain, 8); // round(STARVE_DPS * 2 s)
-        // nine tenths fed, deep in a famine: nothing like the full bite
-        let mild = apply_supply(9, bill, STARVE_GRACE_TICKS + STARVE_RAMP_TICKS, ECONOMY_DT);
-        assert!(mild.hp_drain < deep.hp_drain, "{} vs {}", mild.hp_drain, deep.hp_drain);
+        for hunger in [0, STARVE_GRACE_TICKS, STARVE_GRACE_TICKS + STARVE_RAMP_TICKS, 10_000] {
+            let out = apply_supply(0, bill, hunger, ECONOMY_DT);
+            assert!(out.short, "an empty larder is a shortfall at hunger {hunger}");
+            assert!(out.morale_drain > Fx::ZERO, "hunger must cost morale at {hunger}");
+        }
+        // and the morale bite scales with HOW short the ration is
+        let starved = apply_supply(0, bill, STARVE_GRACE_TICKS, ECONOMY_DT);
+        let mild = apply_supply(9, bill, STARVE_GRACE_TICKS, ECONOMY_DT);
+        assert!(mild.morale_drain < starved.morale_drain, "a thin ration is not a famine");
+    }
+
+    /// The men leave instead. Desertion is what an empty larder actually cost a
+    /// medieval army, and it is the ONLY way hunger removes a soldier now.
+    #[test]
+    fn the_hungry_walk_away_and_the_stubborn_stay() {
+        let broken = crate::fx!("0.1");
+        let steady = crate::fx!("0.9");
+        assert!(deserts(broken, crate::fx!("0.1"), Fx::ZERO), "starving and broken: he goes");
+        assert!(!deserts(steady, crate::fx!("0.9"), FULL_RATION), "fed and steady: he stays");
+        assert!(!deserts(broken, crate::fx!("0.1"), FULL_RATION), "a fed man does not desert");
     }
 
     /// A deep push prices itself. This is the positioning decision the flat poll
@@ -211,8 +223,10 @@ mod tests {
     #[test]
     fn only_soldiers_draw_rations() {
         assert!(draws_rations(UnitKind::Spearman));
-        assert!(draws_rations(UnitKind::Ram));
         assert!(draws_rations(UnitKind::Naffatun));
+        // timber, rope and iron: an engine has no stomach
+        assert!(!draws_rations(UnitKind::Ram));
+        assert!(!draws_rations(UnitKind::Mangonel));
         assert!(!draws_rations(UnitKind::Peasant));
         assert!(!draws_rations(UnitKind::Imam));
         assert!(!draws_rations(UnitKind::Chaplain));

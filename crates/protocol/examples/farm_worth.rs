@@ -8,6 +8,7 @@
 
 use bevy_app::prelude::*;
 use saladin_protocol::*;
+use saladin_sim::supply::RATION_DRAW;
 use saladin_sim::*;
 
 fn center(tx: i32, ty: i32) -> V2 {
@@ -264,8 +265,8 @@ fn main() {
     }
 
     println!("\n== WHAT THAT FEEDS ==");
-    println!("one soldier in supply draws {FOOD_PER_UNIT} food / economy tick ({ECONOMY_DT}s)");
-    let per_soldier = FOOD_PER_UNIT as f32 / ECONOMY_DT.to_num::<f32>();
+    println!("one soldier in supply draws {RATION_DRAW} food / economy tick ({ECONOMY_DT}s)");
+    let per_soldier = RATION_DRAW.to_num::<f32>() / ECONOMY_DT.to_num::<f32>();
     println!("                          = {per_soldier:.3} food/s");
     let f3 = per(run_farm(seed, bx, by, 3, false, secs));
     println!("a 3-hand field delivers     {f3:.3} food/s");

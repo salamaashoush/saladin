@@ -510,8 +510,10 @@ impl UnitDef {
     /// must never silently put it on the muster roll. A hull is off the roll
     /// too — there is no supply model at sea, and a crew that deserts
     /// mid-crossing is not a feature.
+    /// A siege engine is timber, rope and iron. It has no stomach, and neither
+    /// does a hull — the crews are abstracted into the men who built them.
     pub fn draws_rations(&self) -> bool {
-        !matches!(self.role, UnitRole::Worker | UnitRole::Support | UnitRole::Boat)
+        !matches!(self.role, UnitRole::Worker | UnitRole::Support | UnitRole::Boat | UnitRole::Siege)
     }
 
     /// Raises and mends structures. ROLE, not `carry > 0`: a fishing skiff

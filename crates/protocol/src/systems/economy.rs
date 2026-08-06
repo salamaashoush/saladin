@@ -6,7 +6,7 @@ use crate::components::{
 use bevy_ecs::prelude::*;
 use bevy_platform::collections::HashMap;
 use saladin_sim::{
-    AuraTarget, ECONOMY_DT, FARM_RIPE_GRACE, FOOD_PER_UNIT, FULL_RATION, Fx,
+    AuraTarget, ECONOMY_DT, FARM_RIPE_GRACE, FULL_RATION, Fx, supply::RATION_DRAW,
     MORALE_MAX, OUT_OF_SUPPLY_DRAW, ResourceType, SUPPLY_RADIUS, SupplyResult, V2, WorkAura,
     apply_supply, building_def, deserts, dist, dist2, draws_rations, field_growth, forage_yield,
     is_sailable, lodge_loss, operational, ration, supply::STARVE_GRACE_TICKS, supply_bill,
@@ -290,7 +290,7 @@ pub fn economy(
             // the herd, so it buys a march and never a war.
             if e.far && r < FULL_RATION && forage_left > 0 {
                 forage_left -= 1;
-                let draw = Fx::from_num(FOOD_PER_UNIT) * OUT_OF_SUPPLY_DRAW;
+                let draw = RATION_DRAW * OUT_OF_SUPPLY_DRAW;
                 let want = ((FULL_RATION - r) * draw).ceil().to_num::<i32>();
                 let got = forage(&mut q_nodes, wild, pos.pos, want);
                 if got > 0 {
@@ -314,17 +314,14 @@ pub fn economy(
             if fat > 0 {
                 u.attack_cd += fat;
             }
-            if r < ATTRITION_RATION && eff.hp_drain > 0 {
-                let hp = (u.hp - eff.hp_drain).max(0);
-                if hp <= 0 {
-                    stats.of(p.player_id).lost += 1;
-                    commands.entity(e.entity).despawn();
-                    continue;
-                }
-                u.hp = hp;
-            }
+            // Hunger never kills a soldier. No game in this genre starves men
+            // to death on the march - it costs you their spirit and then it
+            // costs you the men themselves, who walk away rather than die
+            // standing. Morale, fatigue and desertion carry the whole penalty.
+            //
             // Men do not walk out the first evening without supper: the same
-            // grace that holds off attrition is how long they put up with it.
+            // grace that used to hold off attrition is how long they put up
+            // with it.
             if hunger >= STARVE_GRACE_TICKS
                 && deserts(u.morale, unit_def(u.kind).morale_resolve, r)
             {
