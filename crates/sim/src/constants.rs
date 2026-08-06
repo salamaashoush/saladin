@@ -29,8 +29,10 @@ pub const HARVEST_TIME: Fx = crate::fx!("1.2");
 /// harvested at double speed (nets + boats).
 pub const FISHING_HUT_RANGE: Fx = crate::fx!("6");
 /// Granary work aura: friendly fields within this range are worked and regrow
-/// faster — a hub is worthless alone and transformative over a cluster.
-pub const GRANARY_RANGE: Fx = crate::fx!("8");
+/// faster — a hub is worthless alone and transformative over a cluster. Sized
+/// against measured granary-to-farm spacing inside `TOWN_RADIUS` (3.6 to 18.4
+/// tiles): at 8 it reached two farms out of nine.
+pub const GRANARY_RANGE: Fx = crate::fx!("14");
 /// Mosque morale aura: the ground a standing mosque steadies.
 pub const MOSQUE_MORALE_RANGE: Fx = crate::fx!("14");
 
@@ -83,13 +85,44 @@ pub const MOTHERLODE_STONE_NODES: i32 = 36;
 /// fishing hut's reach — huts sustain their fishery; unmanaged waters fish out.
 pub const FISH_REGEN_PER_TICK: i32 = 2;
 
-// Farms: the only renewable food that scales. A field holds FARM_STORE of
-// standing crop and re-grows FARM_REGEN_MAX per economy tick on the best soil,
-// nothing at all below FARM_MIN_FERTILITY — which is what makes floodplains,
-// deltas and oases worth taking and holding.
+// Farms: the only renewable food that scales, and the only node whose output is
+// a function of TIME AND CARE rather than of how many hands you put on it. Soil
+// sets how big the harvest is (`field_cap`), labour sets how fast it comes in
+// (`field_growth`), and nothing at all grows below FARM_MIN_FERTILITY — which is
+// what makes floodplains, deltas and oases worth taking and holding. The season
+// math is `farming.rs`.
+/// Superseded by `field_cap`: the one flat store every field used to carry,
+/// whatever it was sown on. Kept as the yardstick the soil harnesses plot the
+/// old model against — measured, real farms now land between 96 and 113.
 pub const FARM_STORE: i32 = 90;
+/// Superseded by `field_cap`: the old truncated integer regen, kept because the
+/// soil harnesses plot the model it produced against the one that replaced it.
 pub const FARM_REGEN_MAX: i32 = 7;
 pub const FARM_MIN_FERTILITY: Fx = crate::fx!("0.22");
+/// Standing crop the poorest ground that clears the gate carries, and what the
+/// richest carries. A truncated `1 + soil * FARM_REGEN_MAX` landed on 2 or 3 for
+/// 84-94% of all sowable land, so soil 0.30 and soil 0.42 built the same farm.
+pub const FARM_CAP_MIN: i32 = 70;
+pub const FARM_CAP_MAX: i32 = 190;
+/// Soil at or above this carries a full harvest. Measured p99 fertility is
+/// 0.44-0.56 and the world maximum 0.60-0.74, so pinning higher would spend most
+/// of the range on ground no seed grows.
+pub const FARM_SOIL_RICH: Fx = crate::fx!("0.60");
+/// Seconds ONE pair of hands takes to bring a full field in from bare furrows.
+pub const FARM_TEND_TIME: Fx = crate::fx!("60");
+/// Rain-fed growth per economy tick on a field nobody is working — slow, but a
+/// neglected farm is never worthless and never deleted.
+pub const FARM_REGEN_IDLE: i32 = 1;
+/// A new field is sown at `cap / this`, so the first season pays back fast
+/// without handing over a free harvest the moment the plot is finished.
+pub const FARM_SOW_DIVISOR: i32 = 4;
+/// Standing crop lost per economy tick once it lodges, as `cap / this` rounded
+/// UP: 60 to 100 s from a full field to a bare one whatever the soil,
+/// salvageable at any point along it.
+pub const FARM_LODGE_DIVISOR: i32 = 50;
+/// Economy ticks a ripe crop may stand uncut before it starts to lodge
+/// (30 x 2 s = 60 s of grace, then a slow visible bleed).
+pub const FARM_RIPE_GRACE: i32 = 30;
 
 // Food economy: every ration-drawing unit eats FOOD_PER_UNIT per economy tick.
 // A short larder is PROPORTIONAL from here on (`supply.rs`) — an empty one

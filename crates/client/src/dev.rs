@@ -120,6 +120,13 @@ pub fn setup(app: &mut App) {
             app.insert_state(GameState::Playing);
             app.add_systems(Update, (auto_screenshot, arm_farm_mode));
         }
+        Ok("farm") => {
+            // AUDIT harness: finish five farms through the REAL construction
+            // path (so `finish_building` sows their fields), then pin one field
+            // to each crop stage so the whole lifecycle fits in one shot.
+            app.insert_state(GameState::Playing);
+            app.add_systems(Update, (auto_screenshot, auto_farm_demo));
+        }
         Ok("layout") => {
             // in-game + computed-rect dump for HUD layout debugging
             app.insert_state(GameState::Playing);
@@ -770,6 +777,419 @@ pub fn auto_spawn_units(world: &mut World, mut stage: Local<u8>) {
                 ..Unit::new(kind, pos)
             },
         ));
+    }
+}
+
+/// How many farms the `farm` harness stands up: one per crop stage.
+const FARM_DEMO_STAGES: usize = 5;
+
+/// Stamp the five crop stages onto fields 0..4 (sorted by `GameId`, so the
+/// order is stable across runs). `SALADIN_CROP=<n>` pins every field to that
+/// level with no latch instead — two runs at different n diff to zero over the
+/// farm mesh, which is how you prove the crop is not baked into the building.
+fn pin_crop_stages(world: &mut World) -> Vec<(u64, Entity)> {
+    use saladin_protocol::{Crop, ResourceNode};
+    use saladin_sim::{FARM_RIPE_GRACE, FARM_STORE};
+    let pin: Option<i32> = std::env::var("SALADIN_CROP").ok().and_then(|s| s.parse().ok());
+    let mut fields: Vec<(u64, Entity)> = {
+        let mut q = world.query::<(Entity, &GameId, &saladin_protocol::FieldOf)>();
+        q.iter(world).map(|(e, g, _)| (g.0, e)).collect()
+    };
+    fields.sort_unstable();
+    for (i, (_, e)) in fields.iter().enumerate() {
+        // each plot keeps the cap ITS OWN soil bought — overwriting them all
+        // with the reference store made the card's soil word say the same thing
+        // on every farm, which is exactly the collapse the word exists to avoid
+        let cap = world.get::<ResourceNode>(*e).map(|n| n.cap).filter(|c| *c > 0).unwrap_or(FARM_STORE);
+        let stages: [(i32, Crop); FARM_DEMO_STAGES] = [
+            (0, Crop::default()),
+            (cap / 5, Crop::default()),
+            (cap / 2, Crop::default()),
+            (cap, Crop { ripe: true, standing: 0 }),
+            (cap * 7 / 10, Crop { ripe: true, standing: FARM_RIPE_GRACE + 10 }),
+        ];
+        let (rem, crop) = match pin {
+            Some(n) => (n, Crop::default()),
+            None => stages[i.min(FARM_DEMO_STAGES - 1)],
+        };
+        if let Some(mut n) = world.get_mut::<ResourceNode>(*e) {
+            n.remaining = rem;
+        }
+        if let Some(mut c) = world.get_mut::<Crop>(*e) {
+            *c = crop;
+        }
+    }
+    fields
+}
+
+/// Screenshot harness only (AUDIT): stand FIVE farms up beside the keep and
+/// drive their fields to the five crop stages, so one frame shows the whole
+/// lifecycle side by side.
+///
+/// Stage 0 founds Farm SITES one tick from done and puts a real Constructing
+/// hand on each, so `construction::labour` completes them and `finish_building`
+/// sows their `FieldOf` nodes exactly as a played game would.
+/// Stage 1 frames the camera on the plots and starts pinning stubble / shoots /
+/// green / ripe / lodged onto fields 0..4 EVERY frame (the economy tick would
+/// otherwise regrow them out from under the shot).
+pub fn auto_farm_demo(world: &mut World, mut stage: Local<u8>) {
+    use saladin_protocol::{Building, BuildState, MatchId, NextEntityId, Owner, Pos, ResourceNode, Unit};
+    use saladin_sim::{BuildingKind, Fx, GatherState, UnitKind, V2, building_def, unit_def};
+    let t = world.resource::<Time>().elapsed_secs();
+    // SALADIN_WORK=1: pin every peasant into the food work cycle so a shot
+    // shows the tool and pose a reaper actually uses on a field
+    if *stage >= 2 && std::env::var("SALADIN_WORK").is_ok() {
+        // target_node has to be a FIELD or the renderer reads the pose as
+        // foraging a wild herd — the reap cycle is keyed on the node, not the
+        // resource (an unripe field routes a real order through the tend path,
+        // which clears target_node, so the harness has to pin it)
+        let fields: Vec<(u64, V2)> = {
+            let mut q = world.query::<(&GameId, &Pos, &saladin_protocol::FieldOf)>();
+            q.iter(world).map(|(g, p, _)| (g.0, p.pos)).collect()
+        };
+        let mut q = world.query::<(&Pos, &mut Unit)>();
+        for (p, mut u) in q.iter_mut(world) {
+            if u.kind != UnitKind::Peasant {
+                continue;
+            }
+            u.gather_state = GatherState::Harvesting;
+            u.carry_type = saladin_sim::ResourceType::Food;
+            u.carrying = 0;
+            u.has_target = false;
+            if let Some((id, _)) = fields
+                .iter()
+                .min_by_key(|(_, fp)| saladin_sim::dist2(*fp, p.pos).to_bits())
+            {
+                u.target_node = *id;
+            }
+        }
+    }
+    if *stage == 0 {
+        if t < 2.0 {
+            return;
+        }
+        *stage = 1;
+        let seed = world.resource::<saladin_protocol::WorldConfig>().seed;
+        let me = world.resource::<LocalPlayer>().0;
+        let Some(kp) = ({
+            let mut q = world.query::<(&Pos, &Building)>();
+            q.iter(world).find(|(_, b)| b.kind == BuildingKind::Keep).map(|(p, _)| p.pos)
+        }) else {
+            return;
+        };
+        let (kx, kz) = (kp.x.to_num::<i32>(), kp.y.to_num::<i32>());
+        let center =
+            |tx: i32, tz: i32| V2::new(Fx::from_num(tx) + saladin_sim::fx!("0.5"), Fx::from_num(tz) + saladin_sim::fx!("0.5"));
+        // fertile, buildable, clear of the keep — the same rule the ghost uses
+        let mut spots: Vec<V2> = Vec::new();
+        'scan: for r in 3i32..24 {
+            for dz in -r..=r {
+                for dx in -r..=r {
+                    if dx.abs() != r && dz.abs() != r {
+                        continue;
+                    }
+                    let p = center(kx + dx, kz + dz);
+                    if saladin_sim::check_place(seed, BuildingKind::Farm, p.x, p.y, |_, _| false, &[])
+                        .is_ok()
+                        && spots.iter().all(|q| saladin_sim::dist(*q, p) > saladin_sim::fx!("3"))
+                    {
+                        spots.push(p);
+                        if spots.len() == FARM_DEMO_STAGES {
+                            break 'scan;
+                        }
+                    }
+                }
+            }
+        }
+        // SALADIN_HUB=1: a finished Granary at the plot centroid, so the card's
+        // "Tended by" line and the aura ring a selected FARM borrows from its
+        // hub can both be seen
+        if std::env::var("SALADIN_HUB").is_ok()
+            && let Some(first) = spots.first().copied()
+        {
+            let mut sum = V2::ZERO;
+            for p in &spots {
+                sum = sum.add(*p);
+            }
+            let n = Fx::from_num(spots.len() as i32);
+            let at = V2::new(sum.x / n, sum.y / n);
+            let at = if saladin_sim::check_place(seed, BuildingKind::Granary, at.x, at.y, |_, _| false, &[])
+                .is_ok()
+            {
+                at
+            } else {
+                first.add(V2::new(saladin_sim::fx!("2"), Fx::ZERO))
+            };
+            let gdef = building_def(BuildingKind::Granary);
+            let mut g = Building::site(BuildingKind::Granary, gdef.max_hp, at);
+            g.state = BuildState::Complete;
+            g.work = Fx::ONE;
+            g.hp = gdef.max_hp;
+            let id = world.resource_mut::<NextEntityId>().alloc();
+            world.spawn((GameId(id), Owner(me), MatchId(1), Pos { pos: at, facing: Fx::ZERO }, g));
+        }
+        let def = building_def(BuildingKind::Farm);
+        for pos in spots {
+            let mut b = Building::site(BuildingKind::Farm, def.max_hp, pos);
+            b.work = saladin_sim::fx!("0.99");
+            b.hp = def.max_hp;
+            let id = world.resource_mut::<NextEntityId>().alloc();
+            world.spawn((
+                GameId(id),
+                Owner(me),
+                MatchId(1),
+                Pos { pos, facing: Fx::ZERO },
+                b,
+            ));
+            // one hand standing on the site: crew_up counts it, labour finishes
+            let pdef = unit_def(UnitKind::Peasant);
+            let hid = world.resource_mut::<NextEntityId>().alloc();
+            world.spawn((
+                GameId(hid),
+                Owner(me),
+                MatchId(1),
+                Pos { pos, facing: Fx::ZERO },
+                Unit {
+                    speed: pdef.speed,
+                    hp: pdef.max_hp,
+                    gather_state: GatherState::Constructing,
+                    job_site: id,
+                    ..Unit::new(UnitKind::Peasant, pos)
+                },
+            ));
+        }
+        return;
+    }
+    if *stage == 1 {
+        if t < 4.0 {
+            return;
+        }
+        *stage = 2;
+        let fields = pin_crop_stages(world);
+        eprintln!("FARMDEMO fields={}", fields.len());
+        // frame the plots themselves: the harness founds them off the keep, so
+        // the default keep framing leaves them out of shot at close zoom
+        if !fields.is_empty() {
+            let mut sum = V2::ZERO;
+            for (_, e) in &fields {
+                if let Some(p) = world.get::<Pos>(*e) {
+                    sum = sum.add(p.pos);
+                }
+            }
+            let n = Fx::from_num(fields.len() as i32);
+            let (cx, cz) = ((sum.x / n).to_num::<f32>(), (sum.y / n).to_num::<f32>());
+            let y = world
+                .get_resource::<crate::terrain::HeightField>()
+                .map(|f| crate::terrain::height_at(f, cx, cz))
+                .unwrap_or(0.0);
+            let mut cam = world.resource_mut::<crate::camera::CameraState>();
+            cam.snap_center(bevy::prelude::Vec3::new(cx, y, cz));
+            cam.framed = true;
+        }
+        let farms: Vec<(u64, V2, BuildState, i32)> = {
+            let mut q = world.query::<(&GameId, &Pos, &Building)>();
+            q.iter(world)
+                .filter(|(_, _, b)| b.kind == BuildingKind::Farm)
+                .map(|(g, p, b)| (g.0, p.pos, b.state, b.hp))
+                .collect()
+        };
+        for (id, p, st, hp) in &farms {
+            eprintln!("FARMDEMO farm {id} at {},{} {st:?} hp {hp}", p.x.to_num::<f32>(), p.y.to_num::<f32>());
+        }
+        for (gid, e, _) in {
+            let mut q = world.query::<(&GameId, Entity, &ResourceNode)>();
+            let v: Vec<_> = q
+                .iter(world)
+                .filter(|(_, _, n)| n.res_type == saladin_sim::ResourceType::Food)
+                .map(|(g, e, n)| (g.0, e, (n.remaining, n.cap, n.regen)))
+                .collect();
+            v
+        } {
+            let field = world.get::<saladin_protocol::FieldOf>(e).map(|f| f.0);
+            if field.is_some() {
+                eprintln!("FARMDEMO field {gid} of {field:?}");
+            }
+        }
+        // SALADIN_FARM=<0..4> selects the farm owning the field pinned to that
+        // stage, so the command card can be shot at every point of the season
+        let want: usize =
+            std::env::var("SALADIN_FARM").ok().and_then(|s| s.parse().ok()).unwrap_or(0);
+        let pick = fields
+            .get(want.min(fields.len().saturating_sub(1)))
+            .and_then(|(_, e)| world.get::<saladin_protocol::FieldOf>(*e).map(|f| f.0))
+            .or_else(|| farms.first().map(|f| f.0));
+        if let Some(id) = pick {
+            world.resource_mut::<selection::Selection>().building = Some(id);
+        }
+        // put every idle peasant on the fields: what WORKING a farm looks like
+        let me = world.resource::<LocalPlayer>().0;
+        let peasants: Vec<u64> = {
+            let mut q = world.query::<(&GameId, &Owner, &Unit)>();
+            q.iter(world)
+                .filter(|(_, o, u)| o.0 == me && u.kind == UnitKind::Peasant)
+                .map(|(g, ..)| g.0)
+                .collect()
+        };
+        let field_ids: Vec<u64> = fields.iter().map(|(g, _)| *g).collect();
+        let farm_ids: Vec<u64> = farms.iter().map(|(g, ..)| *g).collect();
+        if !field_ids.is_empty() {
+            let mut q = world.resource_mut::<CommandQueue>();
+            for (i, u) in peasants.into_iter().enumerate() {
+                // both orders a player can give a plot, alternating: the Gather
+                // the balancer issues, and the Repair a RIGHT-CLICK on the farm
+                // now emits. Both have to end with the man in the furrows.
+                if i % 2 == 0 {
+                    q.0.push(PlayerCommand::Gather {
+                        player_id: me,
+                        unit: u,
+                        node: field_ids[i % field_ids.len()],
+                    });
+                } else {
+                    q.0.push(PlayerCommand::Repair {
+                        player_id: me,
+                        unit: u,
+                        building: farm_ids[i % farm_ids.len()],
+                    });
+                }
+            }
+        }
+        return;
+    }
+    // the economy tick regrows a field and the reapers draw it down, so the
+    // pinned stages have to be re-stamped every frame or the shot lies
+    pin_crop_stages(world);
+    if *stage == 2 {
+        if t < 6.5 {
+            return;
+        }
+        *stage = 3;
+        // what the RENDERER thinks every worker is doing. A reaper misread as a
+        // forager is invisible in a still (same sickle) but audible as an axe
+        {
+            use crate::render::sync::{Activity, AnimState, Particle};
+            let mut tally: std::collections::BTreeMap<String, u32> = Default::default();
+            let mut q = world.query::<&AnimState>();
+            for a in q.iter(world) {
+                if a.harvest || a.activity != Activity::None {
+                    *tally.entry(format!("{:?}", a.activity)).or_default() += 1;
+                }
+            }
+            let chaff = world.query::<&Particle>().iter(world).count();
+            eprintln!("FARMDEMO activity {tally:?} particles {chaff}");
+            let crews: Vec<i32> = {
+                let mut q = world.query::<&Building>();
+                q.iter(world)
+                    .filter(|b| b.kind == BuildingKind::Farm)
+                    .map(|b| b.builders)
+                    .collect()
+            };
+            eprintln!("FARMDEMO crews {crews:?}");
+        }
+        // SALADIN_SURVEY=1: over every farm-eligible tile of this map, tally
+        // what the food-node variant table would draw on it
+        if std::env::var("SALADIN_SURVEY").is_ok() {
+            let seed = world.resource::<saladin_protocol::WorldConfig>().seed;
+            let mut tally = [0u32; 6];
+            let mut biomes: std::collections::BTreeMap<String, u32> = Default::default();
+            let step = 3;
+            let n = saladin_sim::WORLD_SIZE;
+            let mut tiles = 0u32;
+            for tz in (0..n).step_by(step) {
+                for tx in (0..n).step_by(step) {
+                    let (x, z) = (tx as f32 + 0.5, tz as f32 + 0.5);
+                    if saladin_sim::check_place(
+                        seed,
+                        BuildingKind::Farm,
+                        Fx::from_num(x),
+                        Fx::from_num(z),
+                        |_, _| false,
+                        &[],
+                    )
+                    .is_err()
+                    {
+                        continue;
+                    }
+                    tiles += 1;
+                    let roll = (saladin_sim::hash2(
+                        x as i32,
+                        z as i32,
+                        saladin_sim::rng::mix_seed(seed, 0x3b17),
+                    )
+                    .to_num::<f32>()
+                        * 997.0) as usize;
+                    let idx = crate::render::sync::node_variant(
+                        saladin_sim::ResourceType::Food,
+                        seed,
+                        x,
+                        z,
+                        roll,
+                        6,
+                    );
+                    tally[idx] += 1;
+                    let b = saladin_sim::sample_terrain(seed, Fx::from_num(x), Fx::from_num(z)).biome;
+                    *biomes.entry(format!("{b:?}")).or_default() += 1;
+                }
+            }
+            let names =
+                ["DEER", "BOAR", "BERRY", "DEER_GRAZING", "DEER_CARCASS", "BOAR_CARCASS"];
+            eprintln!("FARMSURVEY seed {seed}: {tiles} farm-eligible sample tiles");
+            for (i, c) in tally.iter().enumerate() {
+                if *c > 0 {
+                    eprintln!(
+                        "FARMSURVEY   {:<13} {c:>6}  {:.1}%",
+                        names[i],
+                        *c as f32 * 100.0 / tiles.max(1) as f32
+                    );
+                }
+            }
+            for (b, c) in biomes {
+                eprintln!("FARMSURVEY   biome {b:<14} {c}");
+            }
+        }
+        // what the RENDERER actually made of each field
+        let seed = world.resource::<saladin_protocol::WorldConfig>().seed;
+        let fields: Vec<(u64, V2, i32)> = {
+            let mut q = world.query::<(&GameId, &Pos, &ResourceNode, &saladin_protocol::FieldOf)>();
+            q.iter(world).map(|(g, p, n, _)| (g.0, p.pos, n.remaining)).collect()
+        };
+        for (gid, p, rem) in fields {
+            let (x, z) = (p.x.to_num::<f32>(), p.y.to_num::<f32>());
+            let biome =
+                saladin_sim::sample_terrain(seed, Fx::from_num(x), Fx::from_num(z)).biome;
+            let roll = (saladin_sim::hash2(
+                x as i32,
+                z as i32,
+                saladin_sim::rng::mix_seed(seed, 0x3b17),
+            )
+            .to_num::<f32>()
+                * 997.0) as usize;
+            let idx = crate::render::sync::node_variant(
+                saladin_sim::ResourceType::Food,
+                seed,
+                x,
+                z,
+                roll,
+                6,
+            );
+            let name = ["DEER", "BOAR", "BERRY", "DEER_GRAZING", "DEER_CARCASS", "BOAR_CARCASS"]
+                [idx];
+            let root = world.resource::<crate::render::sync::RenderMap>().0.get(&gid).copied();
+            let has_brain = root
+                .map(|e| world.get::<crate::render::sync::AnimalNode>(e).is_some())
+                .unwrap_or(false);
+            let carcass = root
+                .and_then(|e| world.get::<crate::render::sync::AnimalNode>(e))
+                .map(|a| (a.carcass, a.full, a.remaining));
+            let crop = world.get::<saladin_protocol::Crop>(
+                world.resource::<saladin_protocol::GameIndex>().0[&gid],
+            );
+            let stage = root
+                .and_then(|e| world.get::<crate::render::sync::CropField>(e))
+                .map(|c| c.stage);
+            eprintln!(
+                "FARMDEMO field {gid} biome {biome:?} remaining {rem} crop {crop:?} render_stage {stage:?} -> variant {idx} {name} animal_brain={has_brain} {carcass:?}"
+            );
+        }
     }
 }
 

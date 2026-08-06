@@ -289,23 +289,23 @@ pub fn scaffold_mesh() -> Mesh {
     merge(parts)
 }
 
-// A sown field: tilled furrows under standing grain, fenced at the corners.
-// It has to read as WORKED GROUND from the iso camera, so the furrows run in
-// visible ridges and the crop rows sit between them rather than on top.
+// THE PLOT ONLY: tilled soil in ridged furrows, fenced at the corners. The
+// CROP is the `FieldOf` resource node standing on it (props::crop_stage_meshes),
+// not part of the building — a farm that bakes ripe grain into its own mesh is
+// a field that has been harvest-ready since before it was built, and the siting
+// ghost reuses this handle, so it promised a crop for a farm that did not exist.
 fn build_farm() -> Mesh {
     const SOIL: u32 = 0x6b4a2e;
-    const SOIL_LIT: u32 = 0x86603c;
-    const GRAIN: u32 = 0xc9a94e;
-    const GRAIN_DARK: u32 = 0xa88a38;
+    const SOIL_LIT: u32 = 0x7d5936;
+    const SOIL_DARK: u32 = 0x5b3f26;
     let mut parts = vec![part(cuboid(1.9, 0.07, 1.9), srgb(SOIL), xyz(0.0, 0.035, 0.0))];
     for i in 0..6 {
         let z = -0.79 + i as f32 * 0.316;
-        parts.push(part(cuboid(1.82, 0.05, 0.14), srgb(SOIL_LIT), xyz(0.0, 0.09, z)));
-        let shade = if i % 2 == 0 { GRAIN } else { GRAIN_DARK };
-        for j in 0..7 {
-            let x = -0.72 + j as f32 * 0.24;
-            parts.push(part(cuboid(0.1, 0.26, 0.08), srgb(shade), xyz(x, 0.22, z + 0.14)));
-        }
+        // a ridge and the trench beside it: worked ground needs a shadow line
+        // or it reads as a flat brown tile from the iso camera. Narrow and
+        // low-contrast on purpose — wide bright bands read as decking.
+        parts.push(part(cuboid(1.82, 0.045, 0.1), srgb(SOIL_LIT), xyz(0.0, 0.088, z)));
+        parts.push(part(cuboid(1.82, 0.03, 0.05), srgb(SOIL_DARK), xyz(0.0, 0.072, z + 0.085)));
     }
     // corner posts and two rails: the silhouette that says "enclosure"
     for (px, pz) in [(-0.93f32, -0.93f32), (0.93, -0.93), (-0.93, 0.93), (0.93, 0.93)] {

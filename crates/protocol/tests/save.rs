@@ -349,14 +349,23 @@ fn a_battle_in_progress_survives_the_disk() {
     }
 }
 
-/// bincode 1.3 is POSITIONAL: a v1 save fed to a v2 `Unit` decodes as garbage
-/// rather than failing, so the version header has to refuse it outright.
+/// bincode 1.3 is POSITIONAL: an older save fed to a newer row decodes as
+/// garbage rather than failing, so the version header has to refuse it
+/// outright. Every superseded version, not just the one before this one.
 #[test]
-fn a_version_one_save_is_refused_not_misread() {
+fn a_stale_save_is_refused_not_misread() {
     let mut a = build();
     step(a.world_mut());
-    let mut bytes = save::to_bytes(&save::snapshot(a.world_mut()));
-    assert_eq!(save::SAVE_VERSION, 2, "bump this test with the save version");
-    bytes[8..12].copy_from_slice(&1u32.to_le_bytes());
-    assert!(save::from_bytes(&bytes).is_none(), "a v1 save was accepted into a v2 world");
+    let bytes = save::to_bytes(&save::snapshot(a.world_mut()));
+    const { assert!(save::SAVE_VERSION >= 3, "SAVE_VERSION 3 added the Crop component to the row") };
+    assert!(save::from_bytes(&bytes).is_some(), "the current version refused its own save");
+    for v in 0..save::SAVE_VERSION {
+        let mut stale = bytes.clone();
+        stale[8..12].copy_from_slice(&v.to_le_bytes());
+        assert!(
+            save::from_bytes(&stale).is_none(),
+            "a v{v} save was accepted into a v{} world",
+            save::SAVE_VERSION
+        );
+    }
 }

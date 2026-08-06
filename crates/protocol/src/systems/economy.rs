@@ -1,15 +1,16 @@
 use crate::MatchStatuses;
 use crate::WorldConfig;
 use crate::components::{
-    Building, FieldOf, GameId, MatchId, Owner, Player, Pos, ResourceNode, Unit,
+    Building, Crop, FieldOf, GameId, MatchId, Owner, Player, Pos, ResourceNode, Unit,
 };
 use bevy_ecs::prelude::*;
 use bevy_platform::collections::HashMap;
 use saladin_sim::{
-    AuraTarget, ECONOMY_DT, FOOD_PER_UNIT, FOOD_YIELD, FULL_RATION, Fx, MORALE_MAX,
-    OUT_OF_SUPPLY_DRAW, ResourceType, SUPPLY_RADIUS, SupplyResult, V2, WorkAura, apply_supply,
-    building_def, deserts, dist, dist2, draws_rations, forage_yield, is_passable, operational,
-    ration, supply::STARVE_GRACE_TICKS, supply_bill, unit_def,
+    AuraTarget, ECONOMY_DT, FARM_RIPE_GRACE, FOOD_PER_UNIT, FOOD_YIELD, FULL_RATION, Fx,
+    MORALE_MAX, OUT_OF_SUPPLY_DRAW, ResourceType, SUPPLY_RADIUS, SupplyResult, V2, WorkAura,
+    apply_supply, building_def, deserts, dist, dist2, draws_rations, field_growth, forage_yield,
+    is_passable, lodge_loss, operational, ration, supply::STARVE_GRACE_TICKS, supply_bill,
+    unit_def,
 };
 
 /// The heart a man keeps on a given ration. Full commons cost nothing; an empty
@@ -123,9 +124,10 @@ pub fn economy(
     mut stats: ResMut<crate::MatchStats>,
 ) {
     let seed = cfg.seed;
-    // Regrowth. A sown field comes back on its own — how fast is the soil's
-    // doing — and a fishing hut tends the waters in its reach. Everything else
-    // (timber, ore, wild herds) is finite and stays mined out.
+    // The season. A sown field GROWS — the soil says how big, the crew standing
+    // on the farm says how fast — ripens, and lodges if nobody cuts it; a fishing
+    // hut tends the waters in its reach. Everything else (timber, ore, wild
+    // herds) is finite and stays mined out.
     // Additive + clamped, so iteration order can never desync the lockstep.
     let auras: Vec<(u64, V2, WorkAura)> = q_buildings
         .iter()
@@ -133,10 +135,13 @@ pub fn economy(
         .filter_map(|(_, p, o, b)| building_def(b.kind).aura.map(|a| (o.0, p.pos, a)))
         .collect();
     // A field belongs to the farm that sowed it, so only that player's granary
-    // may tend it. A wild fishery belongs to nobody: whoever plants the hut
-    // tends the water, and the ground is contested on purpose.
-    let farm_owner: HashMap<u64, u64> =
-        q_buildings.iter().map(|(g, _, o, _)| (g.0, o.0)).collect();
+    // may tend it and only that farm's crew works it. A wild fishery belongs to
+    // nobody: whoever plants the hut tends the water, and the ground is
+    // contested on purpose. One walk over the buildings answers both.
+    let farm_of: HashMap<u64, (u64, i32, bool)> = q_buildings
+        .iter()
+        .map(|(g, _, o, b)| (g.0, (o.0, b.builders, operational(b.state))))
+        .collect();
     let tended = |at: V2, target: AuraTarget, node_owner: Option<u64>| -> i32 {
         auras
             .iter()
@@ -151,16 +156,36 @@ pub fn economy(
     };
     let s = &mut *scratch;
     s.wild.clear();
-    for (ent, gid, np, mut n, field) in &mut q_nodes {
-        // a sown field grows back to its own capacity, faster under a granary
-        if n.regen > 0 && n.remaining < n.cap {
-            let owner = field.and_then(|f| farm_owner.get(&f.0).copied());
-            let extra = if auras.is_empty() {
+    for (ent, gid, np, mut n, field, crop) in &mut q_nodes {
+        if let Some(f) = field {
+            let (owner, hands) = match farm_of.get(&f.0).copied() {
+                Some((o, crew, up)) => (o, if up { crew } else { 0 }),
+                None => (0, 0),
+            };
+            let aura = if auras.is_empty() {
                 0
             } else {
-                tended(np.pos, AuraTarget::Field, Some(owner.unwrap_or(0)))
+                tended(np.pos, AuraTarget::Field, Some(owner))
             };
-            n.remaining = (n.remaining + n.regen + extra).min(n.cap);
+            match crop {
+                Some(mut c) => {
+                    let (rem, next) = season(&n, &c, hands, aura);
+                    if n.remaining != rem {
+                        n.remaining = rem;
+                    }
+                    if *c != next {
+                        *c = next;
+                    }
+                }
+                // a field sown before crops existed (a harness row, an old save):
+                // the plain renewable it used to be
+                None if n.regen > 0 && n.remaining < n.cap => {
+                    n.remaining = (n.remaining + n.regen + aura).min(n.cap);
+                }
+                None => {}
+            }
+        } else if n.regen > 0 && n.remaining < n.cap {
+            n.remaining = (n.remaining + n.regen).min(n.cap);
         }
         let dry = is_passable(seed, np.pos.x.to_num::<i32>(), np.pos.y.to_num::<i32>());
         // a hut restocks the waters in its reach up to a natural school
@@ -317,7 +342,38 @@ type NodeData = (
     &'static Pos,
     &'static mut ResourceNode,
     Option<&'static FieldOf>,
+    Option<&'static mut Crop>,
 );
+
+/// One economy tick of a field's season, as a pure step over the two fields that
+/// carry it. Growing, it takes what the soil and the crew give it and LATCHES
+/// ripe at capacity — latched rather than derived, so a reaper drawing the field
+/// down cannot un-ripen it at the first sheaf and thrash. Ripe, it counts the
+/// ticks it has stood; past the grace (which a farm hub doubles) it lodges and
+/// bleeds, still fully harvestable the whole way down. Reaped or lodged to
+/// nothing, the season simply starts again — the row is never deleted.
+fn season(n: &ResourceNode, c: &Crop, hands: i32, aura: i32) -> (i32, Crop) {
+    let mut rem = n.remaining;
+    let mut crop = *c;
+    if !crop.ripe {
+        rem = (rem + field_growth(hands, n.cap, aura)).min(n.cap);
+        if rem >= n.cap {
+            crop.ripe = true;
+            crop.standing = 0;
+        }
+    } else {
+        crop.standing += 1;
+        let grace = if aura > 0 { FARM_RIPE_GRACE * 2 } else { FARM_RIPE_GRACE };
+        if crop.standing > grace {
+            rem = (rem - lodge_loss(n.cap)).max(0);
+        }
+    }
+    if rem <= 0 {
+        crop.ripe = false;
+        crop.standing = 0;
+    }
+    (rem, crop)
+}
 
 /// Strip a wild herd within reach for at most `want` food — a man takes his
 /// supper, not the whole beast, so one herd carries a column for a while.
@@ -332,7 +388,7 @@ fn forage(q_nodes: &mut Query<NodeData>, wild: &[(u64, Entity, V2)], at: V2, wan
         if dist2(p, at) > r2 {
             continue;
         }
-        let Ok((_, _, _, mut n, _)) = q_nodes.get_mut(ent) else { continue };
+        let Ok((_, _, _, mut n, _, _)) = q_nodes.get_mut(ent) else { continue };
         let take = forage_yield(n.remaining).min(want);
         if take > 0 {
             n.remaining -= take;

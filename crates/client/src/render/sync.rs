@@ -10,7 +10,8 @@ use bevy::mesh::{MeshBuilder, Meshable};
 use bevy::prelude::*;
 use std::collections::HashMap;
 use saladin_protocol::{
-    BuildState, Building, GameId, Owner, Player, Pos, ResourceNode, Unit, WorldConfig,
+    BuildState, Building, Crop, FieldOf, GameId, Owner, Player, Pos, ResourceNode, Unit,
+    WorldConfig,
 };
 use saladin_sim::rng::mix_seed;
 use saladin_sim::{
@@ -21,6 +22,8 @@ use std::collections::HashSet;
 
 /// Far-zoom threshold above which unit bodies switch to impostor meshes.
 const IMPOSTOR_VIEW_SIZE: f32 = 34.0;
+/// Zoom past which chaff off a sickle is not drawn — see `field_work_fx`.
+const CHAFF_VIEW_SIZE: f32 = 20.0;
 pub const BAR_W: f32 = 0.9;
 pub const BAR_H: f32 = 0.12;
 
@@ -49,6 +52,9 @@ pub struct RenderAssets {
     /// `update_wall_arms`.
     pub wall_arm: [Handle<Mesh>; 2],
     pub nodes: HashMap<ResourceType, Vec<Handle<Mesh>>>,
+    /// Farm crop by lifecycle stage, indexed by the `CROP_*` constants. A
+    /// field is never drawn from `nodes[&Food]` — that table is wild game.
+    pub crop_stages: Vec<Handle<Mesh>>,
     pub fish_node: Handle<Mesh>,
     pub carry_sack: Handle<Mesh>,
     /// [axe, pick, sickle] — peasant hand tools (empty if not baked)
@@ -56,9 +62,6 @@ pub struct RenderAssets {
     pub puff: Handle<Mesh>,
     pub flame: Handle<Mesh>,
     pub ripple: Handle<Mesh>,
-    /// Work-radius ring per `BuildingKind`, baked at that kind's own aura
-    /// radius — scaling one shared torus would scale its tube with it.
-    pub aura_rings: Vec<Option<Handle<Mesh>>>,
     /// Timber frame hung around a construction site (unit footprint).
     pub scaffold: Handle<Mesh>,
     pub scorch: Handle<Mesh>,
@@ -95,6 +98,8 @@ pub struct RenderMaterials {
     pub smoke_light: Handle<StandardMaterial>,
     pub smoke_dark: Handle<StandardMaterial>,
     pub flame: Handle<StandardMaterial>,
+    /// Straw dust off a sickle stroke.
+    pub chaff: Handle<StandardMaterial>,
 }
 
 fn color_of(hex: u32) -> Color {
@@ -175,6 +180,7 @@ pub fn build_materials(
         smoke_light: overlay(mats, Color::srgb_u8(0xb8, 0xb4, 0xac), 0.5),
         smoke_dark: overlay(mats, Color::srgb_u8(0x45, 0x41, 0x3c), 0.55),
         flame: overlay(mats, Color::srgb_u8(0xff, 0x9a, 0x2e), 0.85),
+        chaff: overlay(mats, Color::srgb_u8(0xe3, 0xc8, 0x74), 0.7),
     }
 }
 
@@ -248,14 +254,38 @@ pub struct UnitBody {
     pub sack: bool,
 }
 
-/// What a harvesting peasant is actually doing — picks the tool in hand and
-/// the swing cycle (chop high, mine low, forage bent over).
+/// What a harvesting peasant is actually doing — picks the tool in hand, the
+/// swing cycle (chop high, mine low, forage bent over, reap in a low sweep) and
+/// the sound. Reaping a sown field is NOT foraging a wild herd: a farm that
+/// rings like a lumberyard is the noise half of "I dont really see it working".
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Activity {
     None,
     Chop,
     Mine,
     Forage,
+    Reap,
+    /// Working a crop that is not ready to cut — the committed-crew half of the
+    /// season. The sim state is `Constructing`, which raises no harvest flag, so
+    /// without this a farmhand stood to attention in his own furrows.
+    Tend,
+}
+
+impl Activity {
+    /// Which `ToolSlot` this activity puts in the hand. A reaper, a forager and
+    /// a man tending a crop all carry the sickle, so the slot table stays
+    /// [axe, pick, sickle].
+    pub fn tool(self) -> Activity {
+        match self {
+            Activity::Reap | Activity::Tend => Activity::Forage,
+            a => a,
+        }
+    }
+
+    /// Work done bent over the ground rather than swung at something standing.
+    pub fn stooped(self) -> bool {
+        matches!(self, Activity::Forage | Activity::Reap | Activity::Tend)
+    }
 }
 
 /// One swappable hand tool on a peasant's right hand; visible only while the
@@ -307,6 +337,18 @@ pub struct FishNode {
     pub phase: f32,
 }
 
+/// A farm's standing crop. Mirrors the sim numbers that decide which of the
+/// five shared stage meshes the field wears, so `animate_crops` never has to
+/// look a sim row back up. Never written back to the sim.
+#[derive(Component)]
+pub struct CropField {
+    pub remaining: i32,
+    pub cap: i32,
+    pub ripe: bool,
+    pub standing: i32,
+    pub stage: usize,
+}
+
 /// A live game animal (deer/boar food node): wanders around its sim anchor
 /// (render-only — gatherers still walk to the anchor), grazes at waypoints,
 /// and flops into a carcass the moment the first harvest tick lands.
@@ -345,9 +387,14 @@ pub struct HpBar {
 pub struct BuildingSelRing;
 /// Thin world-space circle showing a selected building's work radius
 /// (fishing hut aura) — a dedicated mesh, NOT the dashed ring texture
-/// scaled up (that blows the dashes into giant blobs).
+/// scaled up (that blows the dashes into giant blobs). The mesh is rebuilt in
+/// place whenever `key` changes, so exactly one lives at a time and its handle
+/// is never reallocated.
 #[derive(Component)]
-pub struct AuraRing;
+pub struct AuraRing {
+    /// Centre x, centre z, radius. A flat ring cannot be shared across ground.
+    pub key: (f32, f32, f32),
+}
 #[derive(Component)]
 pub struct RallyFlag;
 
@@ -596,8 +643,57 @@ pub fn rebuild_occupancy(
     }
 }
 
-fn node_scale(remaining: i32) -> f32 {
-    0.5 + 0.5 * (remaining as f32 / 120.0).min(1.0)
+/// How big a deposit looks at `remaining` of its OWN `cap`. A hardcoded
+/// divisor made a full node render at whatever fraction of that constant its
+/// yield happened to be — a 90-cap field was born at 0.875 and could never
+/// reach 1.0.
+fn node_scale(remaining: i32, cap: i32) -> f32 {
+    0.5 + 0.5 * (remaining as f32 / cap.max(1) as f32).clamp(0.0, 1.0)
+}
+
+/// Fraction of the season a field is through, by growth band. `prev` supplies
+/// the hysteresis: an edge only yields in the direction that would LEAVE the
+/// stage the field is already wearing, so a crop parked on a boundary cannot
+/// swap mesh every economy tick.
+fn crop_band(f: f32, prev: usize) -> usize {
+    const EDGES: [f32; 3] = [0.06, 0.34, 0.72];
+    const HYST: f32 = 0.04;
+    let mut band = 0;
+    for (i, e) in EDGES.iter().enumerate() {
+        if f >= if prev > i { e - HYST } else { e + HYST } {
+            band = i + 1;
+        }
+    }
+    band
+}
+
+/// Which shared stage mesh a field wears. The two states the SIM latches win
+/// over the growth bands: a ripe crop stays gold while it is being cut, and a
+/// crop left standing too long is lodged whatever is left of it.
+fn crop_stage(c: &CropField) -> usize {
+    use crate::render::models::props::*;
+    if c.standing > saladin_sim::FARM_RIPE_GRACE {
+        return CROP_LODGED;
+    }
+    if c.ripe {
+        return CROP_RIPE;
+    }
+    // CROP_STUBBLE..CROP_RIPE are 0..3, so the band IS the stage
+    crop_band((c.remaining as f32 / c.cap.max(1) as f32).clamp(0.0, 1.0), c.stage)
+}
+
+/// Height within a stage: the crop rises continuously between the five meshes
+/// (the `site_rise` idiom) instead of popping from one to the next, and a
+/// lodged crop sinks as it bleeds away.
+fn crop_rise(stage: usize, remaining: i32, cap: i32) -> f32 {
+    use crate::render::models::props::*;
+    let f = (remaining as f32 / cap.max(1) as f32).clamp(0.0, 1.0);
+    match stage {
+        CROP_SHOOTS => 0.55 + 0.45 * (f / 0.38).clamp(0.0, 1.0),
+        CROP_GREEN => 0.6 + 0.4 * ((f - 0.3) / 0.46).clamp(0.0, 1.0),
+        CROP_LODGED => 0.45 + 0.55 * f,
+        _ => 1.0,
+    }
 }
 
 impl RenderAssets {
@@ -651,7 +747,7 @@ impl RenderAssets {
 
 /// Biome-aware node variant pick: palms at oases, conifers in forest, olives
 /// on the dry steppe; boars root in the woods, deer graze the open grass.
-fn node_variant(res: ResourceType, seed: u32, x: f32, z: f32, roll: usize, len: usize) -> usize {
+pub fn node_variant(res: ResourceType, seed: u32, x: f32, z: f32, roll: usize, len: usize) -> usize {
     use crate::render::models::props::*;
     use saladin_sim::{Biome, Fx, sample_terrain};
     let biome = sample_terrain(seed, Fx::from_num(x), Fx::from_num(z)).biome;
@@ -698,7 +794,16 @@ pub fn sync_render(
     cam_state: Res<CameraState>,
     time: Res<Time>,
     world_cfg: Res<WorldConfig>,
-    q_sim: Query<(&GameId, &Pos, Option<&Unit>, Option<&Building>, Option<&ResourceNode>, Option<&Owner>)>,
+    q_sim: Query<(
+        &GameId,
+        &Pos,
+        Option<&Unit>,
+        Option<&Building>,
+        Option<&ResourceNode>,
+        Option<&Owner>,
+        Option<&FieldOf>,
+        Option<&Crop>,
+    )>,
     q_players: Query<&Player>,
     mut q_roots: Query<
         (&mut Lerp, &mut Visibility, &mut Transform, Option<&mut AnimState>, Option<&mut DamageState>),
@@ -708,12 +813,14 @@ pub fn sync_render(
         (&ChildOf, &UnitBody, &mut Visibility, &mut MeshMaterial3d<StandardMaterial>),
         (Without<RenderRoot>, Without<SelRing>, Without<RoutFlag>),
     >,
-    (mut q_rings, mut q_routs, mut q_animals, q_node_scale, mut prop_grid): (
+    (mut q_rings, mut q_routs, mut q_animals, mut q_crops, q_node_scale, mut prop_grid, q_field_ids): (
         Query<(&ChildOf, &mut Visibility), (With<SelRing>, Without<RenderRoot>)>,
         Query<(&ChildOf, &mut Visibility), (With<RoutFlag>, Without<RenderRoot>, Without<SelRing>)>,
         Query<&mut AnimalNode>,
+        Query<&mut CropField>,
         Query<&NodeBaseScale>,
         ResMut<crate::PropGrid>,
+        Query<(&GameId, &FieldOf)>,
     ),
 ) {
     let owner_color: HashMap<u64, u32> = q_players
@@ -730,8 +837,17 @@ pub fn sync_render(
     let mut seen: HashSet<u64> = HashSet::new();
     // per-root info gathered for the child passes
     let mut unit_state: HashMap<Entity, (u32, bool, bool, UnitKind)> = HashMap::new(); // (color, selected, routing, kind)
+    // Sown fields (so a man cutting wheat is told apart from one gutting a deer)
+    // and the plots they belong to (so a man tending one is told apart from a
+    // man raising a wall). One archetype-filtered query, a handful of rows.
+    let mut sown: HashSet<u64> = HashSet::new();
+    let mut plots: HashSet<u64> = HashSet::new();
+    for (g, f) in &q_field_ids {
+        sown.insert(g.0);
+        plots.insert(f.0);
+    }
 
-    for (gid, pos, unit, bld, node, owner) in &q_sim {
+    for (gid, pos, unit, bld, node, owner, field_of, crop) in &q_sim {
         let x = pos.pos.x.to_num::<f32>();
         let z = pos.pos.y.to_num::<f32>();
         let ground = height_at(&field, x, z);
@@ -788,8 +904,19 @@ pub fn sync_render(
                         anim.activity = match u.carry_type {
                             ResourceType::Wood => Activity::Chop,
                             ResourceType::Stone | ResourceType::Gold => Activity::Mine,
+                            ResourceType::Food if sown.contains(&u.target_node) => Activity::Reap,
                             ResourceType::Food => Activity::Forage,
                         };
+                        anim.work_until = now + 0.35;
+                    } else if u.gather_state == saladin_sim::GatherState::Constructing
+                        && !u.has_target
+                        && plots.contains(&u.job_site)
+                    {
+                        // A hand tending a crop is `Constructing` in the sim, so
+                        // he raises no harvest flag and would stand to attention
+                        // in his own furrows. `work_until` alone gives him the
+                        // pose without telling `crowd_sfx` a sickle just fell.
+                        anim.activity = Activity::Tend;
                         anim.work_until = now + 0.35;
                     } else if u.gather_state == saladin_sim::GatherState::Idle {
                         anim.activity = Activity::None;
@@ -863,6 +990,56 @@ pub fn sync_render(
                     tf.rotation = Quat::from_rotation_y(yaw);
                 }
             }
+        } else if let (Some(n), Some(f)) = (node, field_of) {
+            // A FARM'S CROP. Not wild game: no biome variant roll, no wander
+            // brain, no carcass. It is the plot's own five-stage mesh, squared
+            // to the furrows the building lays down.
+            seen.insert(gid.0);
+            let world = Vec3::new(x, ground, z);
+            let c = crop.copied().unwrap_or_default();
+            let root = *map.0.entry(gid.0).or_insert_with(|| {
+                let mut mirror = CropField {
+                    remaining: n.remaining,
+                    cap: n.cap,
+                    ripe: c.ripe,
+                    standing: c.standing,
+                    stage: crate::render::models::props::CROP_STUBBLE,
+                };
+                mirror.stage = crop_stage(&mirror);
+                // the crop grows in ROWS, so it has to share the plot's yaw —
+                // the field row carries none of its own (facing: ZERO)
+                let yaw = q_sim
+                    .iter()
+                    .find(|(g, _, _, b, ..)| g.0 == f.0 && b.is_some())
+                    .map(|(_, p, ..)| p.facing.to_num::<f32>())
+                    .unwrap_or(0.0);
+                commands
+                    .spawn((
+                        RenderRoot(gid.0),
+                        NodeBaseScale(Vec3::ONE),
+                        Mesh3d(assets.crop_stages[mirror.stage].clone()),
+                        MeshMaterial3d(rmats.node[&ResourceType::Food].clone()),
+                        Transform::from_translation(world)
+                            .with_rotation(Quat::from_rotation_y(yaw))
+                            .with_scale(Vec3::new(
+                                1.0,
+                                crop_rise(mirror.stage, n.remaining, n.cap),
+                                1.0,
+                            )),
+                        Lerp { target: world, yaw, bob_phase: 0.0, turn: false, hop: false },
+                        mirror,
+                    ))
+                    .id()
+            });
+            if let Ok(mut mirror) = q_crops.get_mut(root) {
+                mirror.remaining = n.remaining;
+                mirror.cap = n.cap;
+                mirror.ripe = c.ripe;
+                mirror.standing = c.standing;
+            }
+            if let Ok((_, _, mut tf, _, _)) = q_roots.get_mut(root) {
+                tf.translation = world;
+            }
         } else if let Some(n) = node {
             seen.insert(gid.0);
             let world = Vec3::new(x, ground, z);
@@ -913,7 +1090,7 @@ pub fn sync_render(
                     MeshMaterial3d(rmats.node[&n.res_type].clone()),
                     Transform::from_translation(pos)
                         .with_rotation(rot)
-                        .with_scale(base * node_scale(n.remaining)),
+                        .with_scale(base * node_scale(n.remaining, n.cap)),
                     Lerp { target: pos, yaw, bob_phase: 0.0, turn: false, hop: false },
                 ));
                 if fishy {
@@ -943,7 +1120,7 @@ pub fn sync_render(
             });
             let base = q_node_scale.get(root).map(|b| b.0).unwrap_or(Vec3::ONE);
             if let Ok((_, _, mut tf, _, _)) = q_roots.get_mut(root) {
-                tf.scale = base * node_scale(n.remaining);
+                tf.scale = base * node_scale(n.remaining, n.cap);
             }
             if let Ok(mut animal) = q_animals.get_mut(root) {
                 animal.remaining = n.remaining;
@@ -1003,7 +1180,7 @@ pub fn sync_render(
                 .unwrap_or((false, 0.0));
             commands
                 .entity(e)
-                .remove::<(Lerp, AnimState, AnimalNode)>()
+                .remove::<(Lerp, AnimState, AnimalNode, CropField)>()
                 .insert(Dying { t: 0.0, fall, rubble });
         }
     }
@@ -1143,6 +1320,69 @@ pub fn building_damage_fx(
                     ));
                 }
             }
+        }
+    }
+}
+
+/// Radians per second the reaping arm sweeps at. The chaff has to come off ON
+/// the stroke, so `animate_units` and `field_work_fx` MUST read the same clock —
+/// they each carried their own copy of it, which is a detachment waiting for
+/// whichever one is tuned first.
+const REAP_SWING: f32 = 2.6;
+
+/// Whether a sickle stroke completed in the last `dt`, and which way the blade
+/// was travelling. A scythe cuts going out AND coming back, so it is the HALF
+/// cycle of `REAP_SWING`, not the full one.
+fn reap_stroke(tp: f32, dt: f32) -> Option<f32> {
+    let phase = |x: f32| (x * REAP_SWING) / std::f32::consts::PI;
+    let now = phase(tp);
+    (now.floor() > phase(tp - dt).floor()).then(|| if now as i32 % 2 == 0 { 1.0 } else { -1.0 })
+}
+
+/// Chaff off a sickle stroke. A completed healthy farm emitted no particle, no
+/// bar, no ring and no number — nothing on it moved except the peasant standing
+/// in it. The burst rides the reaping arm's own sweep clock, so the straw comes
+/// off ON the stroke rather than on a timer of its own.
+pub fn field_work_fx(
+    time: Res<Time>,
+    mut commands: Commands,
+    assets: Res<RenderAssets>,
+    rmats: Res<RenderMaterials>,
+    cam_state: Res<CameraState>,
+    q: Query<(&AnimState, &Transform)>,
+) {
+    // Tighter than the impostor cutoff on purpose. Every fleck is its own
+    // alpha-blended draw, and a field of reapers is the one place they come in
+    // crowds: measured, three flecks a stroke at the impostor range cost 2.5 ms
+    // a frame on a farm-heavy shot, which is not what a cosmetic buys.
+    if cam_state.view_size >= CHAFF_VIEW_SIZE {
+        return;
+    }
+    let t = time.elapsed_secs();
+    let dt = time.delta_secs();
+    for (anim, tf) in &q {
+        if anim.activity != Activity::Reap || !(anim.harvest || t < anim.work_until) {
+            continue;
+        }
+        let Some(dir) = reap_stroke(t + anim.phase, dt) else { continue };
+        let fwd = tf.rotation * Vec3::Z;
+        let side = tf.rotation * Vec3::X;
+        for i in 0..2 {
+            let lean = (0.55 - i as f32 * 1.0) * dir;
+            commands.spawn((
+                Particle {
+                    vel: fwd * 0.35 + side * lean + Vec3::Y * (0.75 + i as f32 * 0.1),
+                    age: 0.0,
+                    life: 0.4 + i as f32 * 0.08,
+                    base: 0.13,
+                },
+                Mesh3d(assets.puff.clone()),
+                MeshMaterial3d(rmats.chaff.clone()),
+                // clear of the standing crop: it comes off the blade, not out
+                // of the soil, and the stalks are drawn over the man's shins
+                Transform::from_translation(tf.translation + fwd * 0.3 + Vec3::Y * 0.5)
+                    .with_scale(Vec3::splat(0.01)),
+            ));
         }
     }
 }
@@ -1394,13 +1634,16 @@ pub fn animate_units(
             // debounced "working" — survives the sim's Harvesting<->ToResource
             // flapping at node edges
             let working = anim.harvest || t < anim.work_until;
-            let foraging = anim.kind == UnitKind::Peasant
-                && working
-                && anim.activity == Activity::Forage;
+            let stooped = anim.kind == UnitKind::Peasant && working && anim.activity.stooped();
             // foragers bow at the hips; arms must FOLLOW the bow (they're rig
             // siblings of the body, not children) or shoulders detach
-            let bow = if foraging {
-                Quat::from_rotation_x(0.3)
+            let bow = if stooped {
+                // a man working a crop is bent further over than a berry-picker:
+                // he is at the stalk, not reaching for fruit
+                Quat::from_rotation_x(match anim.activity {
+                    Activity::Reap | Activity::Tend => 0.5,
+                    _ => 0.3,
+                })
             } else if anim.routing || anim.charging {
                 // broken men run bent, a lancer leans into the charge
                 Quat::from_rotation_x(if anim.routing { 0.24 } else { 0.16 })
@@ -1440,6 +1683,18 @@ pub fn animate_units(
                         Activity::Mine => Quat::from_rotation_x(0.8 - strike * 1.5),
                         Activity::Forage => {
                             Quat::from_rotation_x(0.65 + (tp * 2.1).sin() * 0.3)
+                        }
+                        // the sickle cuts SIDEWAYS: a low sweep across the
+                        // stalks, not an overhead chop at a trunk
+                        Activity::Reap => {
+                            Quat::from_rotation_y((tp * REAP_SWING).sin() * 0.9)
+                                * Quat::from_rotation_x(0.85)
+                        }
+                        // tending is the same stoop at half the pace and a
+                        // quarter of the reach: hoeing, not cutting
+                        Activity::Tend => {
+                            Quat::from_rotation_y((tp * 1.3).sin() * 0.35)
+                                * Quat::from_rotation_x(0.9 + (tp * 1.3).cos() * 0.2)
                         }
                         _ => Quat::from_rotation_x(0.3 - strike * 0.9),
                     },
@@ -1492,11 +1747,11 @@ pub fn animate_units(
                     anim.combat
                 );
             }
-            // arms ride the forage bow: their pivots rotate with the torso
-            let rot = if foraging && matches!(body.group, G::ArmL | G::ArmR) { bow * rot } else { rot };
+            // arms ride the stoop: their pivots rotate with the torso
+            let rot = if stooped && matches!(body.group, G::ArmL | G::ArmR) { bow * rot } else { rot };
             tf.rotation = tf.rotation.slerp(rot, ease);
             if matches!(body.group, G::ArmL | G::ArmR) && anim.kind == UnitKind::Peasant {
-                let target = if foraging { bow * body.pivot } else { body.pivot };
+                let target = if stooped { bow * body.pivot } else { body.pivot };
                 tf.translation = tf.translation.lerp(target, ease);
             }
             // Ram: the slung beam jabs forward (+Z after the rig yaw) on attack.
@@ -1524,7 +1779,7 @@ pub fn update_tool_visibility(
         // shown while working AND on the carry walk, on the same debounced
         // clocks the animator uses — never blinks between swing bursts
         let working = anim.harvest || t < anim.work_until || anim.carrying;
-        let want = if working && anim.activity == slot.0 {
+        let want = if working && anim.activity.tool() == slot.0 {
             Visibility::Inherited
         } else {
             Visibility::Hidden
@@ -1593,6 +1848,27 @@ pub fn animate_animals(
                 a.waypoint = a.anchor + Vec3::new(ang.cos() * rad, 0.0, ang.sin() * rad);
                 a.pause = 1.0 + ((s >> 24) as f32 / 255.0) * 2.5;
             }
+        }
+    }
+}
+
+/// The crop cycle on screen: pick the stage mesh from the mirrored sim
+/// numbers and rise continuously within it. Swaps between five SHARED handles
+/// exactly as `animate_animals` swaps stand/graze/carcass, so every field on
+/// the map still costs five batches, not one per farm.
+pub fn animate_crops(
+    assets: Res<RenderAssets>,
+    mut q: Query<(&mut CropField, &mut Mesh3d, &mut Transform)>,
+) {
+    for (mut c, mut mesh, mut tf) in &mut q {
+        let stage = crop_stage(&c);
+        if stage != c.stage {
+            c.stage = stage;
+            mesh.0 = assets.crop_stages[stage].clone();
+        }
+        let rise = crop_rise(stage, c.remaining, c.cap);
+        if tf.scale.y != rise {
+            tf.scale.y = rise;
         }
     }
 }
@@ -1747,19 +2023,68 @@ pub fn update_hp_bars(
     }
 }
 
+/// Half-width of the aura ribbon, and how far it floats over the ground it
+/// follows. Wide enough to survive the depth bias at gameplay zoom, thin enough
+/// to read as a line rather than a band.
+const AURA_HALF_W: f32 = 0.09;
+const AURA_LIFT: f32 = 0.05;
+
+/// A work-radius ring that HUGS THE GROUND, built local to `at`.
+///
+/// It used to be one shared flat torus per kind, pinned to the centre tile's
+/// height. Measured on a selected Granary (seed 11, radius 14): the ring sat at
+/// y 0.092 while the ground under its rim ran 0.225..0.486 on seven of eight
+/// sample points, so it was buried by up to 40cm all the way round and NO
+/// PLAYER HAD EVER SEEN ONE. Raising GRANARY_RANGE 8 -> 14 only made a
+/// pre-existing hole certain. The terrain grid carries two samples per world
+/// unit, so the rim is stepped at 0.5 to land on every one of them.
+fn aura_ring_mesh(field: &HeightField, at: Vec3, radius: f32) -> Mesh {
+    let radius = radius.max(0.5);
+    let segs = ((radius * std::f32::consts::TAU / 0.5) as usize).clamp(48, 512);
+    let mut pos: Vec<[f32; 3]> = Vec::with_capacity((segs + 1) * 2);
+    let mut normal: Vec<[f32; 3]> = Vec::with_capacity((segs + 1) * 2);
+    let mut uv: Vec<[f32; 2]> = Vec::with_capacity((segs + 1) * 2);
+    let mut idx: Vec<u32> = Vec::with_capacity(segs * 6);
+    for i in 0..=segs {
+        let a = i as f32 / segs as f32 * std::f32::consts::TAU;
+        let (s, c) = a.sin_cos();
+        let ground = height_at(field, at.x + c * radius, at.z + s * radius);
+        let y = ground - at.y + AURA_LIFT;
+        for (j, r) in [radius - AURA_HALF_W, radius + AURA_HALF_W].into_iter().enumerate() {
+            pos.push([c * r, y, s * r]);
+            normal.push([0.0, 1.0, 0.0]);
+            uv.push([i as f32 / segs as f32, j as f32]);
+        }
+        if i < segs {
+            let b = i as u32 * 2;
+            idx.extend_from_slice(&[b, b + 2, b + 1, b + 1, b + 2, b + 3]);
+        }
+    }
+    Mesh::new(
+        bevy::render::mesh::PrimitiveTopology::TriangleList,
+        bevy::asset::RenderAssetUsages::default(),
+    )
+    .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, pos)
+    .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, normal)
+    .with_inserted_attribute(Mesh::ATTRIBUTE_UV_0, uv)
+    .with_inserted_indices(bevy::render::mesh::Indices::U32(idx))
+}
+
 /// Ring + rally flag on the selected building (updateBuildingHighlight port).
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
 pub fn update_building_highlight(
     mut commands: Commands,
     assets: Res<RenderAssets>,
     rmats: Res<RenderMaterials>,
+    mut meshes: ResMut<Assets<Mesh>>,
     field: Res<HeightField>,
     selection: Res<Selection>,
+    sel_building: Res<crate::selection::SelectedBuilding>,
     q_buildings: Query<(&GameId, &Pos, &Building)>,
     mut q_ring: Query<(Entity, &mut Transform), (With<BuildingSelRing>, Without<RallyFlag>)>,
     mut q_flag: Query<(Entity, &mut Transform), (With<RallyFlag>, Without<BuildingSelRing>)>,
     mut q_aura: Query<
-        (Entity, &mut Transform, &mut Mesh3d),
+        (Entity, &mut Transform, &mut AuraRing, &Mesh3d),
         (With<AuraRing>, Without<BuildingSelRing>, Without<RallyFlag>),
     >,
 ) {
@@ -1768,7 +2093,7 @@ pub fn update_building_highlight(
         .and_then(|id| q_buildings.iter().find(|(g, ..)| g.0 == id));
 
     match sel {
-        Some((_, p, b)) => {
+        Some((gid, p, b)) => {
             let def = building_def(b.kind);
             let x = p.pos.x.to_num::<f32>();
             let z = p.pos.y.to_num::<f32>();
@@ -1789,24 +2114,42 @@ pub fn update_building_highlight(
                 }
             }
             // work-radius circle for any building carrying an aura — the ring
-            // is per-kind, so a Granary shows its fields and a hut its fishery
-            match assets.aura_rings.get(b.kind as usize).and_then(|r| r.as_ref()) {
-                Some(ring) => match q_aura.single_mut() {
-                    Ok((_, mut tf, mut m)) => {
-                        tf.translation = pos + Vec3::Y * 0.02;
-                        if m.0 != *ring {
-                            m.0 = ring.clone();
+            // is per-kind, so a Granary shows its fields and a hut its fishery.
+            // A selected FARM borrows its hub's ring, drawn on the HUB: a farmer
+            // needs to see which granary reaches him, and from where.
+            let hub = sel_building.hub.filter(|_| sel_building.id == Some(gid.0));
+            let (kind, at) = match hub {
+                Some((k, p)) => {
+                    let (hx, hz) = (p.x.to_num::<f32>(), p.y.to_num::<f32>());
+                    (k, Vec3::new(hx, height_at(&field, hx, hz) + 0.06, hz))
+                }
+                None => (b.kind, pos),
+            };
+            match building_def(kind).aura.map(|a| a.radius.to_num::<f32>()) {
+                Some(radius) => {
+                    let key = (at.x, at.z, radius);
+                    // The ribbon is baked against the ground it crosses, so it
+                    // cannot be moved by a transform: a new centre or radius
+                    // needs a new mesh. The HANDLE is swapped rather than the
+                    // mesh mutated in place — a rebuild costs one allocation on
+                    // a selection change, and never depends on asset-modified
+                    // detection reaching the GPU.
+                    let stale = match q_aura.single_mut() {
+                        Ok((e, _, ring, _)) => (ring.key != key).then_some(e),
+                        Err(_) => None,
+                    };
+                    if q_aura.is_empty() || stale.is_some() {
+                        if let Some(e) = stale {
+                            commands.entity(e).despawn();
                         }
-                    }
-                    Err(_) => {
                         commands.spawn((
-                            AuraRing,
-                            Mesh3d(ring.clone()),
+                            AuraRing { key },
+                            Mesh3d(meshes.add(aura_ring_mesh(&field, at, radius))),
                             MeshMaterial3d(rmats.aura.clone()),
-                            Transform::from_translation(pos + Vec3::Y * 0.02),
+                            Transform::from_translation(at),
                         ));
                     }
-                },
+                }
                 None => {
                     if let Ok((e, ..)) = q_aura.single_mut() {
                         commands.entity(e).despawn();
@@ -1864,6 +2207,10 @@ pub fn build_assets(meshes: &mut Assets<Mesh>) -> RenderAssets {
         nodes.insert(r, resource_node_meshes(r).into_iter().map(|m| meshes.add(m)).collect());
     }
     let fish_node = meshes.add(fish_node_mesh());
+    let crop_stages: Vec<Handle<Mesh>> = crate::render::models::baked::crop_stage_meshes()
+        .into_iter()
+        .map(|m| meshes.add(m))
+        .collect();
     RenderAssets {
         unit_rigs: UnitKind::ALL
             .iter()
@@ -1892,25 +2239,12 @@ pub fn build_assets(meshes: &mut Assets<Mesh>) -> RenderAssets {
         team_rigs: HashMap::new(),
         team_impostors: HashMap::new(),
         nodes,
+        crop_stages,
         fish_node,
         carry_sack: meshes.add(crate::render::models::units::carry_sack_mesh()),
         tools: crate::render::models::baked::tool_meshes().into_iter().map(|m| meshes.add(m)).collect(),
         puff: meshes.add(Sphere::new(1.0).mesh().uv(6, 5)),
         flame: meshes.add(Cone { radius: 0.5, height: 1.0 }.mesh().resolution(5).build()),
-        aura_rings: BuildingKind::ALL
-            .iter()
-            .map(|k| {
-                building_def(*k).aura.map(|a| {
-                    meshes.add(
-                        Torus { minor_radius: 0.06, major_radius: a.radius.to_num::<f32>() }
-                            .mesh()
-                            .minor_resolution(4)
-                            .major_resolution(48)
-                            .build(),
-                    )
-                })
-            })
-            .collect(),
         scaffold: meshes.add(crate::render::models::baked::scaffold_mesh()),
         ripple: meshes.add(
             Torus { minor_radius: 0.03, major_radius: 1.0 }
@@ -1935,6 +2269,75 @@ pub fn build_assets(meshes: &mut Assets<Mesh>) -> RenderAssets {
 mod tests {
     use super::*;
 
+    /// The work-radius ring is the ONLY thing that tells a player how far a farm
+    /// hub reaches, and no player had ever seen one: it was a shared FLAT torus
+    /// pinned to the centre tile's height, so it lay underground everywhere the
+    /// ground rose. Measured on a selected Granary (seed 11, preset 1, radius
+    /// 14) the ground under its rim ran 0.225..0.486 against a ring at 0.092.
+    #[test]
+    fn the_work_radius_ring_follows_the_ground_it_crosses() {
+        let field = crate::terrain::build_height_field(saladin_sim::compose_seed(11, 1));
+        let at = Vec3::new(42.5, height_at(&field, 42.5, 42.5), 42.5);
+        let radius =
+            building_def(BuildingKind::Granary).aura.expect("the farm hub carries an aura").radius;
+        let radius = radius.to_num::<f32>();
+        let mesh = aura_ring_mesh(&field, at, radius);
+        let pos = mesh.attribute(Mesh::ATTRIBUTE_POSITION).unwrap().as_float3().unwrap();
+
+        let (mut hug, mut flat) = (f32::MAX, f32::MAX);
+        let (mut rmin, mut rmax) = (f32::MAX, 0.0f32);
+        for p in pos {
+            let ground = height_at(&field, at.x + p[0], at.z + p[2]);
+            hug = hug.min(at.y + p[1] - ground);
+            // what the old shared torus would have had here
+            flat = flat.min(at.y + 0.02 - ground);
+            let r = (p[0] * p[0] + p[2] * p[2]).sqrt();
+            rmin = rmin.min(r);
+            rmax = rmax.max(r);
+        }
+        assert!(flat < -0.1, "this ground is too level to prove anything: {flat}");
+        assert!(hug > 0.0, "the ring is buried by {} on real ground", -hug);
+        // and it still marks the radius the aura actually reaches
+        assert!((rmax - radius).abs() <= AURA_HALF_W + 1e-3, "outer rim {rmax} vs {radius}");
+        assert!((rmin - radius).abs() <= AURA_HALF_W + 1e-3, "inner rim {rmin} vs {radius}");
+
+        // closed ribbon: every quad is two triangles and the seam joins up
+        let segs = pos.len() / 2 - 1;
+        assert_eq!(mesh.indices().unwrap().len(), segs * 6);
+        let first = pos[0];
+        let last = pos[pos.len() - 2];
+        assert!(
+            (first[0] - last[0]).abs() < 1e-3 && (first[2] - last[2]).abs() < 1e-3,
+            "the ring does not close"
+        );
+    }
+
+    /// The chaff is the only thing that moves on a worked farm, and it is a lie
+    /// unless it leaves the blade ON the stroke: one puff per half swing of the
+    /// SAME clock the arm uses, leaning the way the sickle is travelling.
+    #[test]
+    fn chaff_comes_off_on_the_stroke_and_only_on_the_stroke() {
+        let dt = 1.0 / 60.0;
+        let half = std::f32::consts::PI / REAP_SWING;
+        let (mut hits, mut dirs) = (0, Vec::new());
+        let mut t = 0.0f32;
+        while t < half * 8.0 {
+            t += dt;
+            if let Some(d) = reap_stroke(t, dt) {
+                hits += 1;
+                dirs.push(d);
+            }
+        }
+        assert_eq!(hits, 8, "{hits} strokes across eight half swings");
+        // out, back, out, back: the straw must not always fall the same way
+        assert!(dirs.windows(2).all(|w| w[0] != w[1]), "{dirs:?}");
+        // and a frame that spans no boundary emits nothing
+        assert!(reap_stroke(half * 0.5, dt).is_none());
+        // two men a half swing out of phase never fire on the same frame
+        let t = half * 3.0 + dt * 0.5;
+        assert!(reap_stroke(t, dt).is_some() && reap_stroke(t + half * 0.5, dt).is_none());
+    }
+
     #[test]
     fn a_site_rises_from_a_visible_foundation_to_full_height() {
         assert_eq!(site_rise(0.0), SITE_FLOOR);
@@ -1942,6 +2345,96 @@ mod tests {
         assert!((site_rise(1.0) - 1.0).abs() < 1e-5);
         assert!(site_rise(0.5) > site_rise(0.25));
         assert_eq!(site_rise(2.0), 1.0, "banked work never overshoots the model");
+    }
+
+    /// A deposit's size has to be read against ITS OWN cap. The old hardcoded
+    /// 120 meant a 90-cap field was born at 0.875 and could never render full,
+    /// which made "shrinking node" the only crop meter in the game — and a
+    /// wrong one.
+    #[test]
+    fn a_full_node_renders_full_whatever_its_cap_is() {
+        for cap in [12, 90, 160, 400] {
+            assert_eq!(node_scale(cap, cap), 1.0, "a full {cap}-cap node is not at full size");
+            assert_eq!(node_scale(0, cap), 0.5);
+            assert!(node_scale(cap / 2, cap) > node_scale(1, cap));
+        }
+        // regrowth past the cap and a degenerate zero cap both stay in range
+        assert_eq!(node_scale(200, 90), 1.0);
+        assert_eq!(node_scale(5, 0), 1.0);
+    }
+
+    /// `crop_band` returns a band index that is USED DIRECTLY as a stage index,
+    /// so the growth stages have to be the first four entries of the table in
+    /// growth order.
+    #[test]
+    fn the_crop_stage_table_is_indexed_by_its_own_constants() {
+        use crate::render::models::props::*;
+        assert_eq!(crate::render::models::props::crop_stage_meshes().len(), 5);
+        assert_eq!([CROP_STUBBLE, CROP_SHOOTS, CROP_GREEN, CROP_RIPE, CROP_LODGED], [0, 1, 2, 3, 4]);
+    }
+
+    fn field(remaining: i32, ripe: bool, standing: i32, stage: usize) -> CropField {
+        CropField { remaining, cap: 100, ripe, standing, stage }
+    }
+
+    /// The two states the SIM latches beat the growth bands: a ripe crop stays
+    /// gold while it is being cut (otherwise it would green up at the first
+    /// sheaf), and a crop left standing too long is lodged whatever is left.
+    #[test]
+    fn the_sims_latches_win_over_the_growth_bands() {
+        use crate::render::models::props::*;
+        assert_eq!(crop_stage(&field(20, true, 0, CROP_RIPE)), CROP_RIPE);
+        assert_eq!(crop_stage(&field(1, true, 0, CROP_RIPE)), CROP_RIPE);
+        assert_eq!(
+            crop_stage(&field(100, true, saladin_sim::FARM_RIPE_GRACE + 1, CROP_RIPE)),
+            CROP_LODGED
+        );
+        // grace is inclusive: standing exactly at it is still a standing crop
+        assert_eq!(
+            crop_stage(&field(100, true, saladin_sim::FARM_RIPE_GRACE, CROP_RIPE)),
+            CROP_RIPE
+        );
+        // and an unripe field walks its bands
+        assert_eq!(crop_stage(&field(0, false, 0, CROP_STUBBLE)), CROP_STUBBLE);
+        assert_eq!(crop_stage(&field(20, false, 0, CROP_STUBBLE)), CROP_SHOOTS);
+        assert_eq!(crop_stage(&field(50, false, 0, CROP_SHOOTS)), CROP_GREEN);
+        assert_eq!(crop_stage(&field(100, false, 0, CROP_GREEN)), CROP_RIPE);
+    }
+
+    /// A field parked ON a band edge must not swap its mesh every economy
+    /// tick. Every edge has to be sticky in the direction that would leave the
+    /// stage the crop is already wearing.
+    #[test]
+    fn a_crop_on_a_band_edge_does_not_flicker() {
+        for (i, edge) in [0.06f32, 0.34, 0.72].into_iter().enumerate() {
+            // sitting either side of the edge keeps whichever band the crop
+            // was already wearing — that is the whole point
+            for f in [edge - 0.001, edge + 0.001] {
+                assert_eq!(crop_band(f, i), i, "edge {edge} pushed a crop up at {f}");
+                assert_eq!(crop_band(f, i + 1), i + 1, "edge {edge} pulled a crop back at {f}");
+            }
+            // and it does move once it is clear of the edge, both ways
+            assert_eq!(crop_band(edge + 0.05, i), i + 1);
+            assert_eq!(crop_band(edge - 0.05, i + 1), i);
+        }
+        assert_eq!(crop_band(0.0, 0), 0);
+        assert_eq!(crop_band(1.0, 0), 3, "a full field is in ear");
+    }
+
+    /// Height inside a stage is continuous and monotone, and never inverts the
+    /// stage order: a lodged crop is lower than a standing one.
+    #[test]
+    fn a_crop_rises_continuously_inside_its_stage() {
+        use crate::render::models::props::*;
+        for stage in [CROP_SHOOTS, CROP_GREEN, CROP_LODGED] {
+            let lo = crop_rise(stage, 0, 100);
+            let hi = crop_rise(stage, 100, 100);
+            assert!(hi > lo, "stage {stage} does not grow");
+            assert!(lo > 0.0, "stage {stage} vanishes at empty");
+            assert!(hi <= 1.0, "stage {stage} overshoots its mesh");
+        }
+        assert_eq!(crop_rise(CROP_RIPE, 100, 100), 1.0);
+        assert_eq!(crop_rise(CROP_STUBBLE, 0, 100), 1.0, "cut stubble is not a scale of anything");
     }
 
     #[test]
@@ -2002,5 +2495,29 @@ mod tests {
         );
         assert!(UnitKind::ALL.iter().any(|k| ud(*k).ranged), "nothing shoots");
         assert!(UnitKind::ALL.iter().any(|k| ud(*k).splash > saladin_sim::Fx::ZERO));
+    }
+
+    /// Cutting wheat used to fire `bank.chop` — an axe hitting a trunk — so a
+    /// farm was audibly a lumberyard. `Reap` is its own activity now, and it has
+    /// to stay separable from `Forage` (gutting a wild herd) while still landing
+    /// on one of the three tool slots a peasant actually carries.
+    #[test]
+    fn reaping_is_its_own_work_but_shares_the_sickle() {
+        assert_ne!(Activity::Reap, Activity::Forage, "a reaper is not a forager");
+        assert_ne!(Activity::Tend, Activity::Reap, "tending a crop is not cutting it");
+        assert_eq!(Activity::Reap.tool(), Activity::Forage, "the sickle serves both");
+        assert_eq!(Activity::Tend.tool(), Activity::Forage);
+        // the ToolSlot children are spawned from exactly this table
+        let slots = [Activity::Chop, Activity::Mine, Activity::Forage];
+        for a in [Activity::Chop, Activity::Mine, Activity::Forage, Activity::Reap, Activity::Tend]
+        {
+            assert!(slots.contains(&a.tool()), "{a:?} maps to a tool nobody carries");
+        }
+        assert!(!slots.contains(&Activity::None.tool()), "idle hands hold nothing");
+        // every kind of ground work bends the man over; swinging work does not
+        assert!(Activity::Reap.stooped() && Activity::Forage.stooped());
+        assert!(Activity::Tend.stooped(), "a farmhand who stands to attention is not working");
+        assert!(!Activity::Chop.stooped() && !Activity::Mine.stooped());
+        assert!(!Activity::None.stooped());
     }
 }

@@ -83,6 +83,15 @@ uv run scripts/bake_voices.py          # Chatterbox TTS bark bake -> assets/voic
    # doesn't eat the build. Inspect via `magick out.png -crop ... && view`.
    # Modes: menu | sp | mp | settings | lobby | pause | research | market |
    # layout (computed-rect dump) | soil (farm siting + fertility overlay) |
+   # farm (FIVE farms finished through the REAL construction path so their
+   #   FieldOf crops are sown, camera framed on the plots, each field pinned
+   #   EVERY FRAME to one of the five crop stages — stubble/shoots/green/ripe/
+   #   lodged — so one shot holds the whole lifecycle; first farm selected.
+   #   SALADIN_CROP=<n> pins every field to n instead (two runs at different n
+   #   diff to zero over the farm mesh: the crop is NOT on the building),
+   #   SALADIN_SURVEY=1 tallies what the food-node variant table draws on every
+   #   farm-eligible tile of the map, SALADIN_WORK=1 pins peasants in the
+   #   reaping pose) |
    # units (every unit kind + one node of each type + a water fish node beside
    # the keep — model verification).
    # Overrides: SALADIN_SEED, SALADIN_PRESET, SALADIN_TAB, SALADIN_ZOOM
@@ -183,12 +192,37 @@ the camera draws and the pathfinder charges for, so a deposit that reads as
 clinging to a scarp is on one. `resprobe` is the dial.
 
 `ResourceNode` carries `cap` + `regen`. Wild timber/ore/herds are FINITE on
-purpose; the renewables are farms and hut-tended fisheries. A **Farm** may only
-be sown where `soil_quality >= FARM_MIN_FERTILITY` (`PlaceError::PoorSoil`, one
-rule behind the command, the AI and the ghost); it spawns a `FieldOf` food node
-that regrows at a rate the soil sets, and `reap_orphan_fields` drops the crop
-whatever killed the building. Siting a farm paints fertility straight onto the
-terrain (mesh UV.x carries it, `TerrainExtension.overlay` fades it in).
+purpose. A node drawn to zero is only DESPAWNED when nothing brings it back
+(`regen == 0` and no hut's nets over it) — a field reaped bare is stubble, not a
+hole, and deleting it is what used to turn every worked farm into 50 wood of
+scenery.
+
+**Farming is a SEASON, not a bucket** (`sim/farming.rs` + `systems/economy.rs`).
+A rock's output is a function of how many hands you put on it; a field's is a
+function of TIME AND CARE. Two axes:
+- SOIL sets how big: `field_cap(soil)` spans `FARM_CAP_MIN..FARM_CAP_MAX`
+  (70..190) between `FARM_MIN_FERTILITY` and `FARM_SOIL_RICH`, ROUNDED — the old
+  truncated `1 + soil*7` regen landed on 2 or 3 across 84-94% of sowable land,
+  so every farm in the world was the same farm. Siting still paints fertility
+  onto the terrain (mesh UV.x, `TerrainExtension.overlay`) and now that number
+  still matters after the ghost goes.
+- LABOUR sets how fast: `field_growth(hands, cap, aura)` = a rain-fed creep
+  (`FARM_REGEN_IDLE`) + `cap * work_step(hands, ECONOMY_DT, FARM_TEND_TIME)` +
+  the Granary's aura. Hands ride `BUILDER_RATE`, so three hands over three farms
+  beat three on one.
+
+The wheel: sown at `cap/FARM_SOW_DIVISOR` -> GROW -> `Crop.ripe` LATCHES at cap
+-> REAP -> stubble -> grow again. **A growing crop cannot be cut** (`reapable()`
+gates `best_node`, the idle-gatherer balancer and the harvest itself) — which is
+what stops draw outrunning growth and inverts the old perversity where a short
+haul killed a field fastest. A ripe crop nobody cuts counts `Crop.standing`, and
+past `FARM_RIPE_GRACE` (doubled under a hub) LODGES at `lodge_loss(cap)` a tick:
+visible, gradual, salvageable, never a delete. Cutting it resets that clock.
+Tending needs NO new command: a farmhand IS a committed builder
+(`wants_work()` keeps a crew on a standing farm, `PlayerCommand::Repair` puts
+more in, `Building.builders` is the crew count the economy reads, and an explicit
+Move/Gather/Attack takes a hand back). `reap_orphan_fields` — the building
+falling — is now the ONLY way a field dies.
 
 Movement costs are real: `find_path_costed` + `move_cost_at` make marsh drag
 and dunes bite. Costs clamp at 1 so the octile heuristic stays admissible.

@@ -1,4 +1,6 @@
-use crate::components::{Building, FieldOf, GameId, MatchId, Owner, Player, Pos, ResourceNode, Unit};
+use crate::components::{
+    Building, Crop, FieldOf, GameId, MatchId, Owner, Player, Pos, ResourceNode, Unit, reapable,
+};
 use crate::{GameIndex, MatchStatuses, PathScratch, WorldConfig};
 use bevy_ecs::prelude::*;
 use bevy_platform::collections::HashMap;
@@ -103,7 +105,7 @@ pub fn gather(
     index: Res<GameIndex>,
     mut commands: Commands,
     q_buildings: Query<(&GameId, &Pos, &Building, &Owner)>,
-    mut q_nodes: Query<(&GameId, &Pos, &mut ResourceNode, &MatchId)>,
+    mut q_nodes: Query<(&GameId, &Pos, &mut ResourceNode, &MatchId, Option<&mut Crop>)>,
     mut q_players: Query<(Entity, &mut Player)>,
     mut q_units: Query<(&GameId, &Pos, &Owner, &MatchId, &mut Unit)>,
     q_fields: Query<(&GameId, &FieldOf)>,
@@ -150,10 +152,16 @@ pub fn gather(
     // whole footprint.
     let footprint_of: HashMap<u64, i32> =
         q_buildings.iter().map(|(g, _, b, _)| (g.0, building_def(b.kind).footprint)).collect();
-    let field_nodes: HashMap<u64, i32> = q_fields
-        .iter()
-        .map(|(g, f)| (g.0, footprint_of.get(&f.0).copied().unwrap_or(1)))
-        .collect();
+    // One walk, both directions. Field to footprint is what a reaper's reach
+    // needs; farm to field is what lets the hand tending a plot be handed the
+    // very crop he has been working the moment it comes in. Construction cannot
+    // make that handoff — a ripe crop is a NODE, and it only knows buildings.
+    let mut field_nodes: HashMap<u64, i32> = HashMap::new();
+    let mut farm_field: HashMap<u64, u64> = HashMap::new();
+    for (g, f) in q_fields.iter() {
+        field_nodes.insert(g.0, footprint_of.get(&f.0).copied().unwrap_or(1));
+        farm_field.insert(f.0, g.0);
+    }
     let aura_mult = |owner: u64, at: V2, target: AuraTarget| -> Fx {
         let mut best = Fx::ONE;
         for a in &auras {
@@ -167,14 +175,21 @@ pub fn gather(
         best
     };
 
-    // Position + the reach a harvester needs to work it. The span of unstandable
-    // ground under a node is what the reach has to clear: a farm's whole
-    // footprint for a crop, the water tile itself for a school of fish.
-    let mut node_map: HashMap<u64, (V2, Fx)> = HashMap::new();
+    // Position, the reach a harvester needs to work it, and whether there is
+    // anything to take. The span of unstandable ground under a node is what the
+    // reach has to clear: a farm's whole footprint for a crop, the water tile
+    // itself for a school of fish. A GROWING crop stays in the map — a reaper
+    // already walking to its own field keeps it — but never enters the candidate
+    // list, so `best_node` can no longer offer anybody a field that is not in.
+    let mut node_map: HashMap<u64, (V2, Fx, bool)> = HashMap::new();
     let mut nodes_list: Vec<(u64, V2, u64)> = Vec::new();
-    for (gid, p, _n, m) in q_nodes.iter() {
-        node_map.insert(gid.0, (p.pos, node_reach(seed, p.pos, field_nodes.get(&gid.0).copied())));
-        nodes_list.push((gid.0, p.pos, m.0));
+    for (gid, p, n, m, crop) in q_nodes.iter() {
+        let field = field_nodes.get(&gid.0).copied();
+        let cut = reapable(n, field.is_some(), crop);
+        node_map.insert(gid.0, (p.pos, node_reach(seed, p.pos, field), cut));
+        if cut {
+            nodes_list.push((gid.0, p.pos, m.0));
+        }
     }
 
     // player_id → entity
@@ -207,7 +222,13 @@ pub fn gather(
 
     // ── mutate units ─────────────────────────────────────────────────────────
     for (_gid, pos, owner, mid, mut u) in &mut q_units {
-        if u.garrisoned_in != 0 || u.gather_state == GatherState::Idle || !statuses.simulates(mid.0) {
+        // An idle hand still booked on a job site falls THROUGH to the arm below:
+        // he is the one case the tend -> reap -> haul -> tend loop can lose, and
+        // nothing else in the sim is looking for him.
+        if u.garrisoned_in != 0
+            || (u.gather_state == GatherState::Idle && u.job_site == 0)
+            || !statuses.simulates(mid.0)
+        {
             continue;
         }
         let here = pos.pos;
@@ -215,7 +236,7 @@ pub fn gather(
 
         match u.gather_state {
             GatherState::ToResource => {
-                let Some((node_pos, reach)) = node_map.get(&u.target_node).copied() else {
+                let Some((node_pos, reach, _)) = node_map.get(&u.target_node).copied() else {
                     retarget(&mut u, best_node(&mut scratch.1, &look, here, mid, owner.0, 0));
                     continue;
                 };
@@ -255,22 +276,46 @@ pub fn gather(
             }
             GatherState::Harvesting => {
                 let Some(node_e) = index.get(u.target_node) else {
-                    retarget(&mut u, best_node(&mut scratch.1, &look, here, mid, owner.0, 0));
+                    if !back_to_work(&mut u) {
+                        retarget(&mut u, best_node(&mut scratch.1, &look, here, mid, owner.0, 0));
+                    }
                     continue;
                 };
-                let Ok((_, npos, mut node, _)) = q_nodes.get_mut(node_e) else {
-                    retarget(&mut u, best_node(&mut scratch.1, &look, here, mid, owner.0, 0));
+                let Ok((_, npos, mut node, _, mut crop)) = q_nodes.get_mut(node_e) else {
+                    if !back_to_work(&mut u) {
+                        retarget(&mut u, best_node(&mut scratch.1, &look, here, mid, owner.0, 0));
+                    }
                     continue;
                 };
+                let is_field = field_nodes.contains_key(&u.target_node);
+                // A crop that is still growing cannot be cut. A hand who has a
+                // plot of his own goes back to TENDING it — that is the whole
+                // point of standing there. A hand who has NOT takes other work:
+                // a crop can go from ripe to stubble while he is still walking to
+                // it, because somebody else cut it or because it lodged, and a
+                // man stood over it is doing nothing while calling it Harvesting
+                // — which no idle census, no balancer and no `construction` pass
+                // will ever find. That is a strand wearing a working man's hat.
+                if is_field && crop.as_deref().is_some_and(|c| !c.ripe) {
+                    if u.harvest_timer != Fx::ZERO {
+                        u.harvest_timer = Fx::ZERO;
+                    }
+                    if !back_to_work(&mut u) {
+                        retarget(&mut u, best_node(&mut scratch.1, &look, here, mid, owner.0, 0));
+                    }
+                    continue;
+                }
                 // another harvester may have emptied it earlier THIS tick (its
                 // despawn is deferred): treat 0-remaining as gone, never dupe
                 if node.remaining <= 0 {
-                    retarget(&mut u, best_node(&mut scratch.1, &look, here, mid, owner.0, 0));
+                    if !back_to_work(&mut u) {
+                        retarget(&mut u, best_node(&mut scratch.1, &look, here, mid, owner.0, 0));
+                    }
                     continue;
                 }
                 // a hut's nets over its fishery, a granary's hands over its
                 // fields: whichever aura covers this node speeds the work
-                let target = if field_nodes.contains_key(&u.target_node) {
+                let target = if is_field {
                     Some(AuraTarget::Field)
                 } else if node.res_type == ResourceType::Food
                     && !is_passable(seed, npos.pos.x.to_num::<i32>(), npos.pos.y.to_num::<i32>())
@@ -293,7 +338,22 @@ pub fn gather(
                 let rem = node.remaining - take;
                 u.carry_type = node.res_type;
                 node.remaining = rem;
-                if rem <= 0 {
+                // A crop being cut is not a crop standing neglected: the sickle
+                // resets the clock that lodges it, so a field nobody can reap in
+                // one grace is not punished for being big. The last sheaf ends
+                // the season on the spot — waiting for the economy tick would
+                // leave a bare plot drawn as standing gold for two seconds.
+                if let Some(c) = crop.as_deref_mut() {
+                    let next = Crop { ripe: c.ripe && rem > 0, standing: 0 };
+                    if *c != next {
+                        *c = next;
+                    }
+                }
+                // ONLY finite deposits retire. A field reaped bare is stubble,
+                // not a hole: it re-sows itself next economy tick, and deleting
+                // it here is what turned worked farms into 50 wood of scenery —
+                // and what killed a fishery FASTER once a hut doubled the draw.
+                if rem <= 0 && node.regen == 0 && !tended_water(&auras, npos.pos) {
                     commands.entity(node_e).despawn();
                 }
                 u.carrying = take;
@@ -327,9 +387,13 @@ pub fn gather(
                     }
                     u.carrying = 0;
                     u.has_target = false;
-                    if node_map.contains_key(&u.target_node) {
+                    // back to the same node while there is still something in it
+                    // — a field cut to stubble is not that, so the carrier goes
+                    // back to the plot he belongs to (or takes other work) rather
+                    // than standing in the furrows waiting out a whole season
+                    if node_map.get(&u.target_node).is_some_and(|(_, _, cut)| *cut) {
                         u.gather_state = GatherState::ToResource;
-                    } else {
+                    } else if !back_to_work(&mut u) {
                         retarget(&mut u, best_node(&mut scratch.1, &look, here, mid, owner.0, 0));
                     }
                 } else if !u.has_target {
@@ -350,8 +414,35 @@ pub fn gather(
                     }
                 }
             }
-            // a builder is driven by the construction loop, not the gather one
-            GatherState::Idle | GatherState::Constructing => {}
+            // A builder is driven by the construction loop — until the field he
+            // is tending comes in. Then the same crew, on the same `job_site`,
+            // with no order from anybody, becomes the reaping crew. This runs at
+            // the 200 ms gather cadence rather than the construction one because
+            // the thing being watched is a NODE.
+            GatherState::Constructing => {
+                let Some(&field) = farm_field.get(&u.job_site) else { continue };
+                if unit_def(u.kind).carry > 0
+                    && node_map.get(&field).is_some_and(|(_, _, cut)| *cut)
+                {
+                    u.target_node = field;
+                    u.gather_state = GatherState::ToResource;
+                    u.has_target = false;
+                }
+            }
+            // A hand still booked on a standing job site is not out of work. The
+            // reaping excursion keeps `job_site`, and every way it can end badly
+            // — the crop gone, the drop-off razed, no route home — stands the man
+            // down HOLDING it. Construction can never pick him back up (it only
+            // ever looks at hands already in `Constructing`), so this is the one
+            // place that closes the loop: without it a farmhand who lost his
+            // stockpile stands in the furrows for the rest of the match.
+            GatherState::Idle => {
+                if footprint_of.contains_key(&u.job_site) {
+                    back_to_work(&mut u);
+                } else {
+                    u.job_site = 0; // the site he was booked on is rubble
+                }
+            }
         }
     }
 }
@@ -375,6 +466,25 @@ pub fn gather(
 fn stuck(here: V2, end: V2, node: V2, reach: Fx) -> bool {
     dist(end, node) > reach
         && saladin_sim::dist2(end, node) >= saladin_sim::dist2(tile_centre(here), node)
+}
+
+/// A hand with a job site is not homeless: he goes back to the plot he was put
+/// on instead of looking for the nearest rock. This is the return leg of
+/// tend -> reap -> haul -> tend, and the reason the round trip costs no orders —
+/// nothing on the reaping path clears `job_site`, so the return address survives
+/// the whole excursion. An explicit Move / Gather / Attack is what gives a hand
+/// back to the town.
+///
+/// Checked BEFORE `best_node`, never after: the flood that answers "what else
+/// could this man work" is the expensive half, and a farmhand never needs it.
+fn back_to_work(u: &mut Unit) -> bool {
+    if u.job_site == 0 {
+        return false;
+    }
+    u.gather_state = GatherState::Constructing;
+    u.target_node = 0;
+    u.has_target = false;
+    true
 }
 
 /// Take the offered node, or stand down.
@@ -427,13 +537,22 @@ pub(crate) fn workable(flood: &saladin_sim::Flood, npos: V2, reach: Fx) -> bool 
     false
 }
 
+/// Does a hut's nets cover this water? Water a hut restocks is a fishery, not a
+/// deposit — stripping it bare must not delete the very thing the hut was raised
+/// to sustain.
+fn tended_water(auras: &[Aura], at: V2) -> bool {
+    auras.iter().any(|a| {
+        a.aura.target == AuraTarget::WaterFood && a.aura.regen > 0 && dist(a.pos, at) <= a.aura.radius
+    })
+}
+
 /// Everything `best_node` needs to judge a node without touching the world.
 struct Look<'a> {
     seed: u32,
     occ: &'a std::collections::HashSet<i32>,
     gates: &'a [(i32, u64)],
     nodes: &'a [(u64, V2, u64)],
-    node_map: &'a HashMap<u64, (V2, Fx)>,
+    node_map: &'a HashMap<u64, (V2, Fx, bool)>,
 }
 
 /// How many nearest candidates to try before standing the walker down. Each
@@ -489,7 +608,7 @@ fn best_node(
             }
         }
         let id = best?;
-        let (npos, reach) = look.node_map.get(&id).copied()?;
+        let (npos, reach, _) = look.node_map.get(&id).copied()?;
         if workable(flood, npos, reach) {
             return Some(id);
         }

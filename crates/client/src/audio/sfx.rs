@@ -5,7 +5,7 @@
 use super::synth::*;
 use crate::camera::CameraState;
 use crate::environment::ShoreList;
-use crate::render::sync::{AnimState, Dying};
+use crate::render::sync::{Activity, AnimState, Dying};
 use bevy::audio::{AudioPlayer, AudioSink, AudioSource, PlaybackMode, PlaybackSettings, Volume};
 use bevy::prelude::*;
 
@@ -20,6 +20,8 @@ pub struct SfxBank {
     siege_launch: Handle<AudioSource>,
     clash: Vec<Handle<AudioSource>>,
     chop: Vec<Handle<AudioSource>>,
+    /// Sickle through standing grain — a swish, not an axe on a trunk.
+    reap: Vec<Handle<AudioSource>>,
     death: Vec<Handle<AudioSource>>,
     collapse: Handle<AudioSource>,
     bird: Vec<Handle<AudioSource>>,
@@ -107,6 +109,27 @@ fn chop(rng: &mut Rng32) -> Vec<f32> {
     });
     mix(&mut out, &knock, 0.0, 0.8);
     finalize(&mut out, 0.6);
+    out
+}
+
+/// A sickle stroke: airy band-passed noise with a slow onset, then the dry
+/// rustle of the cut stalks going over. No knock — nothing here is being struck,
+/// which is the whole difference from `chop`.
+fn reap(rng: &mut Rng32) -> Vec<f32> {
+    let dur = 0.26;
+    let mut out = noise(dur, rng);
+    bandpass(&mut out, rng.range(2600.0, 3400.0), 1.1);
+    for (i, s) in out.iter_mut().enumerate() {
+        let t = i as f32 / SRF;
+        *s *= adsr(t, dur, 0.03, 0.06, 0.35, 0.14) * 0.85;
+    }
+    let mut straw = noise(0.2, rng);
+    bandpass(&mut straw, rng.range(1100.0, 1500.0), 2.0);
+    for (i, s) in straw.iter_mut().enumerate() {
+        *s *= adsr(i as f32 / SRF, 0.2, 0.01, 0.05, 0.2, 0.12) * 0.55;
+    }
+    mix(&mut out, &straw, 0.06, 1.0);
+    finalize(&mut out, 0.42);
     out
 }
 
@@ -289,6 +312,7 @@ pub fn bake_sfx(mut commands: Commands, mut sources: ResMut<Assets<AudioSource>>
         siege_launch: add(&mut sources, siege_launch(&mut rng)),
         clash: (0..4).map(|_| add(&mut sources, sword_clash(&mut rng))).collect(),
         chop: (0..3).map(|_| add(&mut sources, chop(&mut rng))).collect(),
+        reap: (0..3).map(|_| add(&mut sources, reap(&mut rng))).collect(),
         death: (0..3).map(|_| add(&mut sources, death_cry(&mut rng))).collect(),
         collapse: add(&mut sources, collapse(&mut rng)),
         bird: (0..3).map(|_| add(&mut sources, bird_chirp(&mut rng))).collect(),
@@ -376,7 +400,8 @@ pub fn death_sfx(
 }
 
 /// The battle din: while fights animate near the camera, ring steel on a beat
-/// whose density follows the number of melees. Chops tick the same way.
+/// whose density follows the number of melees. Work ticks the same way — but the
+/// clip follows the ACTIVITY, so a farm no longer sounds like a lumberyard.
 pub fn crowd_sfx(
     mut commands: Commands,
     bank: Option<Res<SfxBank>>,
@@ -386,20 +411,27 @@ pub fn crowd_sfx(
     q_anim: Query<(&AnimState, &Transform)>,
     mut next_clash: Local<f32>,
     mut next_chop: Local<f32>,
+    mut next_reap: Local<f32>,
     mut flip: Local<u32>,
 ) {
     let Some(bank) = bank else { return };
     let m = super::master(&cfg);
     let now = time.elapsed_secs();
-    let (mut fights, mut chops) = (0.0_f32, 0.0_f32);
-    let (mut fv, mut cv) = (0.0_f32, 0.0_f32);
+    let (mut fights, mut chops, mut reaps) = (0.0_f32, 0.0_f32, 0.0_f32);
+    let (mut fv, mut cv, mut rv) = (0.0_f32, 0.0_f32, 0.0_f32);
     for (a, tf) in &q_anim {
         let Some(vol) = earshot(&cam, tf.translation.x, tf.translation.z) else { continue };
         if a.combat {
             fights += 1.0;
             fv = fv.max(vol);
         }
-        if a.harvest {
+        if !a.harvest {
+            continue;
+        }
+        if a.activity == Activity::Reap {
+            reaps += 1.0;
+            rv = rv.max(vol);
+        } else {
             chops += 1.0;
             cv = cv.max(vol);
         }
@@ -415,6 +447,13 @@ pub fn crowd_sfx(
         let h = bank.chop[*flip as usize % bank.chop.len()].clone();
         one_shot(&mut commands, h, cv * m * 0.55, 0.92 + (*flip % 5) as f32 * 0.04);
         *next_chop = now + (0.8 / (1.0 + chops * 0.1)).max(0.3);
+    }
+    // a sickle is quicker and quieter than an axe: a faster beat, less of it
+    if reaps > 0.0 && now >= *next_reap {
+        *flip = flip.wrapping_add(1);
+        let h = bank.reap[*flip as usize % bank.reap.len()].clone();
+        one_shot(&mut commands, h, rv * m * 0.4, 0.94 + (*flip % 5) as f32 * 0.035);
+        *next_reap = now + (0.6 / (1.0 + reaps * 0.1)).max(0.22);
     }
 }
 
@@ -512,4 +551,29 @@ pub fn ambience(
         }
     }
     *rng_state = rng.0;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A peasant cutting wheat made the sound of an axe hitting a tree, so a
+    /// farm audibly WAS a lumberyard. The two have to be different EVENTS, not
+    /// one event at two volumes: an axe lands a knock — nearly all its energy in
+    /// the first few milliseconds — and a sickle sweeps.
+    #[test]
+    fn a_sickle_does_not_sound_like_an_axe() {
+        let energy = |s: &[f32]| s.iter().map(|x| x * x).sum::<f32>();
+        let onset = |buf: &[f32]| {
+            let n = ((0.01 * SRF) as usize).min(buf.len());
+            energy(&buf[..n]) / energy(buf).max(1e-9)
+        };
+        let axe = chop(&mut Rng32::new(7));
+        let sickle = reap(&mut Rng32::new(7));
+        assert!(!axe.is_empty() && !sickle.is_empty());
+        assert!(axe.iter().chain(sickle.iter()).all(|s| s.is_finite() && s.abs() <= 1.0));
+        assert!(sickle.len() > axe.len() * 2, "a sweep has to outlast a strike");
+        assert!(onset(&axe) > 0.3, "the axe lost its knock: {}", onset(&axe));
+        assert!(onset(&sickle) * 3.0 < onset(&axe), "the sickle grew one: {}", onset(&sickle));
+    }
 }

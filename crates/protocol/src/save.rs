@@ -21,6 +21,8 @@ struct SaveRow {
     node: Option<ResourceNode>,
     #[serde(default)]
     field: Option<FieldOf>,
+    #[serde(default)]
+    crop: Option<Crop>,
     player: Option<Player>,
     bot: Option<Bot>,
     research: Option<Research>,
@@ -30,7 +32,7 @@ struct SaveRow {
 /// old bytes as garbage (or EOF) rather than defaulting, and `#[serde(default)]`
 /// cannot save it. The magic+version header turns that into a clean refusal.
 pub const SAVE_MAGIC: u64 = 0x5361_6C61_4469_6E00;
-pub const SAVE_VERSION: u32 = 2;
+pub const SAVE_VERSION: u32 = 3;
 
 #[derive(Serialize, Deserialize)]
 pub struct SaveGame {
@@ -57,11 +59,14 @@ pub fn snapshot(world: &mut World) -> SaveGame {
             Option<&Building>,
             Option<&ResourceNode>,
             Option<&FieldOf>,
+            Option<&Crop>,
             Option<&Player>,
             Option<&Bot>,
             Option<&Research>,
         )>();
-        for (g, m, owner, pos, unit, building, node, field, player, bot, research) in q.iter(world) {
+        for (g, m, owner, pos, unit, building, node, field, crop, player, bot, research) in
+            q.iter(world)
+        {
             rows.push(SaveRow {
                 id: g.0,
                 match_id: m.0,
@@ -71,6 +76,7 @@ pub fn snapshot(world: &mut World) -> SaveGame {
                 building: building.copied(),
                 node: node.copied(),
                 field: field.copied(),
+                crop: crop.copied(),
                 player: player.cloned(),
                 bot: bot.copied(),
                 research: research.copied(),
@@ -133,6 +139,9 @@ pub fn restore(world: &mut World, save: SaveGame) {
         }
         if let Some(f) = r.field {
             e.insert(f);
+        }
+        if let Some(c) = r.crop {
+            e.insert(c);
         }
         if let Some(p) = r.player {
             e.insert(p);

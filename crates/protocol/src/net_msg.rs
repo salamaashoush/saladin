@@ -6,9 +6,12 @@ use crate::PlayerCommand;
 use saladin_sim::{AiDifficulty, Faction};
 use serde::{Deserialize, Serialize};
 
-/// Bumped on every wire-incompatible change. The relay rejects mismatches with
-/// `Reject(VersionMismatch)` instead of letting bincode garbage-decode.
-pub const PROTOCOL_VERSION: u32 = 7;
+/// Bumped on every wire-incompatible change AND on every change to the SIM
+/// RULES: lockstep ships inputs, so two peers that agree on the wire and
+/// disagree about what a tick does desync silently, and this handshake is the
+/// only thing standing between them. v8 is the crop season (fields grow, ripen,
+/// lodge and re-sow) — not one byte of `Msg` moved.
+pub const PROTOCOL_VERSION: u32 = 8;
 
 /// Room codes: 6 chars from an unambiguous alphabet (no 0/O, 1/I/L).
 pub const ROOM_CODE_LEN: usize = 6;

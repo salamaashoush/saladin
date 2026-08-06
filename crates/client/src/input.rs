@@ -182,11 +182,39 @@ fn pick(
     for (g, p, _) in q_nodes {
         let nx = p.pos.x.to_num::<f32>();
         let nz = p.pos.y.to_num::<f32>();
-        if (gx - nx).hypot(gz - nz) <= 0.8 {
+        if (gx - nx).hypot(gz - nz) <= NODE_PICK_R {
             return Some(Picked::Node(g.0));
         }
     }
     Some(Picked::Ground(ground))
+}
+
+/// How close the cursor has to land to grab a resource node. Buildings are
+/// tested FIRST, so this only ever picks a node outside every footprint.
+const NODE_PICK_R: f32 = 0.8;
+
+/// What a right-click on one of your OWN structures asks the peasants for.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Hands {
+    None,
+    /// Raise it, finish the upgrade, or mend it.
+    Mend,
+    /// Work the crop standing in it.
+    Field,
+}
+
+/// Mending comes FIRST — a burning farm is put out before it is worked — and a
+/// standing farm asks for hands forever after. Both ride `PlayerCommand::Repair`,
+/// which has always meant "put this peasant to work on that structure"; the only
+/// thing that was missing was a condition under which a whole farm said yes.
+fn hands_wanted(kind: BuildingKind, state: saladin_sim::BuildState, hp: i32, max_hp: i32) -> Hands {
+    if !operational(state) || state == saladin_sim::BuildState::Upgrading || hp < max_hp {
+        return Hands::Mend;
+    }
+    if building_def(kind).min_fertility > Fx::ZERO {
+        return Hands::Field;
+    }
+    Hands::None
 }
 
 /// Voice of the selection: the first selected unit answers for the group.
@@ -504,15 +532,27 @@ pub fn pointer_input(
                     // it — the same right-click that gathers a tree
                     let row = q_buildings.iter().find(|(g, ..)| g.0 == target).map(|(_, _, _, b)| *b);
                     let mask = q_players.iter().find(|p| p.player_id == me).map(|p| p.tech_mask).unwrap_or(0);
-                    let wants_work = row.is_some_and(|b| {
-                        !operational(b.state)
-                            || b.state == saladin_sim::BuildState::Upgrading
-                            || b.hp < saladin_sim::effective_building_def(b.kind, mask).max_hp
-                    });
+                    let want = row
+                        .map(|b| {
+                            hands_wanted(
+                                b.kind,
+                                b.state,
+                                b.hp,
+                                saladin_sim::effective_building_def(b.kind, mask).max_hp,
+                            )
+                        })
+                        .unwrap_or(Hands::None);
+                    // the crew is capped against the hands ALREADY on it, exactly
+                    // as the Send Farmhands button is. A farm now wants hands
+                    // forever, so an uncapped right-click would park the whole
+                    // peasant economy in one plot for nothing: `build_rate`
+                    // saturates at MAX_BUILDERS and everyone past it stands idle.
+                    let free = (saladin_sim::MAX_BUILDERS - row.map(|b| b.builders).unwrap_or(0))
+                        .max(0) as usize;
                     let mut crew: HashSet<u64> = HashSet::new();
-                    if wants_work {
+                    if want != Hands::None {
                         for &id in selection.iter() {
-                            if crew.len() >= saladin_sim::MAX_BUILDERS as usize {
+                            if crew.len() >= free {
                                 break;
                             }
                             if let Some((_, _, _, u)) = q_units.iter().find(|(g, ..)| g.0 == id)
@@ -524,7 +564,11 @@ pub fn pointer_input(
                             }
                         }
                         if !crew.is_empty() {
-                            voice.0.push((saladin_sim::UnitKind::Peasant, crate::audio::Bark::Ack));
+                            let bark = match want {
+                                Hands::Field => crate::audio::Bark::Food,
+                                _ => crate::audio::Bark::Ack,
+                            };
+                            voice.0.push((saladin_sim::UnitKind::Peasant, bark));
                         }
                     }
                     let host = row.map(|b| building_def(b.kind)).filter(|d| can_host_garrison(d));
@@ -1006,6 +1050,55 @@ pub fn spawn_drag_box(mut commands: Commands) {
 mod tests {
     use super::*;
     use saladin_sim::Stockpile;
+
+    /// You could not order a peasant onto your own farm. `pick` hands the click
+    /// to the BUILDING (a farm's half-extent is 1.0, so the field's 0.8 pick disc
+    /// is strictly inside it and `Picked::Node` can never fire on one), and the
+    /// building branch's predicate only fired on damage — so a healthy farm ate
+    /// the right-click and did nothing at all.
+    #[test]
+    fn a_right_click_on_your_own_farm_puts_peasants_in_the_field() {
+        use saladin_sim::BuildState::*;
+        let farm = |state, hp| {
+            hands_wanted(BuildingKind::Farm, state, hp, building_def(BuildingKind::Farm).max_hp)
+        };
+        let max = building_def(BuildingKind::Farm).max_hp;
+        assert_eq!(farm(Complete, max), Hands::Field, "a whole farm takes farmhands");
+        // mending wins: a burning farm is put out before it is worked, and that
+        // order still goes out as builders (and barks as builders)
+        assert_eq!(farm(Complete, max / 2), Hands::Mend);
+        assert_eq!(farm(Site, 10), Hands::Mend);
+        assert_eq!(farm(Upgrading, max), Hands::Mend);
+
+        // and nothing else in the game started swallowing peasants
+        for &kind in BuildingKind::ALL {
+            let d = building_def(kind);
+            let want = hands_wanted(kind, Complete, d.max_hp, d.max_hp);
+            let expect = if d.min_fertility > Fx::ZERO { Hands::Field } else { Hands::None };
+            assert_eq!(want, expect, "{kind:?}");
+            assert_eq!(hands_wanted(kind, Site, 1, d.max_hp), Hands::Mend, "{kind:?} site");
+        }
+    }
+
+    /// A field is spawned at its farm's exact centre, and `pick` tests BUILDINGS
+    /// before nodes — so a click on the plot has to reach the FARM. The whole
+    /// right-click-your-own-farm order rests on that: routed to the node instead
+    /// it would emit `Gather` on a growing crop, which the sim now refuses, and
+    /// the click would silently do nothing. A footprint shrunk to 1 would flip it.
+    #[test]
+    fn a_click_on_a_plot_reaches_the_farm_and_never_its_crop() {
+        for &kind in BuildingKind::ALL {
+            let d = building_def(kind);
+            if d.min_fertility <= Fx::ZERO {
+                continue;
+            }
+            let half = d.footprint as f32 / 2.0;
+            assert!(
+                half > NODE_PICK_R,
+                "{kind:?} half-extent {half} no longer contains a node's {NODE_PICK_R} pick disc"
+            );
+        }
+    }
 
     #[test]
     fn wall_lines_go_any_direction_and_stay_connected() {

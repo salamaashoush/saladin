@@ -15,6 +15,7 @@ pub mod content;
 pub mod economy;
 pub mod elevation;
 pub mod enums;
+pub mod farming;
 pub mod formation;
 pub mod garrison;
 pub mod los;
@@ -37,7 +38,7 @@ pub mod worldgrid;
 
 pub use ai::{
     AiPhase, AssaultIntel, BuildAction, BuildDecision, Census, EMPTY_CENSUS, FIELD_UNITS,
-    PlannerState, PlannerTuning,
+    FieldLabour, PlannerState, PlannerTuning, field_labour,
     SquadRole, TacticalTarget, TacticalTuning, ThreatState, TradeDecision, army_power,
     counter_composition, counter_score, count_own_kind, dynamic_army_target,
     dynamic_peasant_target, eats_food, food_crisis, mustered, next_army_kind, next_build,
@@ -100,6 +101,7 @@ pub use elevation::{
     ELEV_BONUS_MAX, ELEV_BONUS_SPAN, elevation, elevation_at, elevation_range_bonus, elevation_reach,
 };
 pub use enums::*;
+pub use farming::{field_cap, field_growth, harvest_standing, lodge_loss};
 pub use formation::{
     FLANK_MULT, FRONT_COS, FormationShape, HEADINGS, HEADING_DIRS, MIN_PITCH, REAR_MULT,
     assign_slots, facing_multiplier, formation_pitch, heading_axes, heading_dir, heading_of,

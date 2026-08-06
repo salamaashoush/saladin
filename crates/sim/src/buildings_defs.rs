@@ -364,7 +364,7 @@ const BUILDING_DEFS: [BuildingDef; 16] = [
     // 13 Farm
     BuildingDef {
         label: "Farm",
-        blurb: "Sown field: peasants harvest it forever, and rich soil regrows it faster.",
+        blurb: "Sown field: rich soil grows a bigger harvest, hands bring it in sooner.",
         icon: "🌾",
         footprint: 2,
         height: crate::fx!("0.35"),

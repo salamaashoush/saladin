@@ -58,16 +58,21 @@ pub(crate) fn spawn_building(
 }
 
 /// The standing crop on a farm: a food node tied to the building that sowed it,
-/// starting part-grown so a new field is not instantly worth harvesting.
-pub(crate) fn spawn_field(world: &mut World, owner: u64, building: u64, pos: V2, regen: i32, match_id: u64) {
+/// sown part-grown so the first season pays back fast without handing over a
+/// free harvest. `cap` is the whole yield the soil carries; `regen` is only the
+/// rain-fed creep, because the labour and hub terms are derived LIVE every
+/// economy tick — which is what lets a granary raised later help a field already
+/// in the ground.
+pub(crate) fn spawn_field(world: &mut World, owner: u64, building: u64, pos: V2, cap: i32, match_id: u64) {
     let id = world.resource_mut::<NextEntityId>().alloc();
     world.spawn((
         GameId(id),
         Owner(owner),
         MatchId(match_id),
         FieldOf(building),
+        Crop::default(),
         Pos { pos, facing: Fx::ZERO },
-        ResourceNode::renewable(ResourceType::Food, FARM_STORE / 3, FARM_STORE, regen),
+        ResourceNode::renewable(ResourceType::Food, cap / FARM_SOW_DIVISOR, cap, FARM_REGEN_IDLE),
     ));
 }
 

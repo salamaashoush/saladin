@@ -363,7 +363,8 @@ pub(crate) fn build_with(
 
 /// What a structure gains the moment it is finished. A farm IS its field, and
 /// sowing at COMPLETION rather than at siting is what makes completion a real
-/// event: how fast the crop regrows is the soil's business, not the player's.
+/// event: how BIG the harvest will be is the soil's business, how fast it comes
+/// in is the crew's.
 pub(crate) fn finish_building(world: &mut World, id: u64) {
     let Some(e) = find_by_id(world, id) else { return };
     let Some(kind) = world.get::<Building>(e).map(|b| b.kind) else { return };
@@ -383,8 +384,7 @@ pub(crate) fn finish_building(world: &mut World, id: u64) {
     let Some(pos) = world.get::<Pos>(e).map(|p| p.pos) else { return };
     let seed = world.resource::<WorldConfig>().seed;
     let soil = saladin_sim::soil_quality(seed, def.footprint, pos.x, pos.y);
-    let regen = Fx::ONE + soil * Fx::from_num(saladin_sim::FARM_REGEN_MAX);
-    spawn::spawn_field(world, owner, id, pos, regen.to_num::<i32>().max(1), match_id);
+    spawn::spawn_field(world, owner, id, pos, saladin_sim::field_cap(soil), match_id);
 }
 
 /// One-shot placement: gather the context, found one site, put the named

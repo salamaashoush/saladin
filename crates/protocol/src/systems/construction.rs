@@ -41,9 +41,14 @@ struct Hand {
 pub fn construction(world: &mut World) {
     let jobs = snapshot_jobs(world);
     let hands = snapshot_hands(world);
-    // a town with nothing rising, nothing hurt, no queue and nobody holding a
-    // hammer costs two queries per construction tick and not one pathfind
-    if hands.is_empty() && jobs.iter().all(|j| !wants_work(j) && j.row.queue_len == 0) {
+    // A town with nobody holding a hammer, no queue and no stale crew count costs
+    // two queries per construction tick and not one pathfind. `builders == 0` is
+    // the load-bearing half now that a farm always wants hands: without it a farm
+    // whose crew walked away would keep a phantom crew, and its field would grow
+    // forever on labour nobody is doing. With no hands anywhere there is nothing
+    // for `crew_up` to place and nothing for `advance` to bank — `labour` and
+    // `mend` both need a crew — so skipping is exact, not an approximation.
+    if hands.is_empty() && jobs.iter().all(|j| j.row.builders == 0 && j.row.queue_len == 0) {
         return;
     }
     let jobs = crew_up(world, jobs, &hands);
@@ -101,7 +106,6 @@ fn snapshot_hands(world: &mut World) -> Vec<Hand> {
 /// anyone whose site is gone or finished looking for other work nearby.
 fn crew_up(world: &mut World, mut jobs: Vec<Job>, hands: &[Hand]) -> Vec<Job> {
     let seed = world.resource::<WorldConfig>().seed;
-    let (occ, gates) = occupancy_and_gates(world, false);
     let statuses: Vec<(u64, bool)> = jobs
         .iter()
         .map(|j| (j.mtch, world.resource::<MatchStatuses>().simulates(j.mtch)))
@@ -109,6 +113,12 @@ fn crew_up(world: &mut World, mut jobs: Vec<Job>, hands: &[Hand]) -> Vec<Job> {
     let index: bevy_platform::collections::HashMap<u64, usize> =
         jobs.iter().enumerate().map(|(i, j)| (j.id, i)).collect();
 
+    // Building the occupancy set is a walk over every structure on the map, and
+    // a farm crew that never leaves its field would otherwise pay for it every
+    // construction tick for the rest of the match. Only a hand that needs a NEW
+    // path needs it, so the walkers are collected first and the set is built at
+    // most once, only if there are any.
+    let mut walkers: Vec<(&Hand, V2)> = Vec::new();
     for h in hands {
         let Some(&ji) = index.get(&h.site) else {
             reassign(world, h, &jobs);
@@ -130,14 +140,38 @@ fn crew_up(world: &mut World, mut jobs: Vec<Job>, hands: &[Hand]) -> Vec<Job> {
             }
             continue;
         }
-        walk_to(world, h, j.pos, seed, &occ, &gates);
+        if world.get::<Unit>(h.entity).is_some_and(|u| u.has_target) {
+            continue; // already walking there
+        }
+        walkers.push((h, j.pos));
+    }
+    if !walkers.is_empty() {
+        let (occ, gates) = occupancy_and_gates(world, false);
+        for (h, to) in walkers {
+            walk_to(world, h, to, seed, &occ, &gates);
+        }
     }
     jobs
 }
 
-/// A job wants hands while it is unfinished or hurt.
+/// A job wants hands while it is unfinished or hurt — and a standing FARM always
+/// does. Tending a field is the same committed-builder loop as raising a wall:
+/// the crew that finished the plot stays in it, `Repair` is the order that puts
+/// more hands in, and an explicit Move/Gather/Attack is how the player takes one
+/// back. No new command verb, no second crew mechanic.
 fn wants_work(j: &Job) -> bool {
+    needs_raising(j) || (operational(j.row.state) && tends_a_field(j.row.kind))
+}
+
+/// What a HOMELESS hand goes looking for. Deliberately not `wants_work`: a wall
+/// crew whose segment just finished must not be silently drained into the
+/// nearest wheat field.
+fn needs_raising(j: &Job) -> bool {
     j.row.state != BuildState::Complete || j.row.hp < j.max_hp
+}
+
+fn tends_a_field(kind: BuildingKind) -> bool {
+    building_def(kind).min_fertility > Fx::ZERO
 }
 
 /// The nearest other job of this hand's owner still wanting work, within
@@ -147,7 +181,7 @@ fn reassign(world: &mut World, h: &Hand, jobs: &[Job]) {
     let mut best: Option<(Fx, u64)> = None;
     let r2 = SITE_REASSIGN_RADIUS * SITE_REASSIGN_RADIUS;
     for j in jobs {
-        if j.owner != h.owner || !wants_work(j) {
+        if j.owner != h.owner || !needs_raising(j) {
             continue;
         }
         let d = dist2(h.pos, j.pos);
@@ -182,9 +216,6 @@ fn walk_to(
     occ: &HashSet<i32>,
     gates: &[(i32, u64)],
 ) {
-    if world.get::<Unit>(h.entity).is_some_and(|u| u.has_target) {
-        return;
-    }
     let owner = h.owner;
     let passable = |tx: i32, ty: i32| {
         let k = tile_key(tx, ty);

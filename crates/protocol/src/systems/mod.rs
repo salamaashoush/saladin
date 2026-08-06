@@ -128,12 +128,13 @@ fn state_hash(
         Option<&Unit>,
         Option<&Building>,
         Option<&ResourceNode>,
+        Option<&Crop>,
         Option<&Player>,
         Option<&Research>,
     )>,
 ) {
     let mut acc: u64 = 0;
-    for (id, pos, unit, bld, node, player, research) in &q {
+    for (id, pos, unit, bld, node, crop, player, research) in &q {
         let mut f = RowHash::default();
         f.w(id.0);
         if let Some(p) = pos {
@@ -200,6 +201,14 @@ fn state_hash(
         }
         if let Some(n) = node {
             f.w(n.remaining as u64);
+            // cap and regen VARY per field (the soil sets them at sowing) and
+            // were invisible here: two peers could disagree about a farm's
+            // yield and pass the desync check until the drift leaked into
+            // `remaining` minutes later.
+            f.w(n.cap as u32 as u64 | (n.regen as u32 as u64) << 32);
+        }
+        if let Some(c) = crop {
+            f.w(c.ripe as u64 | (c.standing as u32 as u64) << 32);
         }
         // the stockpile, the tech tree and research progress ARE sim state: a
         // desync in any of them was invisible while this query demanded a Pos

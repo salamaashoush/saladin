@@ -27,9 +27,12 @@ fn wait_for<F: FnMut() -> bool>(mut f: F, what: &str) {
     }
 }
 
-/// A v6 build must be REFUSED, not seated. `PlayerCommand` gained four appended
-/// variants in v7, and bincode reads the variant index positionally: an old peer
-/// handed a `GroupMove` would decode it as garbage rather than fail.
+/// A build one version behind must be REFUSED, not seated. `PlayerCommand`
+/// gained four appended variants in v7 and bincode reads the variant index
+/// positionally, so an old peer handed a `GroupMove` would decode it as garbage
+/// rather than fail. v8 moved no byte of the wire at all and is every bit as
+/// fatal: the crop season changed what a TICK does, and two peers simulating
+/// different rules from identical inputs drift apart in silence.
 #[test]
 fn a_peer_one_version_behind_is_refused() {
     let addr = "127.0.0.1:39486";
@@ -60,7 +63,7 @@ fn a_peer_one_version_behind_is_refused() {
         },
         other => panic!("a v{} peer was not refused: {other:?}", PROTOCOL_VERSION - 1),
     }
-    assert_eq!(PROTOCOL_VERSION, 7, "the group verbs shipped in v7");
+    assert_eq!(PROTOCOL_VERSION, 8, "the group verbs shipped in v7, the crop season in v8");
 }
 
 /// The lockstep guarantee for the new verbs: nothing crosses the wire but the

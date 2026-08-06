@@ -199,7 +199,11 @@ mod tests {
         assert_eq!(forage_yield(1), 1);
         assert_eq!(forage_yield(0), 0);
         assert_eq!(forage_yield(-5), 0);
-        assert!(forage_yield(i32::MAX) * 20 < crate::constants::FARM_STORE, "foraging replaces a farm");
+        // measured against the SMALLEST field that can now exist, not the median
+        assert!(
+            forage_yield(i32::MAX) * 20 < crate::constants::FARM_CAP_MIN,
+            "foraging replaces a farm"
+        );
     }
 
     /// The muster roll is a ROLE question. Workers and preachers do not draw a

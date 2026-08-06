@@ -26,6 +26,11 @@ const FORMATION_LOOSE: u8 = u8::MAX;
 /// the cheap expansion cap, exactly as the player's command batch does. The old
 /// code ran one UNCAPPED A* per unit per wave; a squad shares one.
 const ARMY_PATHS_PER_BRAIN_TICK: usize = 4;
+/// Rungs one decision window may fall through when the ground for a building has
+/// run out. Bounded: a probe costs a full placement scan.
+const LADDER_RETRIES: usize = 3;
+/// Enough phantom sites to satisfy any rung's count, for one window only.
+const LADDER_SUPPRESS: i32 = 1000;
 
 fn is_support(kind: UnitKind) -> bool {
     unit_def(kind).role == saladin_sim::UnitRole::Support
@@ -36,6 +41,11 @@ fn is_combat(kind: UnitKind) -> bool {
 }
 fn is_siege(kind: UnitKind) -> bool {
     unit_def(kind).prefers_buildings
+}
+
+/// A hub whose aura works fields — it belongs among them, not beside the keep.
+fn tends_fields(kind: BuildingKind) -> bool {
+    building_def(kind).aura.is_some_and(|a| a.target == AuraTarget::Field)
 }
 
 struct BotSnap {
@@ -172,6 +182,19 @@ pub fn ai_brain(world: &mut World) {
         q.iter(world).map(|(g, p, _)| (g.0, p.pos)).collect()
     };
     let node_at: HashMap<u64, V2> = node_pos.iter().copied().collect();
+    // The farms that actually carry a standing field, and whether a harvest
+    // worth planning around stands on it. A plot without a crop is fifty wood of
+    // scenery, not a farm; and a plot reaped down to two sheaves is not a
+    // harvest, however long `ripe` stays latched over it (see
+    // `harvest_standing`).
+    let field_of: HashMap<u64, bool> = {
+        let mut q = world.query::<(&FieldOf, &ResourceNode, Option<&Crop>)>();
+        q.iter(world)
+            .map(|(f, n, c)| {
+                (f.0, c.is_some_and(|c| c.ripe) && harvest_standing(n.remaining, n.cap))
+            })
+            .collect()
+    };
 
     let paused: StdSet<u64> = {
         let statuses = world.resource::<crate::MatchStatuses>();
@@ -296,13 +319,26 @@ pub fn ai_brain(world: &mut World) {
 
         // soil worth sowing within building reach of the keep, and the fields
         // already standing on it
-        // STANDING fields only: the ladder adds `sites_in_flight[Farm]` on top,
-        // so counting sites here too made every ploughed foundation block two
-        // slots of the farm target.
-        let farms = lifecycles
-            .iter()
-            .filter(|l| l.owner == owner && l.kind == BuildingKind::Farm && operational(l.state))
-            .count() as i32;
+        // A FARM IS ITS FIELD. Counting plots rather than crops let a bot sit at
+        // its farm target while the food economy under it shrank, and it is the
+        // reason a granary was sited off the back of foundations that fed
+        // nobody. Sites are excluded here because the ladder adds
+        // `sites_in_flight[Farm]` on top.
+        let (mut farms, mut fields_ripe) = (0, 0);
+        let mut farm_sum = V2::new(Fx::ZERO, Fx::ZERO);
+        for l in &lifecycles {
+            if l.owner != owner || !operational(l.state) {
+                continue;
+            }
+            let Some(&ripe) = field_of.get(&l.id) else { continue };
+            farms += 1;
+            fields_ripe += i32::from(ripe);
+            farm_sum = V2::new(farm_sum.x + l.pos.x, farm_sum.y + l.pos.y);
+        }
+        // A hub belongs among the fields it hubs, not on the first clear tile out
+        // from the keep — measured, spiralling from the keep covered two of nine.
+        let farm_centroid = (farms > 0)
+            .then(|| V2::new(farm_sum.x / Fx::from_num(farms), farm_sum.y / Fx::from_num(farms)));
         let farmland_near = {
             let seed = world.resource::<crate::WorldConfig>().seed;
             let mut found = false;
@@ -406,6 +442,7 @@ pub fn ai_brain(world: &mut World) {
             shore_near,
             farmland_near,
             farms,
+            fields_ripe,
             enemy_towers,
             sites_in_flight,
             damaged,
@@ -473,6 +510,13 @@ pub fn ai_brain(world: &mut World) {
                 if u.gather_state == GatherState::Harvesting {
                     continue; // hands already on the node: never interrupt a swing
                 }
+                // A hand on a job is `staff_jobs`'s to allocate. Idling one here
+                // left its `job_site` booked at a site nobody was raising and a
+                // field nobody was working, and the gather loop walked it back
+                // the moment it dropped its load.
+                if u.gather_state == GatherState::Constructing {
+                    continue;
+                }
                 let nt = if u.target_node == 0 { None } else { node_type.get(&u.target_node).copied() };
                 if nt == Some(want) {
                     continue; // already working the wanted resource
@@ -521,8 +565,19 @@ pub fn ai_brain(world: &mut World) {
         } else {
             None
         };
+        // Jobs first, THEN the balancer: a hand `staff_jobs` sends home from an
+        // over-staffed field is idle for the rest of this tick, and the balancer
+        // is what gives it a node. Reversed, it stood in the yard for a second.
+        staff_jobs(
+            world,
+            owner,
+            &units,
+            &lifecycles,
+            &field_of,
+            tune.builders_per_site,
+            field_labour(&state, &tune),
+        );
         assign_idle_gatherers(world, owner, idle_bias);
-        staff_jobs(world, owner, &units, &lifecycles, tune.builders_per_site);
 
         // ── phase + one macro decision per profile-paced window ───────────────
         let phase = next_phase(&state, &tune);
@@ -530,7 +585,16 @@ pub fn ai_brain(world: &mut World) {
         let mut decision_cd = bot.decision_cd - AI_BRAIN_DT;
         if decision_cd <= Fx::ZERO {
             decision_cd = prof.decision_interval;
-            if let Some(plan) = next_build(&state, &tune) {
+            // A rung whose ground has run out is suppressed and the NEXT
+            // decision taken in the same window. Without this an affordable
+            // building with nowhere legal to stand wedges the whole ladder
+            // behind it forever — measured on a soil-poor start, a bot sat on
+            // 872 wood and 800 stone asking for an eighth farm it could not
+            // site, and never bought the market standing one rung below.
+            let mut plan_state = state.clone();
+            for _ in 0..LADDER_RETRIES {
+                let Some(plan) = next_build(&plan_state, &tune) else { break };
+                let mut blocked = None;
                 match plan.action {
                     BuildAction::Train => {
                         if let Some(kind) = UnitKind::from_u8(plan.kind) {
@@ -544,20 +608,22 @@ pub fn ai_brain(world: &mut World) {
                             // re-checks the rest).
                             let reserve_ok = kind != BuildingKind::Tower
                                 || stock.wood >= building_def(kind).cost.wood + tune.wood_buffer;
-                            let anchor = if kind == BuildingKind::Storehouse {
-                                state.remote_cluster.unwrap_or(keep_pos)
-                            } else {
-                                keep_pos
+                            let anchor = match kind {
+                                BuildingKind::Storehouse => {
+                                    state.remote_cluster.unwrap_or(keep_pos)
+                                }
+                                _ if tends_fields(kind) => farm_centroid.unwrap_or(keep_pos),
+                                _ => keep_pos,
                             };
                             if reserve_ok {
                                 let placed = place_near(world, owner, kind, anchor);
-                                // an affordable hut with no legal shoreline tile
-                                // would stall the ladder forever — stop asking
-                                if placed.is_none()
-                                    && kind == BuildingKind::FishingHut
-                                    && stock.can_afford(&building_def(kind).cost)
-                                {
-                                    fishing_blocked = true;
+                                if placed.is_none() && stock.can_afford(&building_def(kind).cost) {
+                                    blocked = Some(kind);
+                                    // a shoreline is the one kind of ground that
+                                    // never comes back, so that one stays latched
+                                    if kind == BuildingKind::FishingHut {
+                                        fishing_blocked = true;
+                                    }
                                 }
                             }
                         }
@@ -581,6 +647,10 @@ pub fn ai_brain(world: &mut World) {
                         }
                     }
                 }
+                let Some(kind) = blocked else { break };
+                // `rising` is what every rung reads, count-based ones included,
+                // so one bump suppresses the kind whatever shape its rung has.
+                plan_state.sites_in_flight[kind as usize] += LADDER_SUPPRESS;
             }
             // market: one order per window through the SAME validated command
             // path a human uses — famine rescue (gold into food) or war-chest
@@ -925,30 +995,118 @@ fn spare_hands(units: &[USnap], owner: u64, at: V2, n: i32, taken: &mut StdSet<u
     picked
 }
 
-/// Keep every paid-for site and every upgrade manned. An unmanned site never
-/// finishes, and the planner's `sites_in_flight` gate would then wedge the
-/// whole build ladder behind it — so this is not a nicety.
-fn staff_jobs(world: &mut World, owner: u64, units: &[USnap], jobs: &[Lifecycle], want: i32) {
+/// Keep every paid-for site manned and every standing field worked — one loop,
+/// because they are one mechanic: a farmhand IS a builder standing on a farm.
+///
+/// An unmanned site never finishes, and the planner's `sites_in_flight` gate
+/// would then wedge the whole build ladder behind it — so the first half is not
+/// a nicety. The second half is the labour allocation the player makes every
+/// minute of the match, and it is BUDGETED in both directions. `crew_up` keeps a
+/// farm crew forever, so without a ceiling the hands that raise the last farm
+/// never come home: measured, twelve of thirteen peasants standing in the wheat,
+/// six wood in the yard, and a build ladder frozen for eleven minutes on a food
+/// pile the bot had nothing to spend on.
+fn staff_jobs(
+    world: &mut World,
+    owner: u64,
+    units: &[USnap],
+    jobs: &[Lifecycle],
+    fields: &HashMap<u64, bool>,
+    want: i32,
+    lab: FieldLabour,
+) {
     let hands = units.iter().filter(|u| u.owner == owner && u.kind == UnitKind::Peasant).count();
     if hands <= 2 {
         return; // never strip the economy bare to raise a wall
     }
+    let crew_of = |site: u64| {
+        units.iter().filter(|u| u.owner == owner && u.job_site == site).count() as i32
+    };
     let mut taken: StdSet<u64> =
         units.iter().filter(|u| u.job_site != 0).map(|u| u.id).collect();
     for j in jobs {
         if j.owner != owner || j.state == BuildState::Complete {
             continue;
         }
-        let crew = units
-            .iter()
-            .filter(|u| u.owner == owner && u.job_site == j.id)
-            .count() as i32;
-        let short = want.max(1) - crew;
+        let short = want.max(1) - crew_of(j.id);
         if short <= 0 {
             continue;
         }
         for u in spare_hands(units, owner, j.pos, short, &mut taken) {
             repair(world, owner, u, j.id);
+        }
+    }
+
+    // `jobs` is GameId-sorted, so the fields are walked in the same order on
+    // every peer and a budget that runs out cuts the same farm off everywhere.
+    let mut crews: Vec<(u64, V2, i32)> = jobs
+        .iter()
+        .filter(|j| j.owner == owner && operational(j.state) && fields.contains_key(&j.id))
+        .map(|j| (j.id, j.pos, crew_of(j.id)))
+        .collect();
+    if crews.is_empty() {
+        return;
+    }
+    let mut committed: i32 = crews.iter().map(|(_, _, c)| *c).sum();
+    // Over budget — send the surplus back to the woods. Deepest crew first, so
+    // a town that has just lost peasants thins its fields evenly instead of
+    // abandoning one.
+    //
+    // `sent_home` is load-bearing: `units` is a snapshot taken before this pass,
+    // so a hand released here still reads `job_site == site` on the next lap and
+    // the same man would be picked until the counters ran out. That thinned the
+    // fields ONE hand per brain tick however far over budget the town was — a
+    // farm finishing with a six-hand crew sat 50% over its ration for three
+    // seconds, which is the breach `a_bot_works_the_fields...` measures.
+    let mut sent_home: StdSet<u64> = StdSet::default();
+    while committed > lab.budget {
+        let Some(slot) = crews
+            .iter_mut()
+            .filter(|(_, _, c)| *c > 0)
+            .max_by_key(|(id, _, c)| (*c, std::cmp::Reverse(*id)))
+        else {
+            break;
+        };
+        let site = slot.0;
+        // the newest hand leaves first: the man who has walked furthest into the
+        // season stays with the crop
+        let Some(u) = units
+            .iter()
+            .filter(|u| u.owner == owner && u.job_site == site && !sent_home.contains(&u.id))
+            .max_by_key(|u| u.id)
+            .map(|u| (u.entity, u.id))
+        else {
+            slot.2 = 0;
+            continue;
+        };
+        if let Some(mut unit) = world.get_mut::<Unit>(u.0) {
+            unit.job_site = 0;
+            unit.target_node = 0;
+            unit.gather_state = GatherState::Idle;
+            unit.has_target = false;
+        }
+        sent_home.insert(u.1);
+        taken.remove(&u.1);
+        slot.2 -= 1;
+        committed -= 1;
+    }
+    // Under budget — spread a LAYER AT A TIME across every field before
+    // thickening any one of them. The tending curve diminishes, so three hands
+    // over three fields beat three on one, and the bot answers that the way the
+    // player does.
+    for layer in 1..=lab.per_field {
+        for (id, pos, crew) in crews.iter_mut() {
+            if committed >= lab.budget {
+                return;
+            }
+            if *crew >= layer {
+                continue;
+            }
+            for u in spare_hands(units, owner, *pos, 1, &mut taken) {
+                repair(world, owner, u, *id);
+                *crew += 1;
+                committed += 1;
+            }
         }
     }
 }

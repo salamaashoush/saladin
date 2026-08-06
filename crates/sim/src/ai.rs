@@ -62,8 +62,15 @@ pub struct PlannerState {
     pub shore_near: bool,
     /// Soil good enough to sow within building reach of the keep.
     pub farmland_near: bool,
-    /// Fields already sown.
+    /// Farms carrying a STANDING FIELD. A plot whose crop is gone is not a farm,
+    /// it is fifty wood of scenery — counting it kept the bot at its farm target
+    /// while its food economy shrank underneath it.
     pub farms: i32,
+    /// Fields carrying a harvest big enough to answer a famine with. NOT every
+    /// ripe field: `Crop.ripe` latches down to an empty plot, and a ripe crop
+    /// stops growing, so a stripped field would read as "the harvest is in" for
+    /// the whole grace and the whole bleed after it (see `harvest_standing`).
+    pub fields_ripe: i32,
     /// Standing enemy defensive structures (towers/watchtowers) — weigh into
     /// the assault go/no-go alongside their field army.
     pub enemy_towers: i32,
@@ -112,6 +119,8 @@ pub struct PlannerTuning {
     pub wants_fishing: bool,
     /// Fields the bot works toward once its economy is standing.
     pub farm_target: i32,
+    /// Peasants the bot parks on each standing field to work it.
+    pub farm_hands: i32,
     /// Below this gold, sell a glut resource at the market for a war chest.
     pub gold_floor: i32,
     /// Wood/stone above this is a glut the market may sell down.
@@ -128,6 +137,34 @@ pub struct PlannerTuning {
 /// Food crisis: the larder is at/under the floor while an army eats from it.
 pub fn food_crisis(s: &PlannerState, tune: &PlannerTuning) -> bool {
     s.upkeep > 0 && s.food <= tune.food_floor
+}
+
+/// How a bot spreads its peasants over its fields.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FieldLabour {
+    /// Hands kept on each standing field.
+    pub per_field: i32,
+    /// Hands in fields ACROSS THE WHOLE TOWN. The binding half: a hand in a
+    /// field is wood, stone and an army everywhere else, and a bot that answers
+    /// "how many hands do I leave in the fields" with "all of them" piles up
+    /// food it has nothing to spend on. Measured, that is exactly what happened
+    /// — twelve of thirteen peasants in the wheat, six wood in the yard, and a
+    /// build ladder frozen for eleven minutes.
+    pub budget: i32,
+}
+
+/// Peasants a bot commits to its fields. Spread before stacked: `per_field` is
+/// filled a layer at a time across every farm, so the diminishing tending curve
+/// is answered the way the player answers it.
+///
+/// A famine with a harvest standing swells both numbers. Cutting a ripe crop is
+/// food already grown and already paid for; it comes in before the war chest is
+/// spent on somebody else's grain (see `next_trade`).
+pub fn field_labour(s: &PlannerState, tune: &PlannerTuning) -> FieldLabour {
+    let surge = food_crisis(s, tune) && s.fields_ripe > 0;
+    let per_field = if surge { tune.farm_hands + 1 } else { tune.farm_hands }.max(1);
+    let budget = if surge { s.peasants * 2 / 3 } else { s.peasants / 2 };
+    FieldLabour { per_field, budget: budget.max(0) }
 }
 
 /// A trained kind that draws rations. ROLE, not `attack > 0`: the muster roll
@@ -363,7 +400,10 @@ pub fn next_trade(s: &PlannerState, tune: &PlannerTuning) -> Option<TradeDecisio
     if !s.owned.contains(&BuildingKind::Market) {
         return None;
     }
-    if food_crisis(s, tune) && s.gold >= MARKET_BUY_RATE {
+    // A harvest standing in the fields is food already grown and already paid
+    // for. Cut it before buying somebody else's grain — `field_labour` has
+    // already swelled the crew that is cutting it.
+    if food_crisis(s, tune) && s.fields_ripe == 0 && s.gold >= MARKET_BUY_RATE {
         let want = (s.upkeep * tune.food_floor_mult).max(20);
         let amount = want.min(s.gold / MARKET_BUY_RATE);
         return Some(TradeDecision { res: ResourceType::Food, amount, buy: true });
@@ -553,18 +593,30 @@ pub fn next_build(s: &PlannerState, tune: &PlannerTuning) -> Option<BuildDecisio
             return Some(house());
         }
         // A field is the only food that grows back, so a starving bot sows
-        // before it does anything else with wood.
-        if s.farmland_near
-            && s.farms + s.sites_in_flight[BuildingKind::Farm as usize] < tune.farm_target + 2
-            && s.wood >= 45
-        {
-            return Some(build(BuildingKind::Farm));
-        }
-        if tune.wants_fishing && s.shore_near && need(BuildingKind::FishingHut) {
-            return Some(build(BuildingKind::FishingHut));
+        // before it does anything else with wood — UNLESS a harvest is already
+        // standing, in which case the answer is hands, not another foundation
+        // that comes in a season too late.
+        if s.fields_ripe == 0 {
+            if s.farmland_near
+                && s.farms + s.sites_in_flight[BuildingKind::Farm as usize] < tune.farm_target + 2
+                && s.wood >= 45
+            {
+                return Some(build(BuildingKind::Farm));
+            }
+            if tune.wants_fishing && s.shore_near && need(BuildingKind::FishingHut) {
+                return Some(build(BuildingKind::FishingHut));
+            }
         }
         if s.farms > 0 && need(BuildingKind::Granary) {
             return Some(build(BuildingKind::Granary));
+        }
+        // Ground that cannot be sown and a shore that is not there: the market
+        // IS the food economy, and `next_trade` cannot open one. Measured on a
+        // soil-poor start, a bot stood at zero food holding 464 gold, 672 wood
+        // and 1634 stone because a famine never let the ladder past a farm rung
+        // it had nowhere to put.
+        if tune.wants_market && need(BuildingKind::Market) {
+            return Some(build(BuildingKind::Market));
         }
         return None; // next_trade may still buy food with gold
     }
@@ -859,6 +911,7 @@ mod tests {
             shore_near: false,
             farmland_near: false,
             farms: 0,
+            fields_ripe: 0,
             enemy_towers: 0,
             sites_in_flight: [0; 16],
             damaged: 0,
@@ -892,6 +945,7 @@ mod tests {
             wants_market: false,
             wants_fishing: false,
             farm_target: 0,
+            farm_hands: 1,
             gold_floor: 0,
             sell_threshold: i32::MAX,
             wants_expansion: false,
@@ -1024,6 +1078,142 @@ mod tests {
         s.gold = 10;
         s.owned.remove(&BuildingKind::Market);
         assert_eq!(next_trade(&s, &tune), None);
+    }
+
+    /// The measured failure this exists to stop: twelve of thirteen peasants
+    /// tending wheat, six wood in the yard, and a build ladder frozen for the
+    /// rest of the match.
+    #[test]
+    fn hands_in_the_fields_never_eat_the_whole_workforce() {
+        let mut s = state(barracks_only());
+        let mut tune = tuning();
+        tune.farm_hands = 3;
+        s.peasants = 13;
+        s.farms = 7;
+        let lab = field_labour(&s, &tune);
+        assert_eq!(lab.per_field, 3);
+        assert_eq!(lab.budget, 6, "fields took more than half the town");
+        assert!(
+            lab.budget < s.farms * lab.per_field,
+            "the budget must BIND at the farm target, or it is not a budget"
+        );
+        // and it scales with the workforce rather than being a magic number
+        s.peasants = 4;
+        assert_eq!(field_labour(&s, &tune).budget, 2);
+        s.peasants = 0;
+        assert_eq!(field_labour(&s, &tune).budget, 0);
+        // a profile that wants no crew at all still spreads one hand per field
+        tune.farm_hands = 0;
+        assert_eq!(field_labour(&s, &tune).per_field, 1);
+    }
+
+    #[test]
+    fn a_famine_cuts_the_standing_harvest_before_it_buys_grain() {
+        let mut owned = barracks_only();
+        owned.insert(BuildingKind::Market);
+        let mut s = state(owned);
+        let mut tune = tuning();
+        tune.farm_hands = 2;
+        s.peasants = 12;
+        s.food = 5;
+        s.upkeep = 8;
+        s.gold = 200;
+        s.farms = 3;
+        assert!(food_crisis(&s, &tune));
+
+        // nothing ripe: the market is the only food there is
+        let t = next_trade(&s, &tune).unwrap();
+        assert!(t.buy && t.res == ResourceType::Food);
+        let lean = field_labour(&s, &tune);
+
+        // a harvest standing: swell the crew, keep the war chest
+        s.fields_ripe = 2;
+        assert!(
+            next_trade(&s, &tune).is_none_or(|t| !t.buy),
+            "bought grain with a crop standing in the field"
+        );
+        let surge = field_labour(&s, &tune);
+        assert!(surge.per_field > lean.per_field, "famine did not put more hands on the crop");
+        assert!(surge.budget > lean.budget);
+        assert!(surge.budget <= s.peasants, "a surge is still not the whole town");
+
+        // and once it is cut the market opens again
+        s.fields_ripe = 0;
+        assert!(next_trade(&s, &tune).unwrap().buy);
+    }
+
+    #[test]
+    fn a_starving_bot_with_a_crop_in_reach_sows_no_new_foundation() {
+        let mut s = state(barracks_only());
+        let mut tune = tuning();
+        tune.farm_target = 4;
+        s.farmland_near = true;
+        s.food = 5;
+        s.upkeep = 8;
+        s.wood = 200;
+        s.peasants = 20; // past the peasant goal, so the ladder reaches the farm rung
+        s.pop = 20;
+        s.cap = 30; // and pop headroom, so it is not answered with a House
+        assert_eq!(
+            next_build(&s, &tune).map(|d| d.kind),
+            Some(BuildingKind::Farm as u8),
+            "a famine with no crop standing sows"
+        );
+        s.fields_ripe = 1;
+        assert!(
+            next_build(&s, &tune).map(|d| d.kind) != Some(BuildingKind::Farm as u8),
+            "spent 45 wood on a season that arrives after the famine"
+        );
+    }
+
+    /// The measured deadlock: soil the bot cannot sow, no shore, a famine that
+    /// therefore never ends, and a ladder that never reaches the one rung that
+    /// could feed it. It sat at zero food on 464 gold and 1634 stone.
+    #[test]
+    fn a_famine_on_ground_that_cannot_be_sown_still_reaches_the_market() {
+        let mut s = state(barracks_only());
+        let mut tune = tuning();
+        tune.wants_market = true;
+        tune.wants_fishing = true;
+        tune.farm_target = 4;
+        s.food = 5;
+        s.upkeep = 8;
+        s.wood = 200;
+        s.stone = 200;
+        s.gold = 400;
+        s.peasants = 20;
+        s.pop = 20;
+        s.cap = 30;
+        assert!(food_crisis(&s, &tune));
+        assert_eq!(next_trade(&s, &tune), None, "no market, so no grain to buy");
+        assert_eq!(
+            next_build(&s, &tune).map(|d| d.kind),
+            Some(BuildingKind::Market as u8),
+            "starved holding a war chest it had no way to spend"
+        );
+
+        // but ground it CAN sow is still answered with a field first: a market
+        // eats a war chest, a farm makes food
+        s.farmland_near = true;
+        assert_eq!(next_build(&s, &tune).map(|d| d.kind), Some(BuildingKind::Farm as u8));
+        // ...and once the ladder has suppressed a farm rung it cannot place,
+        // the market is what it falls through to
+        s.sites_in_flight[BuildingKind::Farm as usize] = 1000;
+        assert_eq!(next_build(&s, &tune).map(|d| d.kind), Some(BuildingKind::Market as u8));
+        // a shore is still cheaper food than a merchant
+        s.shore_near = true;
+        assert_eq!(next_build(&s, &tune).map(|d| d.kind), Some(BuildingKind::FishingHut as u8));
+
+        // and a bot that already trades does not found a second market
+        let mut owned = barracks_only();
+        owned.insert(BuildingKind::Market);
+        let mut s2 = state(owned);
+        s2.food = 5;
+        s2.upkeep = 8;
+        s2.peasants = 20;
+        s2.pop = 20;
+        s2.cap = 30;
+        assert_eq!(next_build(&s2, &tune), None);
     }
 
     #[test]

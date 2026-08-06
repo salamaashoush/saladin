@@ -233,6 +233,124 @@ pub const FOOD_DEER_GRAZING: usize = 3;
 pub const FOOD_DEER_CARCASS: usize = 4;
 pub const FOOD_BOAR_CARCASS: usize = 5;
 
+/// Crop-stage indices (into `crop_stage_meshes()`).
+pub const CROP_STUBBLE: usize = 0;
+pub const CROP_SHOOTS: usize = 1;
+pub const CROP_GREEN: usize = 2;
+pub const CROP_RIPE: usize = 3;
+pub const CROP_LODGED: usize = 4;
+
+/// The standing crop of a farm, one shared mesh per lifecycle stage. The plot
+/// (`build_farm`) is the BUILDING; this is the resource node that grows on it,
+/// so the renderer swaps `Mesh3d` between these five and every field on the
+/// map still batches into five draws.
+pub fn crop_stage_meshes() -> Vec<Mesh> {
+    vec![crop_stubble(), crop_shoots(), crop_green(), crop_ripe(), crop_lodged()]
+}
+
+/// Just inside the top of `build_farm`'s 0.07 soil slab — a crop authored ON
+/// the bed instead of at 0 renders coplanar with it and z-fights.
+const CROP_BED: f32 = 0.062;
+/// Crop rows sit in the troughs BETWEEN the plot's six lit furrow ridges.
+const CROP_ROWS: [f32; 5] = [-0.632, -0.316, 0.0, 0.316, 0.632];
+
+fn crop_lattice(mut f: impl FnMut(f32, f32, usize)) {
+    for (i, &z) in CROP_ROWS.iter().enumerate() {
+        for j in 0..7 {
+            f(-0.72 + j as f32 * 0.24, z, i * 7 + j);
+        }
+    }
+}
+
+/// Reaped: cut stalks on the furrows and two bound sheaves still standing.
+fn crop_stubble() -> Mesh {
+    let straw = lin(0xb9a875);
+    let straw_dk = lin(0x998a5e);
+    let mut parts = Vec::new();
+    crop_lattice(|x, z, i| {
+        let c = if i % 3 == 0 { straw_dk } else { straw };
+        parts.push(part(boxy(0.11, 0.045, 0.07), c, xyz(x, CROP_BED + 0.022, z)));
+    });
+    for (sx, sz) in [(-0.44f32, -0.16f32), (0.5, 0.42)] {
+        parts.push(part(frustum(0.12, 0.05, 0.3, 6), straw, xyz(sx, CROP_BED + 0.15, sz)));
+        parts.push(part(boxy(0.17, 0.03, 0.17), straw_dk, xyz(sx, CROP_BED + 0.18, sz)));
+    }
+    merge(parts)
+}
+
+/// Sown: a low green fuzz on bare ground — "do not send your reaper yet".
+fn crop_shoots() -> Mesh {
+    let shoot = lin(0x79a347);
+    let shoot_dk = lin(0x5f8a34);
+    let mut parts = Vec::new();
+    crop_lattice(|x, z, i| {
+        for k in 0..3 {
+            let ang = (i * 3 + k) as f32 * 2.1;
+            let h = 0.14 + (k % 2) as f32 * 0.04;
+            let c = if (i + k) % 3 == 0 { shoot_dk } else { shoot };
+            parts.push(part(
+                cone(0.035, h, 3),
+                c,
+                xyz(x + ang.cos() * 0.05, CROP_BED + h * 0.5, z + ang.sin() * 0.05),
+            ));
+        }
+    });
+    merge(parts)
+}
+
+/// Grown: tall green blades, not yet in ear.
+fn crop_green() -> Mesh {
+    let blade = lin(0x5c8c33);
+    let blade_dk = lin(0x477326);
+    let blade_hi = lin(0x74a544);
+    let mut parts = Vec::new();
+    crop_lattice(|x, z, i| {
+        for k in 0..3 {
+            let ang = (i * 5 + k * 2) as f32 * 1.7;
+            let h = 0.3 + ((i + k) % 3) as f32 * 0.06;
+            let c = [blade, blade_dk, blade_hi][(i + k) % 3];
+            let tf = xyz(x + ang.cos() * 0.045, CROP_BED, z + ang.sin() * 0.045)
+                * Transform::from_rotation(Quat::from_rotation_z(ang.sin() * 0.16))
+                * xyz(0.0, h * 0.5, 0.0);
+            parts.push(part(cone(0.045, h, 3), c, tf));
+        }
+    });
+    merge(parts)
+}
+
+/// Ripe: gold standing grain in ear at full height — the look `build_farm`
+/// used to wear permanently, now correct exactly once per season.
+fn crop_ripe() -> Mesh {
+    let stem = lin(0xbfa14a);
+    let ear = lin(0xdcc069);
+    let ear_dk = lin(0xa88a38);
+    let mut parts = Vec::new();
+    crop_lattice(|x, z, i| {
+        let lean = ((i % 5) as f32 - 2.0) * 0.05;
+        let h = 0.36 + (i % 3) as f32 * 0.04;
+        let base = xyz(x, CROP_BED, z) * Transform::from_rotation(Quat::from_rotation_z(lean));
+        parts.push(part(boxy(0.1, h, 0.075), stem, base * xyz(0.0, h * 0.5, 0.0)));
+        let c = if i % 2 == 0 { ear } else { ear_dk };
+        parts.push(part(boxy(0.13, 0.1, 0.1), c, base * xyz(0.0, h + 0.04, 0.0)));
+    });
+    merge(parts)
+}
+
+/// Lodged: a crop nobody cut, grey and flat on the ground.
+fn crop_lodged() -> Mesh {
+    let dead = lin(0x8e8663);
+    let dead_dk = lin(0x6e6850);
+    let mut parts = Vec::new();
+    crop_lattice(|x, z, i| {
+        let dir = ((i % 4) as f32 - 1.5) * 0.6;
+        let c = if i % 3 == 0 { dead_dk } else { dead };
+        let tf = xyz(x, CROP_BED + 0.028, z)
+            * Transform::from_rotation(Quat::from_euler(EulerRot::YXZ, dir, 0.0, 0.16));
+        parts.push(part(boxy(0.1, 0.05, 0.3), c, tf));
+    });
+    merge(parts)
+}
+
 /// Coastal food nodes sit on water tiles — render them as a fish school with
 /// a ripple ring instead of a land animal standing on the sea.
 pub fn fish_node_mesh() -> Mesh {
@@ -1110,4 +1228,46 @@ fn pine() -> Mesh {
         parts.push(part(cone(r, h, 7), lin(c), xyz(0.0, y, 0.0)));
     }
     merge(parts)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn max_y(m: &Mesh) -> f32 {
+        let Some(bevy::mesh::VertexAttributeValues::Float32x3(p)) =
+            m.attribute(Mesh::ATTRIBUTE_POSITION)
+        else {
+            panic!("crop stage has no positions");
+        };
+        p.iter().fold(f32::MIN, |a, v| a.max(v[1]))
+    }
+
+    /// Five stages that look the same are one stage wearing five names. Height
+    /// is the read at gameplay zoom: a crop rises from cut stubble to standing
+    /// grain, and a lodged crop is DOWN — that ordering is the whole cue.
+    #[test]
+    fn the_five_crop_stages_are_five_different_looks() {
+        let m = crop_stage_meshes();
+        assert_eq!(m.len(), 5);
+        let h: Vec<f32> = m.iter().map(max_y).collect();
+        assert!(h[CROP_SHOOTS] < h[CROP_GREEN], "shoots are not shorter than a grown crop");
+        assert!(h[CROP_GREEN] <= h[CROP_RIPE], "a ripe crop is shorter than a green one");
+        assert!(h[CROP_LODGED] < h[CROP_SHOOTS], "a lodged crop is not down");
+        // every stage sits ON the plot's 0.07 soil bed, never under it or
+        // floating over it (`build_farm` owns the bed; this owns the crop)
+        for (i, mesh) in m.iter().enumerate() {
+            let Some(bevy::mesh::VertexAttributeValues::Float32x3(p)) =
+                mesh.attribute(Mesh::ATTRIBUTE_POSITION)
+            else {
+                unreachable!()
+            };
+            let lo = p.iter().fold(f32::MAX, |a, v| a.min(v[1]));
+            assert!(lo < 0.07, "crop stage {i} floats above the soil bed");
+            assert!(lo > -0.05, "crop stage {i} is buried under the plot");
+            // and inside the 1.9-wide plot the fence encloses
+            let wide = p.iter().any(|v| v[0].abs() > 0.95 || v[2].abs() > 0.95);
+            assert!(!wide, "crop stage {i} grows outside its own fence");
+        }
+    }
 }

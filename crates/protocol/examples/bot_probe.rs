@@ -104,7 +104,21 @@ fn main() {
             sites.join(",")
         );
         let hauled = w.resource_mut::<MatchStats>().of(1).gathered;
-        println!("        peasant states idle={} tores={} harv={} tostk={} constr={}  job_site!=0: {}  hauled={hauled}", states[0], states[1], states[2], states[3], states[4], jobs);
+        // Living fields, not plots: a farm that carries no crop is scenery, and
+        // counting scenery is what let the bot sit at its farm target while its
+        // food economy shrank underneath it.
+        let (mut fields, mut ripe, mut standing_crop) = (0, 0, 0);
+        {
+            let mut q = w.query::<(&FieldOf, &ResourceNode, Option<&Crop>)>();
+            for (_, n, c) in q.iter(w) {
+                fields += 1;
+                standing_crop += n.remaining;
+                if c.is_some_and(|c| c.ripe) {
+                    ripe += 1;
+                }
+            }
+        }
+        println!("        peasant states idle={} tores={} harv={} tostk={} constr={}  job_site!=0: {}  hauled={hauled}  fields={fields} ripe={ripe} crop={standing_crop}", states[0], states[1], states[2], states[3], states[4], jobs);
         if std::env::var("PROBE_UNITS").is_ok() {
             let nodes: Vec<(u64, V2, i32)> = {
                 let mut q = w.query::<(&GameId, &Pos, &ResourceNode)>();

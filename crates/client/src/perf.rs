@@ -63,7 +63,7 @@ pub fn update_perf(
         .get(&FrameTimeDiagnosticsPlugin::FRAME_TIME)
         .and_then(|d| d.smoothed())
         .unwrap_or(0.0);
-    **text = format!(
+    let line = format!(
         "FPS {:.0}  ({:.2}ms)\nunits {}  bld {}  nodes {}",
         fps,
         ms,
@@ -71,4 +71,10 @@ pub fn update_perf(
         q_buildings.iter().count(),
         q_nodes.iter().count(),
     );
+    // the harness reads a frame time out of a PNG otherwise, which is a poor
+    // way to sample five runs
+    if std::env::var("SALADIN_PERF").is_ok() {
+        eprintln!("PERF {}", line.replace('\n', "  "));
+    }
+    **text = line;
 }

@@ -210,6 +210,7 @@ pub struct AiProfile {
     pub wants_market: bool,
     pub wants_fishing: bool,
     pub farm_target: i32,
+    pub farm_hands: i32,
     pub gold_floor: i32,
     pub sell_threshold: i32,
     pub wants_expansion: bool,
@@ -257,6 +258,7 @@ const AI_PROFILES: [AiProfile; 3] = [
         wants_market: false,
         wants_fishing: false,
         farm_target: 2,
+        farm_hands: 1,
         gold_floor: 0,
         sell_threshold: 999_999,
         wants_expansion: false,
@@ -301,6 +303,7 @@ const AI_PROFILES: [AiProfile; 3] = [
         wants_market: true,
         wants_fishing: true,
         farm_target: 4,
+        farm_hands: 2,
         gold_floor: 60,
         sell_threshold: 250,
         wants_expansion: true,
@@ -345,6 +348,7 @@ const AI_PROFILES: [AiProfile; 3] = [
         wants_market: true,
         wants_fishing: true,
         farm_target: 7,
+        farm_hands: 3,
         gold_floor: 100,
         sell_threshold: 200,
         wants_expansion: true,
@@ -398,6 +402,7 @@ pub fn planner_tuning(p: &AiProfile) -> PlannerTuning {
         wants_market: p.wants_market,
         wants_fishing: p.wants_fishing,
         farm_target: p.farm_target,
+        farm_hands: p.farm_hands,
         gold_floor: p.gold_floor,
         sell_threshold: p.sell_threshold,
         wants_expansion: p.wants_expansion,
@@ -532,7 +537,14 @@ mod tests {
         let hard = ai_profile(AiDifficulty::Hard);
         let pt = planner_tuning(hard);
         assert_eq!(pt.army_target, 14);
+        assert_eq!(pt.farm_hands, 3);
         let tt = tactical_tuning(hard);
         assert!(tt.scouts);
+        // a better bot works its fields harder, difficulty by difficulty
+        let hands: Vec<i32> = [AiDifficulty::Easy, AiDifficulty::Normal, AiDifficulty::Hard]
+            .iter()
+            .map(|d| planner_tuning(ai_profile(*d)).farm_hands)
+            .collect();
+        assert_eq!(hands, vec![1, 2, 3]);
     }
 }

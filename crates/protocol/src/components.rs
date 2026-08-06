@@ -236,6 +236,28 @@ impl ResourceNode {
 #[derive(Component, Clone, Copy, Debug, Serialize, Deserialize)]
 pub struct FieldOf(pub u64);
 
+/// Where a field is in its season. Rides beside the `ResourceNode` on the same
+/// row, so a crop's stage is sim state a peer can desync on and the renderer
+/// can read.
+#[derive(Component, Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Crop {
+    /// LATCHED at full growth, not derived from `remaining` — a reaper drawing
+    /// the field down must not un-ripen it at the first sheaf.
+    pub ripe: bool,
+    /// Economy ticks the crop has stood uncut. Past `FARM_RIPE_GRACE` it lodges.
+    pub standing: i32,
+}
+
+/// Can this node be worked RIGHT NOW?
+///
+/// A GROWING CROP CANNOT BE CUT. That single gate is what makes a field a season
+/// rather than a bucket: draw can no longer outrun growth, because until the
+/// harvest is in there is nothing to take. Every other deposit is takeable while
+/// anything is left in it.
+pub fn reapable(n: &ResourceNode, is_field: bool, crop: Option<&Crop>) -> bool {
+    n.remaining > 0 && (!is_field || crop.is_none_or(|c| c.ripe))
+}
+
 /// A player (human or bot) — its own entity carrying the stockpile + faction.
 #[derive(Component, Clone, Debug, Serialize, Deserialize)]
 pub struct Player {

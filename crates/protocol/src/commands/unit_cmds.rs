@@ -75,6 +75,12 @@ pub(crate) fn set_stance(world: &mut World, owner: u64, unit: u64, stance: Stanc
 
 /// Send a carrier unit to harvest `node`. Mirrors the `gatherResource` reducer:
 /// only units with carry capacity, only live nodes; cancels combat pursuit.
+///
+/// A crop of your own that is not in yet is not a refusal — it is a JOB. The man
+/// goes into the furrows and tends it, which is the same committed-builder state
+/// `Repair` puts him in, and the tend handoff hands him the sickle the moment the
+/// season comes round. A click that does nothing is worse than a wrong one, and
+/// somebody else's growing crop is still not yours to work.
 pub(crate) fn gather(world: &mut World, owner: u64, unit: u64, node: u64) {
     let Some(e) = find_owned(world, owner, unit) else { return };
     let kind = match world.get::<Unit>(e) {
@@ -84,11 +90,28 @@ pub(crate) fn gather(world: &mut World, owner: u64, unit: u64, node: u64) {
     if unit_def(kind).carry <= 0 {
         return;
     }
-    let node_alive = {
-        let mut q = world.query::<(&GameId, &ResourceNode)>();
-        q.iter(world).any(|(g, _)| g.0 == node)
+    // Owner is OPTIONAL: a wild herd belongs to nobody, and a query that demands
+    // one refuses every rock and tree on the map.
+    let row = {
+        let mut q = world
+            .query::<(&GameId, &ResourceNode, Option<&Owner>, Option<&FieldOf>, Option<&Crop>)>();
+        q.iter(world).find(|(g, _, _, _, _)| g.0 == node).map(|(_, n, o, f, c)| {
+            let mine = o.is_some_and(|o| o.0 == owner);
+            (f.filter(|_| mine).map(|f| f.0), reapable(n, f.is_some(), c))
+        })
     };
-    if !node_alive {
+    let Some((own_farm, cut)) = row else { return };
+    if let Some(farm) = own_farm
+        && !cut
+    {
+        if let Some(mut u) = world.get_mut::<Unit>(e) {
+            u.gather_state = GatherState::Constructing;
+            u.job_site = farm;
+            u.target_node = 0;
+            u.attack_target = 0;
+            u.has_target = false;
+            u.order = ORDER_NONE;
+        }
         return;
     }
     if let Some(mut u) = world.get_mut::<Unit>(e) {
@@ -170,9 +193,15 @@ pub(crate) fn assign_idle_gatherers(world: &mut World, owner: u64, prefer: Optio
             }
         }
     }
+    // A growing crop is not work: the balancer must never send a hand to stand in
+    // a field that is not in, or a whole town walks to the farms and waits.
     let nodes: Vec<(u64, V2, ResourceType)> = {
-        let mut q = world.query::<(&GameId, &Pos, &ResourceNode, &MatchId)>();
-        q.iter(world).filter(|(_, _, _, m)| m.0 == match_id).map(|(g, p, n, _)| (g.0, p.pos, n.res_type)).collect()
+        let mut q =
+            world.query::<(&GameId, &Pos, &ResourceNode, &MatchId, Option<&FieldOf>, Option<&Crop>)>();
+        q.iter(world)
+            .filter(|(_, _, n, m, f, c)| m.0 == match_id && reapable(n, f.is_some(), *c))
+            .map(|(g, p, n, _, _, _)| (g.0, p.pos, n.res_type))
+            .collect()
     };
     if nodes.is_empty() {
         return;

@@ -11,7 +11,7 @@ use super::assets::UiAssets;
 use super::theme::*;
 use super::widgets::*;
 use crate::input::{InputMode, PlaceHint};
-use crate::selection::{FormationPick, SelectedBuilding, SelectionInfo};
+use crate::selection::{CropInfo, FormationPick, SelectedBuilding, SelectionInfo};
 use crate::{LocalPlayer, UiFont};
 use bevy::prelude::*;
 use bevy::ui::{ComputedNode, UiGlobalTransform};
@@ -320,7 +320,7 @@ pub fn update_bottom_bar(
 
     let sb = &*sel_building;
     let key = format!(
-        "{:?}|{:?}|{}|{}|{:?}|{:?}|{:?}|{:?}|{:?}|{}|{:.2}|{:.2}|{}|{}/{}|{:?}|{:.2}|{}|{:?}|{:.2}|{}|{:?}|{:?}|{}|{}|{:?}",
+        "{:?}|{:?}|{}|{}|{:?}|{:?}|{:?}|{:?}|{:?}|{}|{:.2}|{:.2}|{}|{}/{}|{:?}|{:.2}|{}|{:?}|{:.2}|{}|{:?}|{:?}|{}|{}|{:?}|{:?}",
         p.stock,
         info.by_kind,
         info.total,
@@ -347,6 +347,7 @@ pub fn update_bottom_bar(
         info.short,
         (info.worst_ration * 100.0) as i32,
         p.faction,
+        sb.crop,
     );
     if digest.0 == key {
         return;
@@ -374,6 +375,35 @@ fn price_line(cost: &ResourceCost, secs: Fx) -> String {
         (true, false) => "Free".into(),
         (false, false) => c,
     }
+}
+
+/// Where the season stands, in three words a player can read without counting.
+fn crop_stage_line(crop: &CropInfo) -> (&'static str, Color) {
+    match (crop.lodging, crop.ripe) {
+        (true, _) => ("Crop is lodging", WARN),
+        (_, true) => ("Harvest ready", GOLD),
+        _ => ("Growing", ACCENT),
+    }
+}
+
+fn farm_hands(hands: i32) -> String {
+    match hands {
+        0 => "no farmhands".into(),
+        1 => "1 farmhand".into(),
+        n => format!("{n} farmhands"),
+    }
+}
+
+/// The two axes a field is a function of, on their OWN lines. They shared one
+/// before, and `line` takes one colour, so an empty field painted "Rich soil"
+/// in alarm red — the card's colour rule is "this needs you", and good ground
+/// never does.
+fn farm_line(crop: &CropInfo) -> String {
+    format!("Soil  {}", crop.soil_word())
+}
+
+fn hands_line(crop: &CropInfo) -> (String, Color) {
+    (farm_hands(crop.hands), if crop.hands == 0 { WARN } else { TEXT_DIM })
 }
 
 fn crew_line(builders: i32) -> String {
@@ -413,6 +443,9 @@ fn role_lines(def: &BuildingDef, sel: &SelectedBuilding) -> Vec<String> {
             AuraTarget::Field => "Speeds nearby fields".into(),
             AuraTarget::WaterFood => "Speeds and restocks nearby fishing".into(),
         });
+    }
+    if def.min_fertility > Fx::ZERO {
+        out.push("Farmhands work and reap this field".into());
     }
     if def.hosts_research {
         out.push("Researches upgrades".into());
@@ -611,6 +644,21 @@ fn building_panel(
         BuildState::Complete => {}
     }
 
+    // on a farm the SEASON is the headline and health is the footnote: a plot
+    // is never the thing an enemy shoots first
+    if let Some(crop) = sel.crop {
+        let (stage, col) = crop_stage_line(&crop);
+        line(c, stage, FONT_SM, col);
+        line(c, &format!("Crop  {}/{}", crop.remaining, crop.cap), 12.0, TEXT_DIM);
+        ratio_bar(c, assets, CARD_TEXT_W, crop.fill(), if crop.ripe { GOLD } else { HP_GREEN });
+        line(c, &farm_line(&crop), 12.0, TEXT_DIM);
+        let (hands, col) = hands_line(&crop);
+        line(c, &hands, 12.0, col);
+        if let (true, Some((kind, _))) = (crop.tended, sel.hub) {
+            line(c, &format!("Tended by {}", building_def(kind).label), 12.0, ACCENT);
+        }
+    }
+
     let hp = (sel.hp as f32 / sel.max_hp.max(1) as f32).clamp(0.0, 1.0);
     line(c, &format!("Health  {}/{}", sel.hp, sel.max_hp), 12.0, TEXT_DIM);
     ratio_bar(c, assets, CARD_TEXT_W, hp, hp_color(hp));
@@ -626,7 +674,9 @@ fn building_panel(
             if idle { WARN } else { TEXT_DIM },
         );
         ratio_bar(c, assets, CARD_TEXT_W, sel.work, GOLD);
-    } else if sel.builders > 0 {
+    } else if sel.builders > 0 && (sel.crop.is_none() || sel.damaged()) {
+        // a farm's crew is not mending it — the farm line already counts them,
+        // and calling a reaper a builder is exactly the lie this card is for
         line(c, &format!("Mending  {}", crew_line(sel.builders)), 12.0, TEXT_DIM);
     }
 
@@ -938,8 +988,14 @@ fn orders_group(
     }
     group(c, font, "Orders", |c, font| {
         if sel.wants_work() {
-            let sub = if sel.builders > 0 {
+            // a farm asks for FARMHANDS, and it asks for them while it is whole
+            let farm = sel.crop.is_some() && !sel.damaged();
+            let sub = if sel.builders > 0 && farm {
+                sel.crop.map(|c| farm_hands(c.hands)).unwrap_or_default()
+            } else if sel.builders > 0 {
                 crew_line(sel.builders)
+            } else if farm {
+                "work the field".into()
             } else if sel.state == BuildState::Complete {
                 "repair it".into()
             } else {
@@ -950,12 +1006,12 @@ fn orders_group(
                 font,
                 assets,
                 UiAction::SendBuilders,
-                "Send Builders",
+                if farm { "Send Farmhands" } else { "Send Builders" },
                 Some(sub),
                 BtnStyle {
                     tint: TINT_GREEN,
                     disabled: sel.builders >= saladin_sim::MAX_BUILDERS,
-                    icon: assets.icon("act:builders"),
+                    icon: assets.icon(if farm { "res:food" } else { "act:builders" }),
                     ..default()
                 },
             );
@@ -1268,6 +1324,7 @@ mod tests {
             let has_role = d.accepts != 0
                 || !d.trains.is_empty()
                 || d.aura.is_some()
+                || d.min_fertility > Fx::ZERO
                 || d.hosts_research
                 || d.enables_trade
                 || d.morale_radius > Fx::ZERO
@@ -1278,13 +1335,13 @@ mod tests {
                 || d.defeat_on_death;
             assert_eq!(!lines.is_empty(), has_role, "{kind:?} role lines vs def fields");
         }
-        // role_lines only reports MECHANICS, and a Farm has none of them: no
-        // drop-off, no roster, no aura, no garrison. The blurb is the only thing
-        // standing between its card and a name over a health bar, so the card
-        // renders it and every kind has to carry one.
+        // the Farm's mechanic IS its soil: `min_fertility` is what the sim gates
+        // siting, growth and the tending crew on, so it is what the card reads
         assert!(
-            role_lines(building_def(BuildingKind::Farm), &sel(BuildingKind::Farm)).is_empty(),
-            "the Farm grew a mechanic; this test's premise needs rechecking"
+            role_lines(building_def(BuildingKind::Farm), &sel(BuildingKind::Farm))
+                .iter()
+                .any(|l| l.contains("field")),
+            "the Farm's card says nothing about the crop it grows"
         );
         for &kind in BuildingKind::ALL {
             let b = building_def(kind).blurb;
@@ -1314,6 +1371,7 @@ mod tests {
                     "Becoming {}",
                     hall_label(d.upgrades_to.unwrap_or(kind), faction)
                 ));
+                strings.push(format!("Tended by {}", d.label));
                 for s in strings {
                     assert!(s.is_ascii(), "{kind:?}: {s:?} is not ASCII");
                     assert!(s.len() <= MAX_CHARS * 2, "{kind:?}: {s:?} is unreadably long");
@@ -1335,6 +1393,113 @@ mod tests {
         }
         for h in crate::input::HOTKEY_HELP {
             assert!(h.0.is_ascii() && h.1.is_ascii(), "{h:?}");
+        }
+        // the farm card is generated from live sim numbers, so it is generated
+        // over the whole range the sim can hand it
+        for cap in [saladin_sim::FARM_CAP_MIN, 102, saladin_sim::FARM_CAP_MAX] {
+            for hands in [0, 1, saladin_sim::MAX_BUILDERS] {
+                let crop = CropInfo { remaining: cap, cap, hands, ..default() };
+                for s in [
+                    farm_line(&crop),
+                    hands_line(&crop).0,
+                    format!("Crop  {}/{}", crop.remaining, crop.cap),
+                    crop_stage_line(&crop).0.to_string(),
+                    farm_hands(hands),
+                ] {
+                    assert!(s.is_ascii() && s.len() <= MAX_CHARS, "{s:?}");
+                }
+            }
+        }
+    }
+
+    /// The card has to say which of the five states the field is in — that is
+    /// the whole point of it, and until now a farm's card said nothing at all.
+    #[test]
+    fn the_farm_card_names_the_season_the_soil_and_the_crew() {
+        let growing = CropInfo { remaining: 40, cap: 102, hands: 2, ..default() };
+        assert_eq!(crop_stage_line(&growing).0, "Growing");
+        assert_eq!(hands_line(&growing), ("2 farmhands".into(), TEXT_DIM));
+
+        let ripe = CropInfo { remaining: 102, cap: 102, ripe: true, ..default() };
+        assert_eq!(crop_stage_line(&ripe).0, "Harvest ready");
+        assert_eq!(crop_stage_line(&ripe).1, GOLD);
+        // an unworked field is the only half of this pair that ever shouts:
+        // the soil is a fact the player chose, the empty crew is a cost he is
+        // paying right now. They share no colour because they share no line.
+        assert_eq!(hands_line(&ripe), ("no farmhands".into(), WARN));
+        assert!(farm_line(&ripe).starts_with("Soil "));
+        for cap in [saladin_sim::FARM_CAP_MIN, 102, saladin_sim::FARM_CAP_MAX] {
+            let rich = CropInfo { cap, hands: 3, ..default() };
+            assert!(farm_line(&rich).contains(rich.soil_word()));
+            assert_eq!(hands_line(&rich).1, TEXT_DIM, "worked ground is not a warning");
+        }
+
+        // lodging is the only farm state that shouts, because it is the only
+        // one that is costing the player something right now
+        let lodged = CropInfo { lodging: true, ripe: true, ..ripe };
+        assert_eq!(crop_stage_line(&lodged), ("Crop is lodging", WARN));
+
+        // the bar is the crop, not the health: a stripped field reads empty
+        assert_eq!(CropInfo { remaining: 0, cap: 102, ..default() }.fill(), 0.0);
+        assert_eq!(ripe.fill(), 1.0);
+        assert_eq!(CropInfo { remaining: 51, cap: 102, ..default() }.fill(), 0.5);
+        // a field with no cap at all must not divide by zero
+        assert_eq!(CropInfo::default().fill(), 0.0);
+    }
+
+    /// `cap` IS the soil the sim computed at siting time. The word has to move
+    /// across the range the worldgen actually produces, or the fertility overlay
+    /// still pays off for two seconds and never again.
+    #[test]
+    fn the_soil_word_reads_the_yield_the_ground_bought() {
+        use saladin_sim::{FARM_CAP_MAX, FARM_CAP_MIN, FARM_MIN_FERTILITY, FARM_SOIL_RICH, field_cap};
+        let word = |soil| CropInfo { cap: field_cap(soil), ..default() }.soil_word();
+        assert_eq!(word(FARM_MIN_FERTILITY), "Thin");
+        assert_eq!(word(FARM_SOIL_RICH), "Rich");
+        assert_eq!(CropInfo { cap: FARM_CAP_MIN, ..default() }.soil_word(), "Thin");
+        assert_eq!(CropInfo { cap: FARM_CAP_MAX, ..default() }.soil_word(), "Rich");
+        // every word the card can say is reachable from real ground
+        let mut seen: HashSet<&str> = HashSet::new();
+        for n in 22..=60 {
+            seen.insert(word(Fx::from_num(n) / Fx::from_num(100)));
+        }
+        assert_eq!(seen.len(), 3, "the soil word collapses to {seen:?}");
+
+        // ...and it has to DISCRIMINATE over the ground a player actually sites
+        // on, not merely over the range `field_cap` could theoretically return.
+        // Equal thirds of that range called four plots in five "Thin".
+        use saladin_sim::{BuildingKind, building_def, check_place, compose_seed, soil_quality, start_point};
+        let fp = building_def(BuildingKind::Farm).footprint;
+        let half = saladin_sim::fx!("0.5");
+        let mut tally: std::collections::BTreeMap<&str, u32> = Default::default();
+        let mut plots = 0u32;
+        for (base, preset) in [(11u32, 1u8), (48514, 0), (1234, 2)] {
+            let seed = compose_seed(base, preset);
+            let start = start_point(seed, 0);
+            let (sx, sy) = (start.x.to_num::<i32>(), start.y.to_num::<i32>());
+            let reach = saladin_sim::TOWN_RADIUS.to_num::<i32>();
+            for ty in sy - reach..=sy + reach {
+                for tx in sx - reach..=sx + reach {
+                    let (x, y) = (Fx::from_num(tx) + half, Fx::from_num(ty) + half);
+                    if check_place(seed, BuildingKind::Farm, x, y, |_, _| false, &[]).is_err() {
+                        continue;
+                    }
+                    plots += 1;
+                    let cap = saladin_sim::field_cap(soil_quality(seed, fp, x, y));
+                    *tally.entry(CropInfo { cap, ..default() }.soil_word()).or_default() += 1;
+                }
+            }
+        }
+        assert!(plots > 500, "only {plots} sitable plots sampled");
+        assert_eq!(tally.len(), 3, "real ground only ever says {tally:?}");
+        // measured on these three worlds, equal thirds of the cap SPAN scored
+        // Thin 72.5% / Fair 22.8% / Rich 4.8%; the bands the card ships score
+        // 19.3 / 31.9 / 48.8. 10..60% is the band that separates the two.
+        for (w, n) in &tally {
+            assert!(
+                *n * 10 > plots && *n * 5 < plots * 3,
+                "{w:?} claims {n} of {plots} plots: the word carries no information ({tally:?})"
+            );
         }
     }
 

@@ -3,10 +3,11 @@
 
 use crate::LocalPlayer;
 use bevy::prelude::*;
-use saladin_protocol::{Building, GameId, Owner, Player, Pos, Unit};
+use saladin_protocol::{Building, Crop, FieldOf, GameId, Owner, Player, Pos, ResourceNode, Unit};
 use saladin_sim::{
-    BuildState, BuildingKind, Faction, Fx, FormationShape, FULL_RATION, ResourceCost, UnitKind, V2,
-    building_def, dist, draws_rations, effective_building_def, unit_def,
+    AuraTarget, BuildState, BuildingKind, FARM_RIPE_GRACE, Faction, Fx, FormationShape,
+    FULL_RATION, ResourceCost, UnitKind, V2, building_def, dist, draws_rations,
+    effective_building_def, operational, unit_def,
 };
 
 /// The selected unit ids, held SORTED. This was a `HashSet` seeded per process,
@@ -93,10 +94,51 @@ impl Default for FormationPick {
     }
 }
 
+/// The standing crop on a selected farm, read off its `FieldOf` node. `cap` IS
+/// the soil the sim computed when the plot was sited, so the card can name the
+/// ground without asking the terrain a second time.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct CropInfo {
+    pub remaining: i32,
+    pub cap: i32,
+    pub ripe: bool,
+    pub lodging: bool,
+    /// Hands in the field — the farm's own committed crew.
+    pub hands: i32,
+    /// A friendly farm hub covers this plot: faster growth, double the grace.
+    pub tended: bool,
+}
+
+impl CropInfo {
+    pub fn fill(&self) -> f32 {
+        if self.cap > 0 { (self.remaining as f32 / self.cap as f32).clamp(0.0, 1.0) } else { 0.0 }
+    }
+
+    /// Thin / Fair / Rich, straight off the yield the soil bought. A farm that
+    /// carries half again what its neighbour does is a different farm, and this
+    /// is the only place the fertility overlay's promise is ever cashed.
+    ///
+    /// The bands are NOT equal thirds of `FARM_CAP_MIN..FARM_CAP_MAX`. That span
+    /// is what `field_cap` could return; real ground lives in the bottom quarter
+    /// of it. Measured over every plot a farm can be sown on within a town radius
+    /// (12 seeds x 4 presets, 26159 plots): caps run 70..190 but p33 is 85 and
+    /// p67 is 101, so equal thirds called four plots in five "Thin" and said
+    /// "Rich" of one in 24 — the same collapse the flat `regen` had, one layer up.
+    pub fn soil_word(&self) -> &'static str {
+        let span = saladin_sim::FARM_CAP_MAX - saladin_sim::FARM_CAP_MIN;
+        let over = self.cap - saladin_sim::FARM_CAP_MIN;
+        match () {
+            _ if over * 8 < span => "Thin",
+            _ if over * 4 < span => "Fair",
+            _ => "Rich",
+        }
+    }
+}
+
 /// Everything the command card renders for the selected building. The card can
 /// only show what this carries, so it carries the whole lifecycle: health,
-/// construction progress, the crew, the production queue and the upgrade on
-/// offer — not just a garrison tally.
+/// construction progress, the crew, the production queue, the upgrade on offer
+/// and — for a farm — the season standing in its furrows.
 #[derive(Resource)]
 pub struct SelectedBuilding {
     pub id: Option<u64>,
@@ -121,6 +163,11 @@ pub struct SelectedBuilding {
     /// Set only when the flag was moved off the building itself.
     pub rally: Option<V2>,
     pub upgrade: Option<(BuildingKind, ResourceCost)>,
+    /// Set only on a standing farm whose field has been sown.
+    pub crop: Option<CropInfo>,
+    /// Where the farm hub tending this plot stands — the ring is drawn on IT,
+    /// not on the farm, so the player sees which granary reaches him and how far.
+    pub hub: Option<(BuildingKind, V2)>,
 }
 
 impl Default for SelectedBuilding {
@@ -142,6 +189,8 @@ impl Default for SelectedBuilding {
             train_progress: 0.0,
             rally: None,
             upgrade: None,
+            crop: None,
+            hub: None,
         }
     }
 }
@@ -152,9 +201,17 @@ impl SelectedBuilding {
         self.state == BuildState::Complete && self.hp < self.max_hp
     }
 
-    /// Whether sending hands here would achieve anything.
+    /// A plot that grows a crop. `min_fertility` is what the sim's own
+    /// `wants_work` gates on, so the card and the labour system agree by
+    /// construction rather than by a matching `kind == Farm` in two places.
+    pub fn tends_a_field(&self) -> bool {
+        building_def(self.kind).min_fertility > Fx::ZERO && operational(self.state)
+    }
+
+    /// Whether sending hands here would achieve anything. A standing farm always
+    /// says yes: the crew tends the season in and reaps it when it comes.
     pub fn wants_work(&self) -> bool {
-        self.state != BuildState::Complete || self.damaged()
+        self.state != BuildState::Complete || self.damaged() || self.tends_a_field()
     }
 }
 
@@ -171,6 +228,7 @@ pub fn publish_selection(
     mut sel_building: ResMut<SelectedBuilding>,
     q_units: Query<(&GameId, &Owner, &Unit)>,
     q_buildings: Query<(&GameId, &Owner, &Pos, &Building)>,
+    q_fields: Query<(&FieldOf, &ResourceNode, Option<&Crop>)>,
     q_players: Query<&Player>,
 ) {
     // prune ids whose entities died, drop garrisoned units from the live selection
@@ -266,6 +324,41 @@ pub fn publish_selection(
         (dist(b.rally, p.pos) > saladin_sim::fx!("1.2")).then_some(b.rally);
     sel_building.upgrade =
         base.upgrades_to.filter(|_| b.state == BuildState::Complete).map(|k| (k, base.upgrade_cost));
+
+    // the season standing in the furrows. A hub tends only its OWNER's fields,
+    // which is the same rule the economy tick applies
+    let mut hub: Option<(Fx, u64, BuildingKind, V2)> = None;
+    if base.min_fertility > Fx::ZERO {
+        for (hg, o, hp, hb) in &q_buildings {
+            if o.0 != local.0 || !operational(hb.state) {
+                continue;
+            }
+            let d = dist(hp.pos, p.pos);
+            if !building_def(hb.kind)
+                .aura
+                .is_some_and(|a| a.target == AuraTarget::Field && d <= a.radius)
+            {
+                continue;
+            }
+            // nearest wins, lowest id breaks a tie — two granaries must not
+            // trade the ring back and forth on query order
+            if hub.is_none_or(|(bd, bid, ..)| d < bd || (d == bd && hg.0 < bid)) {
+                hub = Some((d, hg.0, hb.kind, hp.pos));
+            }
+        }
+    }
+    sel_building.hub = hub.map(|(_, _, k, at)| (k, at));
+    sel_building.crop = q_fields.iter().find(|(f, ..)| f.0 == id).map(|(_, n, c)| {
+        let grace = if sel_building.hub.is_some() { FARM_RIPE_GRACE * 2 } else { FARM_RIPE_GRACE };
+        CropInfo {
+            remaining: n.remaining,
+            cap: n.cap.max(1),
+            ripe: c.is_some_and(|c| c.ripe),
+            lodging: c.is_some_and(|c| c.ripe && c.standing > grace),
+            hands: b.builders,
+            tended: sel_building.hub.is_some(),
+        }
+    });
 }
 
 #[cfg(test)]
@@ -274,6 +367,19 @@ mod tests {
 
     fn row(state: BuildState, hp: i32, max_hp: i32) -> SelectedBuilding {
         SelectedBuilding { id: Some(1), state, hp, max_hp, ..default() }
+    }
+
+    fn farm(state: BuildState, hp: i32) -> SelectedBuilding {
+        let d = building_def(BuildingKind::Farm);
+        SelectedBuilding {
+            id: Some(1),
+            kind: BuildingKind::Farm,
+            target_kind: BuildingKind::Farm,
+            state,
+            hp,
+            max_hp: d.max_hp,
+            ..default()
+        }
     }
 
     /// `Damaged` is DERIVED, not a variant: a standing structure below full
@@ -288,6 +394,47 @@ mod tests {
         assert!(!row(BuildState::Site, 50, 500).damaged());
         assert!(row(BuildState::Site, 50, 500).wants_work());
         assert!(row(BuildState::Upgrading, 500, 500).wants_work());
+    }
+
+    /// A STANDING FARM always wants hands — that is the whole labour loop, and
+    /// the card's Send Farmhands button is the only place a player can see it.
+    /// The client's answer has to be the sim's (`construction::wants_work`), or
+    /// the button offers an order the sim throws away.
+    #[test]
+    fn a_whole_farm_still_wants_hands_and_a_whole_keep_does_not() {
+        let max = building_def(BuildingKind::Farm).max_hp;
+        assert!(farm(BuildState::Complete, max).wants_work(), "a whole farm takes farmhands");
+        assert!(farm(BuildState::Complete, max).tends_a_field());
+        assert!(!farm(BuildState::Complete, max).damaged(), "a whole farm is not hurt");
+        // a foundation is not a field yet: the sim sows only on completion
+        assert!(!farm(BuildState::Site, 10).tends_a_field());
+        assert!(farm(BuildState::Site, 10).wants_work());
+        // and nothing else in the game grew a standing labour appetite
+        for &kind in BuildingKind::ALL {
+            if building_def(kind).min_fertility > Fx::ZERO {
+                continue;
+            }
+            let whole = SelectedBuilding {
+                id: Some(1),
+                kind,
+                state: BuildState::Complete,
+                hp: 100,
+                max_hp: 100,
+                ..default()
+            };
+            assert!(!whole.wants_work(), "{kind:?} started asking for hands it cannot use");
+        }
+    }
+
+    /// Thin / Fair / Rich is read off `cap`, and the crop bar is the crop —
+    /// never the health bar wearing a second hat.
+    #[test]
+    fn the_crop_digest_reads_the_field_not_the_building() {
+        let c = CropInfo { remaining: 51, cap: 102, hands: 2, ..default() };
+        assert_eq!(c.fill(), 0.5);
+        assert_eq!(CropInfo { cap: saladin_sim::FARM_CAP_MIN, ..c }.soil_word(), "Thin");
+        assert_eq!(CropInfo { cap: saladin_sim::FARM_CAP_MAX, ..c }.soil_word(), "Rich");
+        assert_eq!(CropInfo { cap: 0, ..c }.fill(), 0.0, "an unsown plot is not a full one");
     }
 
     /// The order units come out in decides which of them enters a tower (the

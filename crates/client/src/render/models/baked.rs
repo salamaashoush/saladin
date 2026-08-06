@@ -142,6 +142,22 @@ pub fn fish_node_mesh() -> Mesh {
     baked("props", "fish_school").unwrap_or_else(super::props::fish_node_mesh)
 }
 
+/// Baked farm-crop stages, index-aligned with the `CROP_*` constants.
+pub fn crop_stage_meshes() -> Vec<Mesh> {
+    const NAMES: [&str; 5] =
+        ["crop_stubble", "crop_shoots", "crop_green", "crop_ripe", "crop_lodged"];
+    let mut procedural = super::props::crop_stage_meshes();
+    NAMES
+        .iter()
+        .enumerate()
+        .map(|(i, name)| {
+            baked("props", name).unwrap_or_else(|| {
+                std::mem::replace(&mut procedural[i], Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::default()))
+            })
+        })
+        .collect()
+}
+
 /// Baked cosmetic decoration meshes, per-index fallback to the procedural
 /// set (index order = props.rs PROP_* constants).
 pub fn prop_meshes() -> Vec<Mesh> {

@@ -13,7 +13,7 @@ use bevy::camera::visibility::RenderLayers;
 use bevy::camera::{ScalingMode, Viewport};
 use bevy::platform::collections::HashMap;
 use bevy::prelude::*;
-use saladin_protocol::{Building, GameId, Owner, Player, Pos, ResourceNode, Unit};
+use saladin_protocol::{Building, Crop, FieldOf, GameId, Owner, Player, Pos, ResourceNode, Unit};
 use saladin_sim::{PLAYER_COLORS, ResourceType, WORLD_SIZE, building_def};
 
 const SIZE: u32 = 214;
@@ -24,6 +24,9 @@ pub const MINIMAP_LAYER: usize = 2;
 // blip altitudes: units over buildings over resource dots, all over terrain
 const BLIP_Y_NODE: f32 = 16.0;
 const BLIP_Y_BUILDING: f32 = 18.0;
+/// A field sits ON its farm and is smaller than it, so the owner's square
+/// frames the crop colour instead of burying it.
+const BLIP_Y_FIELD: f32 = 19.0;
 const BLIP_Y_UNIT: f32 = 20.0;
 const VIEW_RECT_Y: f32 = 24.0;
 
@@ -127,8 +130,14 @@ fn blip_mat(
 }
 
 /// What a resource node looks like on the map: AoE-style dots. Wood reads as
-/// the forest mass, so its dots stay small and dark.
-fn node_blip(res: ResourceType) -> (u32, f32) {
+/// the forest mass, so its dots stay small and dark. A FARM'S CROP is not wild
+/// game and does not share its blip: the strategic view is the one place an
+/// agricultural base has to be legible, and a ripe field is the cue that says
+/// "send someone".
+fn node_blip(res: ResourceType, field: Option<&FieldOf>, crop: Option<&Crop>) -> (u32, f32) {
+    if field.is_some() {
+        return if crop.is_some_and(|c| c.ripe) { (0xf0d873, 3.6) } else { (0x8f9a4a, 3.0) };
+    }
     match res {
         ResourceType::Wood => (0x2e5a2a, 1.4),
         ResourceType::Stone => (0xb8b8b8, 2.6),
@@ -140,14 +149,24 @@ fn node_blip(res: ResourceType) -> (u32, f32) {
 /// Upsert a marker per sim row. Units/buildings get their team color (white
 /// for unowned), nodes their resource color; markers ride the SIM position, so
 /// the minimap is exact even when the 3D layer lerps.
+#[allow(clippy::type_complexity)]
 pub fn sync_blips(
     mut commands: Commands,
     mut assets: ResMut<BlipAssets>,
     mut mats: ResMut<Assets<StandardMaterial>>,
     mut map: ResMut<BlipMap>,
-    q_sim: Query<(&GameId, &Pos, Option<&Unit>, Option<&Building>, Option<&ResourceNode>, Option<&Owner>)>,
+    q_sim: Query<(
+        &GameId,
+        &Pos,
+        Option<&Unit>,
+        Option<&Building>,
+        Option<&ResourceNode>,
+        Option<&Owner>,
+        Option<&FieldOf>,
+        Option<&Crop>,
+    )>,
     q_players: Query<&Player>,
-    mut q_blips: Query<&mut Transform, With<Blip>>,
+    mut q_blips: Query<(&mut Transform, &mut MeshMaterial3d<StandardMaterial>), With<Blip>>,
 ) {
     let owner_color: HashMap<u64, u32> = q_players
         .iter()
@@ -155,10 +174,13 @@ pub fn sync_blips(
         .collect();
 
     let mut seen: std::collections::HashSet<u64> = std::collections::HashSet::new();
-    for (gid, pos, unit, bld, node, owner) in &q_sim {
+    for (gid, pos, unit, bld, node, owner, field, crop) in &q_sim {
         let x = pos.pos.x.to_num::<f32>();
         let z = pos.pos.y.to_num::<f32>();
         let team = owner.and_then(|o| owner_color.get(&o.0).copied());
+        // a field is the only blip whose COLOUR is live state (sown -> ripe);
+        // everything else is spawn-time constant, so nothing else pays for it
+        let restyle = field.is_some();
         let (color, size, y, moves) = if let Some(u) = unit {
             if u.garrisoned_in != 0 {
                 continue; // sheltered units vanish from the field
@@ -167,8 +189,8 @@ pub fn sync_blips(
         } else if let Some(b) = bld {
             (team.unwrap_or(0xdddddd), building_def(b.kind).footprint as f32 + 4.0, BLIP_Y_BUILDING, false)
         } else if let Some(n) = node {
-            let (c, s) = node_blip(n.res_type);
-            (c, s, BLIP_Y_NODE, false)
+            let (c, s) = node_blip(n.res_type, field, crop);
+            (c, s, if field.is_some() { BLIP_Y_FIELD } else { BLIP_Y_NODE }, false)
         } else {
             continue;
         };
@@ -176,8 +198,17 @@ pub fn sync_blips(
         let world = Vec3::new(x, y, z);
         match map.0.get(&gid.0) {
             Some(&e) => {
-                if moves && let Ok(mut t) = q_blips.get_mut(e) {
-                    t.translation = world;
+                if (moves || restyle) && let Ok((mut t, mut m)) = q_blips.get_mut(e) {
+                    if moves {
+                        t.translation = world;
+                    }
+                    if restyle {
+                        let want = blip_mat(&mut assets, &mut mats, color);
+                        if m.0 != want {
+                            m.0 = want;
+                            t.scale = Vec3::new(size, 1.0, size);
+                        }
+                    }
                 }
             }
             None => {
@@ -280,5 +311,28 @@ pub fn minimap_click(
     let wz = rel.y * WORLD_SIZE as f32;
     if let Ok(mut tf) = q_main.single_mut() {
         focus_on(&mut state, &mut tf, wx, wz, field.as_deref());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use saladin_sim::BuildingKind;
+
+    /// A farm's crop used to draw the SAME dot as a wild deer herd — same
+    /// colour, same size — so the one view that should show a player his
+    /// agricultural base showed him game instead.
+    #[test]
+    fn a_field_is_not_a_wild_herd_on_the_map() {
+        let wild = node_blip(ResourceType::Food, None, None);
+        let sown = node_blip(ResourceType::Food, Some(&FieldOf(1)), Some(&Crop::default()));
+        let ripe = node_blip(ResourceType::Food, Some(&FieldOf(1)), Some(&Crop { ripe: true, standing: 0 }));
+        assert_ne!(wild, sown, "a sown field draws as wild game");
+        assert_ne!(sown, ripe, "a ripe field is not marked as ready");
+        // and a field whose crop row is missing still reads as a field
+        assert_eq!(node_blip(ResourceType::Food, Some(&FieldOf(1)), None), sown);
+        // a field draws OVER its own farm, or the owner square buries it
+        const { assert!(BLIP_Y_FIELD > BLIP_Y_BUILDING) };
+        assert!(sown.1 < building_def(BuildingKind::Farm).footprint as f32 + 4.0);
     }
 }
