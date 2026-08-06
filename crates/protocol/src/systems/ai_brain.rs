@@ -561,7 +561,7 @@ pub fn ai_brain(world: &mut World) {
             wood: stock.wood,
             stone: stock.stone,
             gold: stock.gold,
-            upkeep: soldiers,
+            campaign_food: saladin_sim::campaign_reserve(soldiers),
             soldiers,
             army_composition: army_comp,
             sieges,
@@ -595,18 +595,28 @@ pub fn ai_brain(world: &mut World) {
         // wants at once: a famine bias overrode the wood steer entirely, so a
         // starving bot quarried fourteen hundred stone it could not eat while
         // sitting on twelve wood, four short of the forty-five a field costs.
-        // the bot must price rations the way the economy charges them, or it
-        // hoards four times the food it needs and never fields an army
-        let upkeep_food =
-            (Fx::from_num(soldiers) * saladin_sim::supply::RATION_DRAW).ceil().to_num::<i32>();
+        // Bread musters the army and bread carries it. The bot prices both off
+        // `campaign_reserve`, which is the ONE supply rate spent over a full
+        // campaign — the old estimate multiplied a per-head poll tax by a
+        // difficulty knob and had the bot hoarding four times what it needed.
         let crisis = food_crisis(&state, &tune);
-        let cushion = 40 + upkeep_food * tune.food_floor_mult * 2;
+        // The LOW mark: hands go back on food when the larder cannot raise a
+        // couple of men. It is deliberately far below `food_cushion`, the high
+        // mark — a narrow band between them makes the whole workforce change
+        // trade every few seconds, and a peasant that is walking is a peasant
+        // that is not gathering.
+        let cushion = tune.food_floor * 2;
         // Enter at the cushion, leave at half again: a bare threshold makes the
         // whole workforce change trade on every crossing, and a peasant that is
         // walking is a peasant that is not gathering.
         let food_emergency =
             crisis || stock.food <= cushion || (bot.famine && stock.food <= cushion + cushion / 2);
-        let food_surplus = !food_emergency && upkeep_food == 0 && stock.food > cushion + 200;
+        // A pile past the war chest is hands that should be on timber. The same
+        // mark `next_trade` sells at and `field_labour` staffs to, so the three
+        // cannot disagree about what a glut is. No longer gated on owning no
+        // army: bread is the army currency, so "soldiers == 0" stopped meaning
+        // "food has no use".
+        let food_surplus = !food_emergency && stock.food > food_cushion(&state, &tune);
         let scarce_build = if stock.wood <= stock.stone { ResourceType::Wood } else { ResourceType::Stone };
         let on_food = units
             .iter()

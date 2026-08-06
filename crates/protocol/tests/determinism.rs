@@ -68,8 +68,7 @@ fn spawn_player(app: &mut App, id: u64, food: i32) {
     ));
 }
 
-fn spawn_soldier(app: &mut App, id: u64, owner: u64) {
-    let pos = V2::new(Fx::lit("20"), Fx::lit("20"));
+fn spawn_soldier_at(app: &mut App, id: u64, owner: u64, pos: V2) {
     app.world_mut().spawn((
         GameId(id),
         Owner(owner),
@@ -89,10 +88,23 @@ fn a_famine_costs_morale_and_men_but_never_kills() {
     // does that, and an army that cannot even walk away is a punishment rather
     // than a decision. Hunger now takes spirit, and then it takes the men
     // themselves, who desert. It never takes their lives.
+    //
+    // REWRITTEN for the baggage train: the column is 150 tiles from its own
+    // keep, because that is now the only place a famine can happen. The same
+    // ten men standing AT the keep would draw nothing at all, which is the
+    // point of the model and is asserted in `starvation.rs`.
     let mut app = build();
     spawn_player(&mut app, 7, 0); // an empty larder
+    let home = V2::new(Fx::lit("20"), Fx::lit("20"));
+    app.world_mut().spawn((
+        GameId(9000),
+        Owner(7),
+        MatchId(1),
+        Pos { pos: home, facing: ZERO },
+        Building::new(BuildingKind::Keep, 1500, home),
+    ));
     for i in 0..10 {
-        spawn_soldier(&mut app, 100 + i, 7);
+        spawn_soldier_at(&mut app, 100 + i, 7, V2::new(Fx::lit("200"), Fx::lit("200")));
     }
     let full = unit_def(UnitKind::Spearman).max_hp;
 
@@ -393,7 +405,7 @@ fn every_written_unit_field_moves_the_state_hash() {
     for &(name, mutate) in cases {
         let (mut a, mut b) = (build(), build());
         for app in [&mut a, &mut b] {
-            spawn_soldier(app, 1, 1);
+            spawn_soldier_at(app, 1, 1, V2::new(Fx::lit("20"), Fx::lit("20")));
         }
         {
             let world = b.world_mut();

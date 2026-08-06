@@ -6,37 +6,11 @@ use crate::components::{
 use bevy_ecs::prelude::*;
 use bevy_platform::collections::HashMap;
 use saladin_sim::{
-    AuraTarget, ECONOMY_DT, FARM_RIPE_GRACE, FULL_RATION, Fx, supply::RATION_DRAW,
-    MORALE_MAX, OUT_OF_SUPPLY_DRAW, ResourceType, SUPPLY_RADIUS, SupplyResult, V2, WorkAura,
-    apply_supply, building_def, deserts, dist, dist2, draws_rations, field_growth, forage_yield,
-    is_sailable, lodge_loss, operational, ration, supply::STARVE_GRACE_TICKS, supply_bill,
-    unit_def,
+    AuraTarget, FAMINE_RATION, FARM_RIPE_GRACE, FULL_RATION, Fx, ResourceType, SUPPLY_RADIUS, V2,
+    WorkAura, apply_supply, building_def, deserts, dist, dist2, draws_rations, fatigue_ticks,
+    field_growth, forage_yield, fx_sqrt, is_sailable, lodge_loss, man_draw, morale_ceiling,
+    operational, strain, supply::STARVE_GRACE_TICKS, supply_bill, unit_def,
 };
-
-/// The heart a man keeps on a given ration. Full commons cost nothing; an empty
-/// larder pins him exactly ON the breaking point, so the next blow breaks him;
-/// everything between scales. Hunger makes an army BRITTLE — it does not rout it
-/// where it stands and it does not execute it. Starving men desert, they do not
-/// flee an enemy who is not there.
-///
-/// This is a CEILING, not the drain `SupplyResult` also offers, and the reason
-/// is measured: a packed formation recovers about +0.34 morale per economy tick
-/// (six allies capped, 0.2 s cadence) against a largest-possible famine drain of
-/// 0.30, so a drain-based hunger is invisible in exactly the formation that most
-/// needs feeding. A ceiling binds regardless of how many friends are standing
-/// round the fire.
-const STARVED_CEILING: Fx = saladin_sim::ROUT_THRESHOLD;
-
-/// Above this share of a ration men are TIRED, not dying. `apply_supply` floors
-/// its attrition at 1 hp, so without this gate ANY shortfall — a single loaf
-/// short of a hundred — is eventually fatal, which is the death spiral this
-/// rework exists to remove.
-const ATTRITION_RATION: Fx = saladin_sim::fx!("0.5");
-
-/// Combat ticks of extra rest a man on nothing at all takes between blows,
-/// added once per economy tick (ten combat ticks). Tired troops swing slower
-/// before they fall over.
-const FATIGUE_TICKS: i32 = 3;
 
 /// Foragers served per player per economy tick, in `GameId` order — a budget in
 /// the shape of combat's pursuit budget, so a whole starving host cannot walk
@@ -50,33 +24,13 @@ const FORAGE_RANGE: Fx = saladin_sim::fx!("3");
 /// army BLEED men instead of evaporating in a single tick.
 const DESERT_DIVISOR: usize = 8;
 
-/// Denominator for `one_mouth` — a single ration expressed in whole numbers so
-/// `apply_supply` can be asked about one man.
-const RATION_SCALE: i32 = 4096;
-
-fn morale_ceiling(r: Fx) -> Fx {
-    STARVED_CEILING + (MORALE_MAX - STARVED_CEILING) * r.clamp(Fx::ZERO, FULL_RATION)
-}
-
-fn fatigue_ticks(r: Fx) -> i32 {
-    (Fx::from_num(FATIGUE_TICKS) * (FULL_RATION - r).max(Fx::ZERO)).round().to_num::<i32>()
-}
-
-/// The famine as ONE man sees it. The grace, the attrition ramp and the
-/// shortfall scaling all live in `apply_supply`; this hands it a larder of a
-/// single mouth's size rather than restating any of them here.
-fn one_mouth(r: Fx, hunger: i32) -> SupplyResult {
-    let bill = Fx::from_num(RATION_SCALE);
-    let got = (r.clamp(Fx::ZERO, FULL_RATION) * bill).round().to_num::<i32>();
-    apply_supply(got, bill, hunger, ECONOMY_DT)
-}
-
 struct Eater {
     owner: u64,
     gid: u64,
     entity: Entity,
-    /// Beyond the reach of any friendly store.
-    far: bool,
+    /// How hard the road pulls on this man. ZERO inside the supply radius, which
+    /// is every man in a garrison — a defence at home bills nothing at all.
+    strain: Fx,
 }
 
 /// Retained buffers — economy runs at 0.5 Hz but over every unit on the map.
@@ -89,28 +43,43 @@ pub struct SupplyScratch {
     deserters: Vec<(Fx, u64, Entity)>,
 }
 
+/// How hard the road pulls on one man, measured to his OWN nearest store. The
+/// `dist2` early exit is what keeps this off the sqrt: a man in supply — which
+/// is nearly all of them, nearly all the time — never takes a root.
+///
 /// A player with no store anywhere has no supply LINE to be cut: his men carry
-/// what they have and every mouth costs the same wherever it stands. Without
-/// this a side would be punished for owning nothing to lose, and the case is
-/// unreachable in a real match — the Keep is a drop-off and losing it is defeat.
-fn in_supply(anchors: &[(u64, V2)], owner: u64, at: V2) -> bool {
+/// what they have and cost nothing wherever they stand. Without this a side
+/// would be punished for owning nothing to lose, and the case is unreachable in
+/// a real match — the Keep is a drop-off and losing it is defeat.
+fn strain_of(anchors: &[(u64, V2)], owner: u64, at: V2) -> Fx {
     let r2 = SUPPLY_RADIUS * SUPPLY_RADIUS;
     let lo = anchors.partition_point(|(o, _)| *o < owner);
-    let mut mine = anchors[lo..].iter().take_while(|(o, _)| *o == owner).peekable();
-    if mine.peek().is_none() {
-        return true;
+    let mut best: Option<Fx> = None;
+    for (_, p) in anchors[lo..].iter().take_while(|(o, _)| *o == owner) {
+        let d2 = dist2(*p, at);
+        if d2 <= r2 {
+            return Fx::ZERO;
+        }
+        best = Some(best.map_or(d2, |b| b.min(d2)));
     }
-    mine.any(|(_, p)| dist2(*p, at) <= r2)
+    match best {
+        None => Fx::ZERO,
+        Some(d2) => strain(fx_sqrt(d2)),
+    }
 }
 
 /// Supply, regrowth and the muster roll — every economy tick (2 s).
 ///
-/// Rations are PROPORTIONAL and issued in two bands: the men in reach of a
-/// store eat first, the column at the far end of the supply line eats what is
-/// left and pays a carter's premium for it. A shortfall of one man's food costs
-/// one man's food. The old rule was `bill > food` — one loaf short and every
-/// soldier on the map starved at the same instant, which is a punishment rather
-/// than a decision.
+/// THE BAGGAGE TRAIN. A man within reach of one of his own drop-offs is fed by
+/// the ground he is standing on and bills NOTHING; every tile past that, the
+/// road costs more, and the road is paid in food from home. Rations are then
+/// PROPORTIONAL over the field force, so a shortfall of one man's food costs one
+/// man's food.
+///
+/// What this replaced was a flat per-head tax charged wherever a man stood. It
+/// had no band: at the rate that made it bite it was a death spiral, and at the
+/// rate that could not spiral it was decoration (measured, 10 soldiers drawing
+/// 1.25 food/s against an 1868 stockpile).
 #[allow(clippy::too_many_arguments)]
 pub fn economy(
     statuses: Res<MatchStatuses>,
@@ -233,7 +202,7 @@ pub fn economy(
             owner: owner.0,
             gid: gid.0,
             entity: ent,
-            far: !in_supply(&s.anchors, owner.0, pos.pos),
+            strain: strain_of(&s.anchors, owner.0, pos.pos),
         });
     }
     s.eaters.sort_unstable_by_key(|e| (e.owner, e.gid));
@@ -247,29 +216,24 @@ pub fn economy(
         let lo = eaters.partition_point(|e| e.owner < p.player_id);
         let hi = eaters.partition_point(|e| e.owner <= p.player_id);
         let mine = &eaters[lo..hi];
-        let far_n = mine.iter().filter(|e| e.far).count() as i32;
-        let near_n = mine.len() as i32 - far_n;
 
-        // Two bands, fed in order: the garrison at the stores, then the column
-        // in the field — which is also the half of a siege that costs the
-        // BESIEGER something.
-        let bill_near = supply_bill(near_n, 0);
-        let bill_far = supply_bill(far_n, far_n);
+        // ONE band, not two. The garrison bills zero by construction (its strain
+        // is zero), so the whole shortfall falls where the decision was made:
+        // on the column that marched out. This is also the half of a siege that
+        // costs the BESIEGER something.
+        let total_strain = mine.iter().fold(Fx::ZERO, |acc, e| acc + e.strain);
+        let bill = supply_bill(total_strain);
         let food = p.stock.food;
-        let out = apply_supply(food, bill_near + bill_far, p.hunger, ECONOMY_DT);
+        let out = apply_supply(food, bill);
         if out.food != food {
             p.stock.food = out.food;
         }
-        let r_near = ration(food, bill_near);
-        let leftover = (Fx::from_num(food) - bill_near).max(Fx::ZERO).floor().to_num::<i32>();
-        let r_far = ration(leftover, bill_far);
+        let r_field = out.ration;
 
-        // `hunger` is the famine clock the attrition ramp reads: it counts
-        // consecutive ticks in which somebody is short enough to WASTE, not
-        // merely short.
-        let worst = if far_n > 0 { r_far } else { r_near };
+        // `hunger` is the famine clock desertion waits on: consecutive ticks in
+        // which the column is short enough to BREAK, not merely short.
         let hunger = p.hunger;
-        let next = if worst < ATTRITION_RATION { (hunger + 1).min(1 << 20) } else { 0 };
+        let next = if r_field < FAMINE_RATION { (hunger + 1).min(1 << 20) } else { 0 };
         if next != hunger {
             p.hunger = next;
         }
@@ -277,25 +241,21 @@ pub fn economy(
             continue;
         }
 
-        let near_eff = one_mouth(r_near, hunger);
-        let far_eff = one_mouth(r_far, hunger);
         let mut forage_left = FORAGE_BUDGET;
         deserters.clear();
 
         for e in mine {
             let Ok((_, _, pos, _, mut u)) = q_units.get_mut(e.entity) else { continue };
-            let mut r = if e.far { r_far } else { r_near };
-            let mut own_eff = None;
+            let mut r = if e.strain > Fx::ZERO { r_field } else { FULL_RATION };
             // An army in the field lives off the land. It is thin and it strips
             // the herd, so it buys a march and never a war.
-            if e.far && r < FULL_RATION && forage_left > 0 {
+            if r < FULL_RATION && forage_left > 0 {
                 forage_left -= 1;
-                let draw = RATION_DRAW * OUT_OF_SUPPLY_DRAW;
+                let draw = man_draw(e.strain);
                 let want = ((FULL_RATION - r) * draw).ceil().to_num::<i32>();
                 let got = forage(&mut q_nodes, wild, pos.pos, want);
-                if got > 0 {
+                if got > 0 && draw > Fx::ZERO {
                     r = (r + Fx::from_num(got) / draw).min(FULL_RATION);
-                    own_eff = Some(one_mouth(r, hunger));
                 }
             }
             if u.ration != r {
@@ -304,7 +264,6 @@ pub fn economy(
             if r >= FULL_RATION {
                 continue;
             }
-            let eff = own_eff.as_ref().unwrap_or(if e.far { &far_eff } else { &near_eff });
 
             let ceiling = morale_ceiling(r);
             if u.morale > ceiling {
@@ -332,7 +291,11 @@ pub fn economy(
         // resolve asc, then GameId: `gid` is unique, so the Entity in the key
         // never decides an ordering that would differ between peers
         deserters.sort_unstable();
-        let cap = (mine.len() / DESERT_DIVISOR).max(1);
+        // A bleed measured against the COLUMN, not the whole muster roll. A
+        // garrison at home is not what is breaking, and counting it would let a
+        // big home army set the rate at which a small lost one empties.
+        let afield = mine.iter().filter(|e| e.strain > Fx::ZERO).count();
+        let cap = (afield / DESERT_DIVISOR).max(1);
         for &(_, _, ent) in deserters.iter().take(cap) {
             stats.of(p.player_id).lost += 1;
             commands.entity(ent).despawn();

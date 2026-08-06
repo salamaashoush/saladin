@@ -41,7 +41,7 @@ pub use ai::{
     FieldLabour, PlannerState, PlannerTuning, field_labour,
     SquadRole, TacticalTarget, TacticalTuning, ThreatState, TradeDecision, army_power,
     counter_composition, counter_score, count_own_kind, dynamic_army_target,
-    dynamic_peasant_target, eats_food, food_crisis, mustered, next_army_kind, next_build,
+    dynamic_peasant_target, eats_food, food_crisis, food_cushion, mustered, next_army_kind, next_build,
     next_phase, next_trade, raid_quota, ranked_counters, recall_count, should_assault,
     should_recall, should_retreat, squad_role, target_for_role, counter_dps, unit_power,
     naval_wanted,
@@ -100,9 +100,8 @@ pub use combat::{
 };
 pub use constants::*;
 pub use economy::{
-    FOOD_RESERVE_PER_POP, GATHER_PRIORITY, ResourceCost, Stockpile, TradeResult, UpkeepResult,
-    apply_upkeep, apply_upkeep_default, balanced_gather_types, food_low, harvest_reach, market_buy,
-    market_sale,
+    FOOD_RESERVE_PER_POP, GATHER_PRIORITY, ResourceCost, Stockpile, TradeResult,
+    balanced_gather_types, food_low, harvest_reach, market_buy, market_sale,
 };
 pub use elevation::{
     ELEV_BONUS_MAX, ELEV_BONUS_SPAN, elevation, elevation_at, elevation_range_bonus, elevation_reach,
@@ -133,9 +132,10 @@ pub use research::{
     techs_in_mask, upgrade_def,
 };
 pub use supply::{
-    DESERT_GRIT, DESERT_RATION, FORAGE_PER_TICK, FULL_RATION, OUT_OF_SUPPLY_DRAW, SUPPLY_RADIUS,
-    SupplyResult, apply_supply, deserts, draws_rations, forage_yield, ration, supply_bill,
-    supply_draw,
+    CAMPAIGN_TICKS, DESERT_GRIT, DESERT_RATION, FAMINE_RATION, FIELD_RATION, FORAGE_PER_TICK,
+    FULL_RATION, MAX_STRAIN, SUPPLY_RADIUS, SUPPLY_SPAN, SupplyResult, apply_supply,
+    campaign_reserve, deserts, draws_rations, fatigue_ticks, forage_yield, man_draw, morale_ceiling,
+    ration, strain, supply_bill,
 };
 pub use tech::{all_prereqs, has_prereq, has_prereq_all};
 pub use math::{

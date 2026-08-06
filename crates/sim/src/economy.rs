@@ -1,4 +1,4 @@
-use crate::constants::{ECONOMY_DT, FOOD_PER_UNIT, MARKET_BUY_RATE, MARKET_RATE, STARVE_DPS};
+use crate::constants::{MARKET_BUY_RATE, MARKET_RATE};
 use crate::enums::ResourceType;
 use crate::math::Fx;
 use serde::{Deserialize, Serialize};
@@ -124,42 +124,7 @@ pub fn balanced_gather_types(available: &[ResourceType], n: usize) -> Vec<Resour
     (0..n).map(|i| order[i % order.len()]).collect()
 }
 
-pub struct UpkeepResult {
-    pub food: i32,
-    pub starving: bool,
-    pub hp_drain: i32,
-    /// Morale lost by every ration-drawing unit this tick — hunger breaks
-    /// spirits before it breaks bodies.
-    pub morale_drain: Fx,
-}
-
-pub use crate::supply::{STARVE_GRACE_TICKS, STARVE_MORALE_DRAIN, STARVE_RAMP_TICKS};
-
-/// SUPERSEDED by `supply::apply_supply`, which rations proportionally. This is
-/// the all-or-nothing rule — one unit over the line starves the whole army — and
-/// it stays only until `systems::economy` is moved across.
-///
-/// One economy tick of food upkeep. Every ration-drawing unit eats
-/// FOOD_PER_UNIT; `hunger` counts consecutive starving ticks (persisted by the
-/// caller).
-pub fn apply_upkeep(food: i32, unit_count: i32, hunger: i32, dt: Fx) -> UpkeepResult {
-    let bill = unit_count * FOOD_PER_UNIT;
-    let starving = bill > food;
-    let new_food = (food - bill).max(0);
-    let hp_drain = if starving && hunger >= STARVE_GRACE_TICKS {
-        let over = (hunger - STARVE_GRACE_TICKS + 1).min(STARVE_RAMP_TICKS);
-        let ramp = Fx::from_num(over) / Fx::from_num(STARVE_RAMP_TICKS);
-        (STARVE_DPS * dt * ramp).round().to_num::<i32>().max(1)
-    } else {
-        0
-    };
-    let morale_drain = if starving { STARVE_MORALE_DRAIN } else { Fx::ZERO };
-    UpkeepResult { food: new_food, starving, hp_drain, morale_drain }
-}
-
-pub fn apply_upkeep_default(food: i32, unit_count: i32) -> UpkeepResult {
-    apply_upkeep(food, unit_count, STARVE_GRACE_TICKS, ECONOMY_DT)
-}
+pub use crate::supply::STARVE_GRACE_TICKS;
 
 pub struct TradeResult {
     pub ok: bool,
@@ -220,26 +185,33 @@ mod tests {
         assert_eq!(p.wood, 22); // floor(22.5)
     }
 
+    /// A SOLDIER IS RAISED WITH BREAD. Three quarters of what a fighting man
+    /// used to cost in timber is food now, which is what gives the whole farming
+    /// and fishing economy a war to pay for — and what replaced the per-head
+    /// upkeep that used to be food's only sink. Engines, hulls and peasants are
+    /// built, not fed, so they stayed on timber.
     #[test]
-    fn upkeep_starves() {
-        // during the grace: hungry, demoralized, but no attrition yet
-        let early = apply_upkeep(5, 10, 0, ECONOMY_DT); // bill 10 > 5
-        assert!(early.starving);
-        assert_eq!(early.food, 0);
-        assert_eq!(early.hp_drain, 0);
-        assert!(early.morale_drain > Fx::ZERO);
-        // ramp begins right after the grace, well below full attrition
-        let onset = apply_upkeep(5, 10, STARVE_GRACE_TICKS, ECONOMY_DT);
-        assert!(onset.hp_drain >= 1);
-        assert!(onset.hp_drain < 8);
-        // deep famine: full STARVE_DPS
-        let deep = apply_upkeep(5, 10, STARVE_GRACE_TICKS + STARVE_RAMP_TICKS, ECONOMY_DT);
-        assert_eq!(deep.hp_drain, 8); // round(4 * 2)
-        let ok = apply_upkeep(100, 10, 0, ECONOMY_DT);
-        assert!(!ok.starving);
-        assert_eq!(ok.food, 90);
-        assert_eq!(ok.hp_drain, 0);
-        assert_eq!(ok.morale_drain, Fx::ZERO);
+    fn a_soldier_is_bought_with_bread() {
+        use crate::enums::{UnitKind, UnitRole};
+        use crate::units::unit_def;
+        for k in UnitKind::ALL {
+            let d = unit_def(*k);
+            if !d.draws_rations() {
+                continue;
+            }
+            assert!(d.cost.food > 0, "{k:?} is raised without bread");
+            assert!(
+                d.cost.food * 2 > d.cost.wood + d.cost.stone,
+                "{k:?} costs more timber than bread"
+            );
+        }
+        // and the things with no stomach are still bought with timber
+        for k in [UnitKind::Ram, UnitKind::Mangonel, UnitKind::Peasant, UnitKind::Barge] {
+            let d = unit_def(k);
+            assert_eq!(d.cost.food, 0, "{k:?} eats");
+            assert!(d.cost.wood > 0);
+            assert!(d.role != UnitRole::Foot);
+        }
     }
 
     #[test]

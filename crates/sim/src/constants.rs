@@ -162,11 +162,12 @@ pub const FARM_LODGE_DIVISOR: i32 = 50;
 /// (30 x 2 s = 60 s of grace, then a slow visible bleed).
 pub const FARM_RIPE_GRACE: i32 = 30;
 
-// Food economy: every ration-drawing unit eats FOOD_PER_UNIT per economy tick.
-// A short larder is PROPORTIONAL from here on (`supply.rs`) — an empty one
-// bleeds STARVE_DPS hp/sec, a nearly-full one costs almost nothing.
-pub const FOOD_PER_UNIT: i32 = 1;
-pub const STARVE_DPS: Fx = crate::fx!("4");
+// Food buys men and moves them; it does not tax them for existing. Raising a
+// soldier costs bread (`UnitDef.cost`), marching him beyond your own stores
+// costs bread again (`supply.rs`), and a garrison costs nothing. The flat
+// per-head tax that used to live here — FOOD_PER_UNIT and the STARVE_DPS
+// attrition it fed — is gone in both directions: it had no band between
+// crushing and irrelevant, and hunger no longer touches hp at all.
 
 // ── shock ────────────────────────────────────────────────────────────────────
 // A charge is a once-per-approach event, not a passive damage stat, so it needs

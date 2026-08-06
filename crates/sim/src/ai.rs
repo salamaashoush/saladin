@@ -49,7 +49,9 @@ pub struct PlannerState {
     pub wood: i32,
     pub stone: i32,
     pub gold: i32,
-    pub upkeep: i32,
+    /// Food a campaign of this army would burn at full depth (`campaign_reserve`).
+    /// Priced off the ONE supply rate, so the bot can never misjudge the road.
+    pub campaign_food: i32,
     pub soldiers: i32,
     pub army_composition: Census,
     pub sieges: i32,
@@ -113,7 +115,6 @@ pub struct PlannerTuning {
     pub army_target: i32,
     pub core_army: i32,
     pub pop_buffer: i32,
-    pub food_floor_mult: i32,
     pub wood_buffer: i32,
     pub max_towers: i32,
     pub wants_cavalry: bool,
@@ -156,9 +157,12 @@ pub struct PlannerTuning {
     pub builders_per_site: i32,
 }
 
-/// Food crisis: the larder is at/under the floor while an army eats from it.
+/// Food crisis: the larder cannot muster the next man. Bread is what raises a
+/// soldier now, so this is a TRAINING gate and it binds with no army standing —
+/// the old `upkeep > 0` guard meant a bot with nothing in the field and nothing
+/// in the granary was, formally, fine.
 pub fn food_crisis(s: &PlannerState, tune: &PlannerTuning) -> bool {
-    s.upkeep > 0 && s.food <= tune.food_floor
+    s.food <= tune.food_floor
 }
 
 /// How a bot spreads its peasants over its fields.
@@ -175,6 +179,14 @@ pub struct FieldLabour {
     pub budget: i32,
 }
 
+/// The war chest: enough bread to raise the next few men AND to pay for the road
+/// they will walk. Past it, food is a glut — `next_trade` sells it, `field_labour`
+/// stops staffing the wheat for it, and the gatherer steer moves hands off it.
+/// ONE high-water mark with three users, priced off the one supply rate.
+pub fn food_cushion(s: &PlannerState, tune: &PlannerTuning) -> i32 {
+    s.campaign_food + tune.food_floor * 4
+}
+
 /// Peasants a bot commits to its fields. Spread before stacked: `per_field` is
 /// filled a layer at a time across every farm, so the diminishing tending curve
 /// is answered the way the player answers it.
@@ -182,10 +194,22 @@ pub struct FieldLabour {
 /// A famine with a harvest standing swells both numbers. Cutting a ripe crop is
 /// food already grown and already paid for; it comes in before the war chest is
 /// spent on somebody else's grain (see `next_trade`).
+///
+/// A GLUT SHRINKS IT. A flat half of the workforce in the wheat was right when
+/// food was a poll tax with no ceiling; now that a war chest has a size, hands
+/// past it are timber and stone the ladder is stalled for. Measured on seed
+/// 12345: fourteen peasants, seven in the fields, 1696 food, SIX wood, and a
+/// build ladder frozen at three farms for the last four minutes of the match.
 pub fn field_labour(s: &PlannerState, tune: &PlannerTuning) -> FieldLabour {
     let surge = food_crisis(s, tune) && s.fields_ripe > 0;
     let per_field = if surge { tune.farm_hands + 1 } else { tune.farm_hands }.max(1);
-    let budget = if surge { s.peasants * 2 / 3 } else { s.peasants / 2 };
+    let budget = if surge {
+        s.peasants * 2 / 3
+    } else if s.food > food_cushion(s, tune) {
+        s.peasants / 5
+    } else {
+        s.peasants / 2
+    };
     FieldLabour { per_field, budget: budget.max(0) }
 }
 
@@ -429,7 +453,7 @@ pub fn next_trade(s: &PlannerState, tune: &PlannerTuning) -> Option<TradeDecisio
     // for. Cut it before buying somebody else's grain — `field_labour` has
     // already swelled the crew that is cutting it.
     if food_crisis(s, tune) && s.fields_ripe == 0 && s.gold >= MARKET_BUY_RATE {
-        let want = (s.upkeep * tune.food_floor_mult).max(20);
+        let want = s.campaign_food.max(tune.food_floor * 2);
         let amount = want.min(s.gold / MARKET_BUY_RATE);
         return Some(TradeDecision { res: ResourceType::Food, amount, buy: true });
     }
@@ -471,7 +495,7 @@ pub fn next_trade(s: &PlannerState, tune: &PlannerTuning) -> Option<TradeDecisio
         return Some(TradeDecision { res, amount: spare.min(60), buy: false });
     }
     // a deep food pile beyond any famine cushion is tradeable too
-    let cushion = tune.food_floor * 8 + s.upkeep * tune.food_floor_mult * 4;
+    let cushion = food_cushion(s, tune);
     let fspare = s.food - cushion;
     if fspare >= MARKET_RATE * 10 {
         return Some(TradeDecision { res: ResourceType::Food, amount: fspare.min(40), buy: false });
@@ -969,6 +993,7 @@ pub fn mustered(soldiers: i32, wave_size: i32) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::supply::campaign_reserve;
 
     fn barracks_only() -> HashSet<BuildingKind> {
         let mut s = HashSet::new();
@@ -987,7 +1012,7 @@ mod tests {
             wood: 100,
             stone: 100,
             gold: 100,
-            upkeep: 0,
+            campaign_food: 0,
             soldiers: 0,
             army_composition: EMPTY_CENSUS,
             sieges: 0,
@@ -1021,7 +1046,6 @@ mod tests {
             army_target: 6,
             core_army: 4,
             pop_buffer: 2,
-            food_floor_mult: 6,
             wood_buffer: 30,
             max_towers: 1,
             wants_cavalry: false,
@@ -1029,7 +1053,7 @@ mod tests {
             siege_target: 0,
             imam_target: 0,
             defend_threat: 4,
-            food_floor: 12,
+            food_floor: 30,
             reserve_peasants: 2,
             army_match_margin: 0,
             army_cap: 6,
@@ -1085,7 +1109,7 @@ mod tests {
     #[test]
     fn threat_forces_defend_phase() {
         let mut s = state(barracks_only());
-        s.upkeep = 5;
+        s.campaign_food = campaign_reserve(5);
         s.soldiers = 10;
         s.threat_near_home = 9;
         let mut tune = tuning();
@@ -1151,14 +1175,14 @@ mod tests {
 
         // famine + gold -> buy food
         s.food = 5;
-        s.upkeep = 8;
+        s.campaign_food = campaign_reserve(8);
         s.gold = 50;
         let t = next_trade(&s, &tune).unwrap();
         assert!(t.buy && t.res == ResourceType::Food && t.amount > 0);
 
         // gold-poor + wood glut -> sell wood
         s.food = 500;
-        s.upkeep = 0;
+        s.campaign_food = 0;
         s.gold = 10;
         s.wood = 400;
         s.stone = 60;
@@ -1211,7 +1235,7 @@ mod tests {
         tune.farm_hands = 2;
         s.peasants = 12;
         s.food = 5;
-        s.upkeep = 8;
+        s.campaign_food = campaign_reserve(8);
         s.gold = 200;
         s.farms = 3;
         assert!(food_crisis(&s, &tune));
@@ -1244,7 +1268,7 @@ mod tests {
         tune.farm_target = 4;
         s.farmland_near = true;
         s.food = 5;
-        s.upkeep = 8;
+        s.campaign_food = campaign_reserve(8);
         s.wood = 200;
         s.peasants = 20; // past the peasant goal, so the ladder reaches the farm rung
         s.pop = 20;
@@ -1272,7 +1296,7 @@ mod tests {
         tune.wants_fishing = true;
         tune.farm_target = 4;
         s.food = 5;
-        s.upkeep = 8;
+        s.campaign_food = campaign_reserve(8);
         s.wood = 200;
         s.stone = 200;
         s.gold = 400;
@@ -1304,7 +1328,7 @@ mod tests {
         owned.insert(BuildingKind::Market);
         let mut s2 = state(owned);
         s2.food = 5;
-        s2.upkeep = 8;
+        s2.campaign_food = campaign_reserve(8);
         s2.peasants = 20;
         s2.pop = 20;
         s2.cap = 30;

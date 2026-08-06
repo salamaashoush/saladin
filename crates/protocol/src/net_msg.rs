@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 /// Harbour appended to the rosters, fisheries that regrow, and a berth spawn —
 /// not one byte of `Msg` moved, but a v8 peer decodes UnitKind 13 as nothing
 /// and would simulate a different tick.
-pub const PROTOCOL_VERSION: u32 = 9;
+pub const PROTOCOL_VERSION: u32 = 10;
 
 /// Room codes: 6 chars from an unambiguous alphabet (no 0/O, 1/I/L).
 pub const ROOM_CODE_LEN: usize = 6;

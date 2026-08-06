@@ -2,13 +2,12 @@
 //! with. Answers three questions with measurements rather than formulas:
 //!   1. food/s a single field delivers at each crew size (and with a hub)
 //!   2. food/s the SAME peasants deliver hunting a wild herd, and for how long
-//!   3. fields needed to keep one soldier in rations
+//!   3. THE BALANCE TABLE: what a field buys in men raised and in campaign
 //!
 //! cargo run --release -p saladin-protocol --example farm_worth [seed] [secs]
 
 use bevy_app::prelude::*;
 use saladin_protocol::*;
-use saladin_sim::supply::RATION_DRAW;
 use saladin_sim::*;
 
 fn center(tx: i32, ty: i32) -> V2 {
@@ -264,12 +263,38 @@ fn main() {
         println!("{h:>6} {n:>6} {b:>8} {:>9.3} {d:>12}", per(b));
     }
 
-    println!("\n== WHAT THAT FEEDS ==");
-    println!("one soldier in supply draws {RATION_DRAW} food / economy tick ({ECONOMY_DT}s)");
-    let per_soldier = RATION_DRAW.to_num::<f32>() / ECONOMY_DT.to_num::<f32>();
-    println!("                          = {per_soldier:.3} food/s");
     let f3 = per(run_farm(seed, bx, by, 3, false, secs));
-    println!("a 3-hand field delivers     {f3:.3} food/s");
-    println!("=> one field feeds          {:.1} soldiers", f3 / per_soldier);
-    println!("=> fields per soldier       {:.2}", per_soldier / f3);
+    println!("\n== WHAT THAT BUYS: THE MUSTER ==");
+    println!("a 3-hand field delivers {f3:.3} food/s");
+    println!("{:<14} {:>5} {:>8} {:>12}", "unit", "food", "seconds", "fields/min");
+    for k in UnitKind::ALL {
+        let d = unit_def(*k);
+        if d.cost.food <= 0 {
+            continue;
+        }
+        let secs_of_field = d.cost.food as f32 / f3;
+        println!(
+            "{:<14} {:>5} {:>8.1} {:>12.2}",
+            format!("{k:?}"),
+            d.cost.food,
+            secs_of_field,
+            60.0 / secs_of_field
+        );
+    }
+
+    println!("\n== WHAT THAT BUYS: THE ROAD ==");
+    println!("a garrison inside {SUPPLY_RADIUS} tiles of a drop-off draws NOTHING");
+    let step = ECONOMY_DT.to_num::<f32>();
+    println!("{:>8} {:>8} {:>10} {:>10} {:>10} {:>10}",
+        "tiles out", "strain", "f/s per man", "20 men f/s", "fields/20", "500 food");
+    for d in [34, 45, 60, 68, 100, 136, 200, 300] {
+        let st = strain(Fx::from_num(d));
+        let per_man = man_draw(st).to_num::<f32>() / step;
+        let twenty = per_man * 20.0;
+        let hold = if twenty > 0.0 { format!("{:.0}s", 500.0 / twenty) } else { "forever".into() };
+        println!("{d:>8} {:>8.2} {per_man:>10.3} {twenty:>10.3} {:>10.2} {hold:>10}",
+            st.to_num::<f32>(), twenty / f3);
+    }
+    println!("war chest for 20 men ({CAMPAIGN_TICKS} economy ticks at full strain): {} food",
+        campaign_reserve(20));
 }
