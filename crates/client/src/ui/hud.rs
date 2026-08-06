@@ -18,11 +18,11 @@ use bevy::ui::{ComputedNode, UiGlobalTransform};
 use saladin_sim::{
     AuraTarget, BUILD_CATEGORIES, BuildState, BuildStatus, BuildingDef, BuildingKind, FULL_RATION,
     FormationShape, Fx, ResearchProgressRow, ResearchStatus, ResourceCost, ResourceType,
-    Stance, UnitRole, accepts, building_def, build_panel_state, can_host_garrison, cancel_refund,
-    demolish_refund, draws_rations, hall_label, place_error_text, research_panel_state, roster_for,
-    techs_in_mask, unit_def, upgrade_def,
+    Stance, UnitRole, V2, accepts, building_def, build_panel_state, can_host_garrison,
+    cancel_refund, demolish_refund, dist, draws_rations, hall_label, operational,
+    place_error_text, research_panel_state, roster_for, techs_in_mask, unit_def, upgrade_def,
 };
-use saladin_protocol::{Building, Owner, Player, Research, Unit};
+use saladin_protocol::{Building, Owner, Player, Pos, Research, Unit};
 use std::collections::HashSet;
 
 #[derive(Component)]
@@ -187,30 +187,48 @@ fn my_player<'a>(players: &'a Query<&Player>, me: u64) -> Option<&'a Player> {
     players.iter().find(|p| p.player_id == me)
 }
 
-/// What the army is actually eating, straight off the sim's own `Unit.ration`.
-/// The old readout said STARVING or nothing, because the old rule was
-/// all-or-nothing; rationing is proportional now, so the bar reports the share
-/// that is being issued and how many men are on short commons.
+/// What the army is actually eating, and what the road is costing. A garrison
+/// draws NOTHING, so a food number alone tells a player nothing about the
+/// decision he has made — the bar has to say how many men are past the end of
+/// the supply line and what they are billing for it.
+///
+/// `afield` and `bill` are recomputed here through the sim's own `strain`, not
+/// mirrored off a sim field: `Unit.ration` is FULL for a man who is merely
+/// expensive, and the cost of a march has to be visible BEFORE it turns into a
+/// shortage.
 pub struct SupplyReadout {
     pub eaters: i32,
+    /// Men beyond the reach of any friendly store.
+    pub afield: i32,
     pub short: i32,
     /// Worst ration in the army, as a percentage.
     pub worst: i32,
+    /// What the column costs, in food per minute.
+    pub bill: i32,
 }
 
 impl SupplyReadout {
     pub fn line(&self, food: i32) -> (String, bool) {
-        match (self.short, self.worst) {
-            (0, _) => (format!("{food}"), false),
-            (n, 0) => (format!("{food}  NO RATIONS  {n} men"), true),
-            (n, w) => (format!("{food}  RATIONS {w}%  {n} men"), true),
+        match (self.short, self.worst, self.afield) {
+            (0, _, 0) => (format!("{food}"), false),
+            (0, _, a) => (format!("{food}  {a} AFIELD  -{}/min", self.bill), false),
+            (n, 0, _) => (format!("{food}  NO RATIONS  {n} men"), true),
+            (n, w, _) => (format!("{food}  RATIONS {w}%  {n} men"), true),
         }
     }
 }
 
-pub fn supply_readout(rations: impl Iterator<Item = (saladin_sim::UnitKind, Fx)>) -> SupplyReadout {
-    let (mut eaters, mut short, mut worst) = (0, 0, FULL_RATION);
-    for (kind, r) in rations {
+/// Economy ticks in a minute — what turns a per-tick bill into a rate a player
+/// can compare with the food bar he is watching.
+const TICKS_PER_MIN: f32 = 30.0;
+
+pub fn supply_readout(
+    army: impl Iterator<Item = (saladin_sim::UnitKind, Fx, V2)>,
+    stores: &[V2],
+) -> SupplyReadout {
+    let (mut eaters, mut afield, mut short, mut worst) = (0, 0, 0, FULL_RATION);
+    let mut strain_sum = Fx::ZERO;
+    for (kind, r, at) in army {
         if !draws_rations(kind) {
             continue;
         }
@@ -219,25 +237,46 @@ pub fn supply_readout(rations: impl Iterator<Item = (saladin_sim::UnitKind, Fx)>
             short += 1;
             worst = worst.min(r);
         }
+        // no store anywhere is no supply LINE to be cut, exactly as the sim has it
+        let Some(nearest) = stores.iter().map(|s| dist(*s, at)).reduce(Fx::min) else { continue };
+        let st = saladin_sim::strain(nearest);
+        if st > Fx::ZERO {
+            afield += 1;
+            strain_sum += st;
+        }
     }
     SupplyReadout {
         eaters,
+        afield,
         short,
         worst: (worst.to_num::<f32>() * 100.0).clamp(0.0, 100.0) as i32,
+        bill: (saladin_sim::supply_bill(strain_sum).to_num::<f32>() * TICKS_PER_MIN).ceil() as i32,
     }
+}
+
+/// Where a haul may be dropped, which is also where an army is fed from — the
+/// same gate `systems::economy` uses to build its anchor list.
+pub fn supply_stores<'a>(
+    buildings: impl Iterator<Item = (&'a Owner, &'a Pos, &'a Building)>,
+    me: u64,
+) -> Vec<V2> {
+    buildings
+        .filter(|(o, _, b)| o.0 == me && operational(b.state) && building_def(b.kind).accepts != 0)
+        .map(|(_, p, _)| p.pos)
+        .collect()
 }
 
 /// Refresh the top bar texts in place.
 pub fn update_resource_bar(
     local: Res<LocalPlayer>,
     q_players: Query<&Player>,
-    q_units: Query<(&Owner, &Unit)>,
-    q_buildings: Query<(&Owner, &Building)>,
+    q_units: Query<(&Owner, &Pos, &Unit)>,
+    q_buildings: Query<(&Owner, &Pos, &Building)>,
     mut q_text: Query<(&ResourceText, &mut Text, &mut TextColor)>,
 ) {
     let Some(p) = my_player(&q_players, local.0) else { return };
     let (mut peasants, mut soldiers, mut pop) = (0, 0, 0);
-    for (o, u) in &q_units {
+    for (o, _, u) in &q_units {
         if o.0 != local.0 {
             continue;
         }
@@ -254,11 +293,14 @@ pub fn update_resource_bar(
     // a hole in the ground shelters nobody — mirror the sim's pop_room gate
     let cap: i32 = q_buildings
         .iter()
-        .filter(|(o, b)| o.0 == local.0 && saladin_sim::operational(b.state))
-        .map(|(_, b)| building_def(b.kind).pop)
+        .filter(|(o, _, b)| o.0 == local.0 && operational(b.state))
+        .map(|(_, _, b)| building_def(b.kind).pop)
         .sum();
-    let supply =
-        supply_readout(q_units.iter().filter(|(o, _)| o.0 == local.0).map(|(_, u)| (u.kind, u.ration)));
+    let stores = supply_stores(q_buildings.iter(), local.0);
+    let supply = supply_readout(
+        q_units.iter().filter(|(o, _, _)| o.0 == local.0).map(|(_, pos, u)| (u.kind, u.ration, pos.pos)),
+        &stores,
+    );
     let (food_line, short) = supply.line(p.stock.food);
 
     for (slot, mut text, mut color) in &mut q_text {
@@ -1284,14 +1326,18 @@ pub fn watch_refusals(
 pub fn watch_toasts(
     local: Res<LocalPlayer>,
     q_players: Query<&Player>,
-    q_units: Query<(&Owner, &Unit)>,
+    q_units: Query<(&Owner, &Pos, &Unit)>,
+    q_buildings: Query<(&Owner, &Pos, &Building)>,
     mut toasts: ResMut<Toasts>,
     mut prev_short: Local<bool>,
     mut prev_mask: Local<u64>,
 ) {
     let Some(p) = q_players.iter().find(|p| p.player_id == local.0) else { return };
-    let supply =
-        supply_readout(q_units.iter().filter(|(o, _)| o.0 == local.0).map(|(_, u)| (u.kind, u.ration)));
+    let stores = supply_stores(q_buildings.iter(), local.0);
+    let supply = supply_readout(
+        q_units.iter().filter(|(o, _, _)| o.0 == local.0).map(|(_, pos, u)| (u.kind, u.ration, pos.pos)),
+        &stores,
+    );
     let short = supply.short > 0;
     if short && !*prev_short {
         toasts.0.push((
@@ -1404,8 +1450,9 @@ mod tests {
         for (_, name) in FORMATION_NAMES {
             assert!(name.is_ascii() && name.len() <= 6, "{name:?}");
         }
-        for (short, worst) in [(0, 100), (3, 0), (12, 62)] {
-            let (line, warn) = SupplyReadout { eaters: 20, short, worst }.line(140);
+        for (short, worst, afield) in [(0, 100, 0), (0, 100, 14), (3, 0, 3), (12, 62, 12)] {
+            let r = SupplyReadout { eaters: 20, afield, short, worst, bill: 126 };
+            let (line, warn) = r.line(140);
             assert!(line.is_ascii() && line.len() <= MAX_CHARS, "{line:?}");
             assert_eq!(warn, short > 0);
         }
@@ -1549,20 +1596,42 @@ mod tests {
     }
 
     /// Hunger used to be a single word: STARVING or nothing. Rationing is
-    /// proportional, so the readout has to report a share and a count.
+    /// proportional AND a garrison is free, so the readout has to report a
+    /// share, a count, and — the new half — WHAT THE ROAD COSTS before it turns
+    /// into a shortage. A player who cannot see the bill cannot answer it.
     #[test]
-    fn the_supply_line_reports_a_share_not_a_verdict() {
+    fn the_supply_line_reports_the_road_and_the_share() {
         use saladin_sim::UnitKind::*;
-        let full = supply_readout([(Spearman, FULL_RATION), (Peasant, Fx::ZERO)].into_iter());
+        let keep = V2::new(Fx::from_num(60), Fx::from_num(60));
+        let at_home = V2::new(Fx::from_num(64), Fx::from_num(60));
+        let out = V2::new(Fx::from_num(300), Fx::from_num(60));
+
+        let full = supply_readout(
+            [(Spearman, FULL_RATION, at_home), (Peasant, Fx::ZERO, at_home)].into_iter(),
+            &[keep],
+        );
         // a peasant on nothing is not on short rations — it never drew any
-        assert_eq!((full.eaters, full.short), (1, 0));
+        assert_eq!((full.eaters, full.short, full.afield, full.bill), (1, 0, 0, 0));
+        assert_eq!(full.line(50).0, "50", "a garrison must read as free");
         assert!(!full.line(50).1);
 
+        // fed, but out past the stores: no warning, and the cost is on the bar
+        let marching = supply_readout([(Spearman, FULL_RATION, out)].into_iter(), &[keep]);
+        assert_eq!((marching.afield, marching.short), (1, 0));
+        assert!(marching.bill > 0, "a march that costs nothing to look at");
+        let (line, warn) = marching.line(200);
+        assert!(!warn && line.contains("1 AFIELD") && line.contains("/min"), "{line}");
+
         let half = supply_readout(
-            [(Spearman, saladin_sim::fx!("0.5")), (Knight, FULL_RATION), (Chaplain, Fx::ZERO)]
-                .into_iter(),
+            [
+                (Spearman, saladin_sim::fx!("0.5"), out),
+                (Knight, FULL_RATION, out),
+                (Chaplain, Fx::ZERO, out),
+            ]
+            .into_iter(),
+            &[keep],
         );
-        assert_eq!((half.eaters, half.short, half.worst), (2, 1, 50));
+        assert_eq!((half.eaters, half.short, half.worst, half.afield), (2, 1, 50, 2));
         let (line, warn) = half.line(9);
         assert!(warn && line.contains("50%") && line.contains('9'), "{line}");
     }

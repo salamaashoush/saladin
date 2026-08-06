@@ -143,6 +143,14 @@ pub fn setup(app: &mut App) {
             app.insert_state(GameState::Playing);
             app.add_systems(Update, (auto_screenshot, auto_ferry));
         }
+        Ok("supply") => {
+            // the baggage train as one still: a column past the end of the
+            // supply line, selected, with the top bar carrying what the road
+            // costs. SALADIN_STARVE=1 empties the larder so the same shot shows
+            // the rationing warning instead of the bill.
+            app.insert_state(GameState::Playing);
+            app.add_systems(Update, (auto_screenshot, auto_column_afield, auto_select_units));
+        }
         Ok("battle") => {
             // conjure two armies facing each other and let them fight — what an
             // engagement actually LOOKS like, without playing to first contact
@@ -1285,6 +1293,61 @@ pub fn auto_battle(world: &mut World, mut done: Local<bool>) {
             place(world, 2, *k, x, y);
         }
     }
+}
+
+/// Supply harness: march a column PAST the supply radius and frame it. A
+/// garrison draws nothing, so the only way to photograph the model at work is
+/// to put men where the road costs something. `SALADIN_STARVE=1` empties the
+/// larder, which turns the same shot from "here is the bill" into "here is what
+/// happens when you cannot pay it".
+pub fn auto_column_afield(world: &mut World, mut done: Local<bool>) {
+    use saladin_protocol::{MatchId, NextEntityId, Owner, Player, Pos, Unit};
+    use saladin_sim::{Fx, SUPPLY_RADIUS, UnitKind, V2, unit_def};
+    if *done || world.resource::<Time>().elapsed_secs() < 2.0 {
+        return;
+    }
+    let Some(kp) = keep_pos(world, 1) else { return };
+    *done = true;
+    // a full ration-length past the line, so every man is well out of supply
+    let out = SUPPLY_RADIUS.to_num::<f32>() + 12.0;
+    let column = [
+        UnitKind::Spearman,
+        UnitKind::Spearman,
+        UnitKind::Spearman,
+        UnitKind::Archer,
+        UnitKind::Archer,
+        UnitKind::Naffatun,
+    ];
+    for row in 0..2 {
+        for (i, k) in column.iter().enumerate() {
+            let def = unit_def(*k);
+            let pos = V2::new(
+                kp.x + Fx::from_num(out as i32 + i as i32),
+                kp.y + Fx::from_num(row * 2),
+            );
+            let id = world.resource_mut::<NextEntityId>().alloc();
+            world.spawn((
+                GameId(id),
+                Owner(1),
+                MatchId(1),
+                Pos { pos, facing: Fx::ZERO },
+                Unit { speed: def.speed, hp: def.max_hp, ..Unit::new(*k, pos) },
+            ));
+        }
+    }
+    let starve = std::env::var("SALADIN_STARVE").is_ok();
+    {
+        let mut q = world.query::<&mut Player>();
+        for mut p in q.iter_mut(world) {
+            if p.player_id == 1 {
+                p.stock.food = if starve { 0 } else { 640 };
+            }
+        }
+    }
+    let mut cam = world.resource_mut::<crate::camera::CameraState>();
+    cam.target_center =
+        bevy::prelude::Vec3::new(kp.x.to_num::<f32>() + out + 3.0, 0.0, kp.y.to_num::<f32>() + 1.0);
+    cam.framed = true;
 }
 
 /// Screenshot harness only: select every own field soldier, so a shot captures
