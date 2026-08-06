@@ -16,12 +16,15 @@ pub fn scatter_world_nodes(world: &mut World, match_id: u64) {
     nodes.extend(extra);
     for n in nodes {
         let id = world.resource_mut::<NextEntityId>().alloc();
-        world.spawn((
-            GameId(id),
-            MatchId(match_id),
-            Pos { pos: n.pos, facing: Fx::ZERO },
-            ResourceNode::deposit(n.res_type, n.yield_),
-        ));
+        // A school swims back; a felled wood and a mined-out seam do not. The
+        // `regen > 0` row is also what keeps a worked-out fishery in the world:
+        // the despawn gate already spares anything that regrows.
+        let node = if n.regen > 0 {
+            ResourceNode::renewable(n.res_type, n.yield_, n.yield_, n.regen)
+        } else {
+            ResourceNode::deposit(n.res_type, n.yield_)
+        };
+        world.spawn((GameId(id), MatchId(match_id), Pos { pos: n.pos, facing: Fx::ZERO }, node));
     }
 }
 
@@ -131,7 +134,7 @@ pub(crate) fn spawn_ai(
             scout_id: 0,
             threat_timer: Fx::ZERO,
             wave_launched: 0,
-            fishing_blocked: false,
+            waterside_cd: Fx::ZERO,
             famine: false,
         });
     }

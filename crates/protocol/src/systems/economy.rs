@@ -6,10 +6,10 @@ use crate::components::{
 use bevy_ecs::prelude::*;
 use bevy_platform::collections::HashMap;
 use saladin_sim::{
-    AuraTarget, ECONOMY_DT, FARM_RIPE_GRACE, FOOD_PER_UNIT, FOOD_YIELD, FULL_RATION, Fx,
+    AuraTarget, ECONOMY_DT, FARM_RIPE_GRACE, FOOD_PER_UNIT, FULL_RATION, Fx,
     MORALE_MAX, OUT_OF_SUPPLY_DRAW, ResourceType, SUPPLY_RADIUS, SupplyResult, V2, WorkAura,
     apply_supply, building_def, deserts, dist, dist2, draws_rations, field_growth, forage_yield,
-    is_passable, lodge_loss, operational, ration, supply::STARVE_GRACE_TICKS, supply_bill,
+    is_sailable, lodge_loss, operational, ration, supply::STARVE_GRACE_TICKS, supply_bill,
     unit_def,
 };
 
@@ -157,6 +157,10 @@ pub fn economy(
     let s = &mut *scratch;
     s.wild.clear();
     for (ent, gid, np, mut n, field, crop) in &mut q_nodes {
+        // DRY, not "walkable": a cliff and a mountainside are impassable and dry,
+        // and calling them water put a herd under a scarp into the fishery's
+        // restock branch and out of the forage pool at the same time.
+        let dry = !is_sailable(seed, np.pos.x.to_num::<i32>(), np.pos.y.to_num::<i32>());
         if let Some(f) = field {
             let (owner, hands) = match farm_of.get(&f.0).copied() {
                 Some((o, crew, up)) => (o, if up { crew } else { 0 }),
@@ -185,16 +189,19 @@ pub fn economy(
                 None => {}
             }
         } else if n.regen > 0 && n.remaining < n.cap {
-            n.remaining = (n.remaining + n.regen).min(n.cap);
-        }
-        let dry = is_passable(seed, np.pos.x.to_num::<i32>(), np.pos.y.to_num::<i32>());
-        // a hut restocks the waters in its reach up to a natural school
-        if n.res_type == ResourceType::Food && n.remaining < FOOD_YIELD && !auras.is_empty() && !dry
-        {
-            let regen = tended(np.pos, AuraTarget::WaterFood, None);
-            if regen > 0 {
-                n.remaining = (n.remaining + regen).min(FOOD_YIELD);
-            }
+            // A hut MULTIPLIES a fishery's own regrowth; it does not supply it.
+            // The flat top-up it replaces made a TENDED school empty 20% faster
+            // than an untended one — the same aura doubles the DRAW — for +32
+            // fish over a match, so the building was measurably negative at the
+            // one job it has. It also topped up to `FOOD_YIELD` and not to the
+            // node's own cap, which overfilled an inshore school and starved a
+            // deep one.
+            let nets = if n.res_type == ResourceType::Food && !dry && !auras.is_empty() {
+                tended(np.pos, AuraTarget::WaterFood, None).max(1)
+            } else {
+                1
+            };
+            n.remaining = (n.remaining + n.regen * nets).min(n.cap);
         }
         // A herd nobody has sown and nobody owns: what an army in the field
         // lives on. Fish are not forage — a spearman cannot net them.

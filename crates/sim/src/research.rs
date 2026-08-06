@@ -81,7 +81,7 @@ pub struct UpgradeDef {
 // which duly received Sharpened Blades and Plate Barding, while the Mangonel
 // matched nothing at all and never got an attack upgrade in its life.
 fn is_combatant(d: &UnitDef) -> bool {
-    !matches!(d.role, UnitRole::Worker | UnitRole::Support)
+    !matches!(d.role, UnitRole::Worker | UnitRole::Support | UnitRole::Boat)
 }
 fn is_ranged(d: &UnitDef) -> bool {
     matches!(d.role, UnitRole::Archer | UnitRole::HorseArcher)

@@ -24,7 +24,7 @@ fn kind_of(n: &ScatteredNode, seed: u32) -> &'static str {
         (ResourceType::Gold, y) if y < GOLD_YIELD => "placer",
         (ResourceType::Gold, _) => "gold-lode",
         (ResourceType::Food, _) => {
-            if is_coastal(seed, n.pos.x, n.pos.y) { "fishery" } else { "herds" }
+            if is_sailable(seed, n.pos.x.to_num::<i32>(), n.pos.y.to_num::<i32>()) { "fishery" } else { "herds" }
         }
     }
 }

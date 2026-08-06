@@ -9,7 +9,8 @@ use crate::components::{GameId, MatchId, Pos, Unit};
 use crate::{MatchStatuses, Tick, WorldConfig};
 use bevy_ecs::prelude::*;
 use saladin_sim::{
-    CELL_COUNT, CELL_SIZE, CELLS_PER_ROW, Fx, V2, WORLD_SIZE, cell_of, dist2, is_passable, unit_def,
+    CELL_COUNT, CELL_SIZE, CELLS_PER_ROW, Domain, Fx, V2, WORLD_SIZE, cell_of, dist2,
+    domain_passable, unit_def,
 };
 
 /// Push budget per pass — gentle nudges, not physics. A clump resolves over a
@@ -43,6 +44,7 @@ struct Snap {
     pos: V2,
     radius: Fx,
     engaged: bool,
+    dom: Domain,
 }
 
 #[derive(Resource, Default)]
@@ -82,12 +84,14 @@ pub fn separation(
         if u.garrisoned_in != 0 || (engaged && !spread_fighters) || !statuses.simulates(mid.0) {
             continue;
         }
+        let def = unit_def(u.kind);
         s.snaps.push(Snap {
             id: g.0,
             entity,
             pos: pos.pos,
-            radius: unit_def(u.kind).radius,
+            radius: def.radius,
             engaged,
+            dom: def.domain,
         });
     }
     s.snaps.sort_unstable_by_key(|x| x.id);
@@ -118,6 +122,14 @@ pub fn separation(
                         continue;
                     }
                     let b = &s.snaps[j];
+                    // A hull and a man on the beach beside it are a tile apart
+                    // and share no ground: shoving them off each other pushes
+                    // the column into the water and the barge onto the shingle,
+                    // and both landings are then refused, so the pair costs a
+                    // shove nobody receives.
+                    if a.dom != b.dom {
+                        continue;
+                    }
                     let min_sep = a.radius + b.radius;
                     let d2 = dist2(a.pos, b.pos);
                     if d2 >= min_sep * min_sep {
@@ -150,9 +162,9 @@ pub fn separation(
     // jams a crowd against its own dropoff and cost seed 12345 a fifth of its
     // haul rate.
     let world_max = Fx::from_num(WORLD_SIZE);
-    let free = |x: Fx, y: Fx| {
+    let free = |dom: Domain, x: Fx, y: Fx| {
         let (tx, ty) = (x.to_num::<i32>(), y.to_num::<i32>());
-        is_passable(seed, tx, ty) && !ground.blocked_tile(tx, ty)
+        domain_passable(seed, dom, tx, ty) && !ground.blocked_tile(tx, ty)
     };
     for (i, sn) in s.snaps.iter().enumerate() {
         let mut d = s.disp[i];
@@ -164,11 +176,11 @@ pub fn separation(
         d.y = d.y.clamp(-cap, cap);
         let nx = (sn.pos.x + d.x).clamp(Fx::ZERO, world_max);
         let ny = (sn.pos.y + d.y).clamp(Fx::ZERO, world_max);
-        let landed = if free(nx, ny) {
+        let landed = if free(sn.dom, nx, ny) {
             Some(V2::new(nx, ny))
-        } else if free(nx, sn.pos.y) {
+        } else if free(sn.dom, nx, sn.pos.y) {
             Some(V2::new(nx, sn.pos.y))
-        } else if free(sn.pos.x, ny) {
+        } else if free(sn.dom, sn.pos.x, ny) {
             Some(V2::new(sn.pos.x, ny))
         } else {
             None

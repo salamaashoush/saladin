@@ -32,7 +32,10 @@ struct SaveRow {
 /// old bytes as garbage (or EOF) rather than defaulting, and `#[serde(default)]`
 /// cannot save it. The magic+version header turns that into a clean refusal.
 pub const SAVE_MAGIC: u64 = 0x5361_6C61_4469_6E00;
-pub const SAVE_VERSION: u32 = 3;
+/// v4: UNIT_DEFS and BUILDING_DEFS grew (hulls, Harbour). No component gained a
+/// field — the point is that an old build must REFUSE a save carrying naval
+/// rows at the header rather than half-decode it into the wrong kinds.
+pub const SAVE_VERSION: u32 = 4;
 
 #[derive(Serialize, Deserialize)]
 pub struct SaveGame {

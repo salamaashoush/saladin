@@ -92,6 +92,129 @@ pub(crate) fn garrison(world: &mut World, owner: u64, unit: u64, building: u64) 
     }
 }
 
+/// Take a landing party aboard. The hold is `Unit::garrisoned_in` pointed at a
+/// hull, so a passenger leaves the field exactly the way a tower garrison does —
+/// and `carry_cargo` then keeps its `Pos` on the hull, which is what makes every
+/// other reader of a position (supply, foraging, desertion, the state hash) come
+/// out right without a special case anywhere.
+pub(crate) fn embark(world: &mut World, owner: u64, units: &[u64], boat: u64) {
+    let Some(be) = find_owned(world, owner, boat) else { return };
+    let cap = match world.get::<Unit>(be) {
+        Some(u) if u.garrisoned_in == 0 => unit_def(u.kind).cargo_cap,
+        _ => return,
+    };
+    if cap <= 0 {
+        return;
+    }
+    let Some(bpos) = world.get::<Pos>(be).map(|p| p.pos) else { return };
+    let mut aboard = occupant_count(world, boat);
+    let mut want: Vec<u64> = units.to_vec();
+    want.sort_unstable();
+    want.dedup();
+    for id in want {
+        if aboard >= cap {
+            break;
+        }
+        if id == boat {
+            continue;
+        }
+        let Some(ue) = find_owned(world, owner, id) else { continue };
+        // A hull is not freight. Nesting one would give `carry_cargo` a cycle to
+        // walk and the drowning pass a chain to follow.
+        let ok = match world.get::<Unit>(ue) {
+            Some(u) => u.garrisoned_in == 0 && unit_def(u.kind).domain == Domain::Land,
+            None => false,
+        };
+        if !ok {
+            continue;
+        }
+        let Some(upos) = world.get::<Pos>(ue).map(|p| p.pos) else { continue };
+        if dist(upos, bpos) > EMBARK_RANGE {
+            continue;
+        }
+        if let Some(mut pos) = world.get_mut::<Pos>(ue) {
+            pos.pos = bpos;
+        }
+        if let Some(mut u) = world.get_mut::<Unit>(ue) {
+            u.garrisoned_in = boat;
+            u.has_target = false;
+            u.path = vec![];
+            u.path_idx = 0;
+            u.attack_target = 0;
+            u.gather_state = GatherState::Idle;
+            u.target_node = 0;
+            u.job_site = 0;
+            u.home = bpos;
+        }
+        aboard += 1;
+    }
+}
+
+/// Put the party ashore. The landing is the legal land tile nearest `target`
+/// within `LANDING_REACH` of the hull — no harbour at the far end, which is what
+/// makes a beach a second front instead of a docking manoeuvre.
+pub(crate) fn disembark(world: &mut World, owner: u64, boat: u64, target: V2) {
+    let Some(be) = find_owned(world, owner, boat) else { return };
+    if world.get::<Unit>(be).is_none_or(|u| unit_def(u.kind).cargo_cap <= 0) {
+        return;
+    }
+    let Some(bpos) = world.get::<Pos>(be).map(|p| p.pos) else { return };
+    let riders = occupants_of(world, boat);
+    if riders.is_empty() {
+        return;
+    }
+    let Some(shore) = landing_spot(world, owner, bpos, target) else { return };
+    for e in riders {
+        if let Some(mut pos) = world.get_mut::<Pos>(e) {
+            pos.pos = shore;
+        }
+        if let Some(mut u) = world.get_mut::<Unit>(e) {
+            u.garrisoned_in = 0;
+            u.has_target = false;
+            u.path = vec![];
+            u.path_idx = 0;
+            u.attack_target = 0;
+            u.home = shore;
+        }
+    }
+}
+
+/// The land tile within `LANDING_REACH` of the hull that lies nearest `target`,
+/// ties broken by tile key. `nearest_passable_grid` alone would happily answer
+/// with the far side of a headland — a landing has to be off THIS hull.
+fn landing_spot(world: &mut World, owner: u64, from: V2, target: V2) -> Option<V2> {
+    let seed = world.resource::<WorldConfig>().seed;
+    let (occ, gates) = occupancy_and_gates(world, false);
+    let passable = |tx: i32, ty: i32| {
+        let k = tile_key(tx, ty);
+        is_passable(seed, tx, ty) && !occ.contains(&k) && !gate_blocks(&gates, k, owner)
+    };
+    let r = LANDING_REACH;
+    let reach2 = Fx::from_num(r) * Fx::from_num(r);
+    let (bx, by) = (from.x.to_num::<i32>(), from.y.to_num::<i32>());
+    let half = saladin_sim::fx!("0.5");
+    let mut best: Option<(Fx, i32, V2)> = None;
+    for dy in -r..=r {
+        for dx in -r..=r {
+            let (tx, ty) = (bx + dx, by + dy);
+            if !passable(tx, ty) {
+                continue;
+            }
+            let c = V2::new(Fx::from_num(tx) + half, Fx::from_num(ty) + half);
+            if dist2(from, c) > reach2 {
+                continue;
+            }
+            let d = dist2(c, target);
+            let k = tile_key(tx, ty);
+            match best {
+                Some((bd, bk, _)) if d > bd || (d == bd && k >= bk) => {}
+                _ => best = Some((d, k, c)),
+            }
+        }
+    }
+    best.map(|(_, _, c)| c)
+}
+
 /// Empty a structure: pop every occupant back onto the field at the host edge.
 pub(crate) fn ungarrison(world: &mut World, owner: u64, building: u64) {
     if find_owned(world, owner, building).is_none() {

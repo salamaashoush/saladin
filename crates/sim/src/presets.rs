@@ -19,6 +19,11 @@ pub struct MapBias {
     /// >0 multiplies the height field by a large-scale blob mask, shattering
     /// the single continent into islands (archipelago).
     pub island_gain: Fx,
+    /// Seat starts on EVERY sea-connected island big enough to hold one, instead
+    /// of snapping all eight onto the dominant landmass. Only true where the
+    /// generator makes islands on purpose: on a mainland preset the two rules
+    /// are the same rule, which is what keeps those maps bit-for-bit unchanged.
+    pub sea_starts: bool,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -37,6 +42,7 @@ pub const NEUTRAL_BIAS: MapBias = MapBias {
     cliff_gain: crate::fx!("1"),
     relief_gain: crate::fx!("1"),
     island_gain: crate::fx!("0"),
+    sea_starts: false,
 };
 
 pub const MAP_PRESETS: [MapPreset; 4] = [
@@ -58,6 +64,7 @@ pub const MAP_PRESETS: [MapPreset; 4] = [
             cliff_gain: crate::fx!("0.6"),
             relief_gain: crate::fx!("0.72"),
             island_gain: crate::fx!("0"),
+            sea_starts: false,
         },
     },
     MapPreset {
@@ -72,6 +79,7 @@ pub const MAP_PRESETS: [MapPreset; 4] = [
             cliff_gain: crate::fx!("1.7"),
             relief_gain: crate::fx!("1.95"),
             island_gain: crate::fx!("0"),
+            sea_starts: false,
         },
     },
     MapPreset {
@@ -86,6 +94,7 @@ pub const MAP_PRESETS: [MapPreset; 4] = [
             cliff_gain: crate::fx!("0.8"),
             relief_gain: crate::fx!("1.05"),
             island_gain: crate::fx!("1"),
+            sea_starts: true,
         },
     },
 ];

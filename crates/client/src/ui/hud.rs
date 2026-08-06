@@ -241,12 +241,13 @@ pub fn update_resource_bar(
         if o.0 != local.0 {
             continue;
         }
-        pop += 1;
+        pop += unit_def(u.kind).pop_cost;
         if u.kind == saladin_sim::UnitKind::Peasant {
             peasants += 1;
         }
-        // an Imam is in the army even though he never swings: role, not attack
-        if unit_def(u.kind).role != UnitRole::Worker {
+        // an Imam is in the army even though he never swings: role, not attack.
+        // A hull is not — it is shipping.
+        if !matches!(unit_def(u.kind).role, UnitRole::Worker | UnitRole::Boat) {
             soldiers += 1;
         }
     }
@@ -302,7 +303,7 @@ pub fn update_bottom_bar(
     // limit but satisfies no prereq, because an unfinished barracks trains
     // nothing. A build card that disagrees with the command is a UI lie.
     let mut owned: HashSet<BuildingKind> = HashSet::new();
-    let mut counts = [0i32; 16];
+    let mut counts = [0i32; BuildingKind::ALL.len()];
     for (o, b) in &q_buildings {
         if o.0 != local.0 {
             continue;
@@ -348,7 +349,7 @@ pub fn update_bottom_bar(
         (info.worst_ration * 100.0) as i32,
         p.faction,
         sb.crop,
-    );
+    ) + &format!("|{}/{}", info.aboard, info.berths);
     if digest.0 == key {
         return;
     }
@@ -404,6 +405,18 @@ fn farm_line(crop: &CropInfo) -> String {
 
 fn hands_line(crop: &CropInfo) -> (String, Color) {
     (farm_hands(crop.hands), if crop.hands == 0 { WARN } else { TEXT_DIM })
+}
+
+/// The hold of a selected ferry, and how to work it. A laden barge and an empty
+/// one were the same row on the card, and unloading is a right-click on nearby
+/// ground with nothing else to tell the player it is about to happen.
+fn cargo_lines(aboard: u32, berths: u32) -> (String, &'static str) {
+    let how = if aboard > 0 {
+        "Right-click near shore to land"
+    } else {
+        "Right-click the hull with men picked"
+    };
+    (format!("Aboard {aboard}/{berths}"), how)
 }
 
 fn crew_line(builders: i32) -> String {
@@ -597,6 +610,11 @@ fn build_command_card(
                         }
                     });
             }
+            if info.berths > 0 {
+                let (hold, how) = cargo_lines(info.aboard, info.berths);
+                line(c, &hold, 12.0, TEXT_DIM);
+                line(c, how, 11.0, TEXT_DIM);
+            }
             if info.short > 0 {
                 let pct = (info.worst_ration * 100.0) as i32;
                 line(c, &format!("On {pct}% rations   {} men", info.short), 12.0, WARN);
@@ -707,7 +725,7 @@ fn build_build_bar(
     assets: &UiAssets,
     p: &Player,
     owned: &HashSet<BuildingKind>,
-    counts: &[i32; 16],
+    counts: &[i32; BuildingKind::ALL.len()],
     rows: &[ResearchProgressRow],
     sel_building: &SelectedBuilding,
     tab: usize,
@@ -1394,6 +1412,18 @@ mod tests {
         for h in crate::input::HOTKEY_HELP {
             assert!(h.0.is_ascii() && h.1.is_ascii(), "{h:?}");
         }
+        // the ferry hold, over every capacity the roster can actually offer
+        for k in UnitKind::ALL {
+            let cap = unit_def(*k).cargo_cap;
+            if cap <= 0 {
+                continue;
+            }
+            for aboard in 0..=cap as u32 {
+                let (hold, how) = cargo_lines(aboard, cap as u32);
+                assert!(hold.is_ascii() && how.is_ascii(), "{hold:?} {how:?}");
+                assert!(hold.len() <= MAX_CHARS && how.len() <= MAX_CHARS, "{hold:?} {how:?}");
+            }
+        }
         // the farm card is generated from live sim numbers, so it is generated
         // over the whole range the sim can hand it
         for cap in [saladin_sim::FARM_CAP_MIN, 102, saladin_sim::FARM_CAP_MAX] {
@@ -1542,7 +1572,7 @@ mod tests {
     #[test]
     fn a_locked_build_card_still_shows_its_price() {
         let broke = Stockpile::default();
-        let rows = build_panel_state(3, &HashSet::new(), &[0i32; 16], &broke);
+        let rows = build_panel_state(3, &HashSet::new(), &[0i32; BuildingKind::ALL.len()], &broke);
         assert!(!rows.is_empty());
         for r in rows {
             let price = price_line(&r.cost, r.build_time);

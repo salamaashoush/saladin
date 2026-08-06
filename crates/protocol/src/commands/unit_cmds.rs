@@ -4,28 +4,53 @@ use crate::{GameIndex, PathScratch, WorldConfig};
 use bevy_ecs::prelude::*;
 use saladin_sim::*;
 
+/// What one tile costs the mover. Open water is flat: there is no naval
+/// move-cost grid, and the flat cost is what keeps A*'s straight-line fast path
+/// — which IS the common case for a hop that never leaves the bay.
+fn step_cost(seed: u32, dom: Domain) -> impl Fn(i32, i32) -> Fx {
+    move |tx: i32, ty: i32| match dom {
+        Domain::Land => move_cost_at(seed, tx, ty),
+        Domain::Sea => Fx::ONE,
+    }
+}
+
 /// A* path from `from` to `to` over terrain + building occupancy, as `viewer`
 /// sees it — a gatehouse is a door for its owner and a wall for everyone else.
 /// Shared by the AI brain's army-move / recall logic.
-pub fn path_to(world: &mut World, viewer: u64, from: V2, to: V2) -> Vec<V2> {
+///
+/// `dom` is the MOVER's domain and it is chosen here, at the closure, and
+/// nowhere else: `movement` walks whatever path it is handed with no terrain
+/// test at all, so a wrong-domain closure does not fail a pathfind — it drives
+/// a boat inland.
+pub fn path_to(world: &mut World, viewer: u64, dom: Domain, from: V2, to: V2) -> Vec<V2> {
     let seed = world.resource::<WorldConfig>().seed;
     let (occ, gates) = occupancy_and_gates(world, false);
     let passable = |tx: i32, ty: i32| {
         let k = tile_key(tx, ty);
-        is_passable(seed, tx, ty) && !occ.contains(&k) && !gate_blocks(&gates, k, viewer)
+        domain_passable(seed, dom, tx, ty) && !occ.contains(&k) && !gate_blocks(&gates, k, viewer)
     };
-    let cost = |tx: i32, ty: i32| move_cost_at(seed, tx, ty);
+    let cost = step_cost(seed, dom);
     let mut scratch = world.resource_mut::<PathScratch>();
-    scratch.0.find_path_costed(&passable, &cost, from.x, from.y, to.x, to.y, MAX_EXPANSIONS)
+    scratch.0.find_path_costed_in(
+        &passable,
+        &cost,
+        from.x,
+        from.y,
+        to.x,
+        to.y,
+        MAX_EXPANSIONS,
+        dom.smoothing(),
+    )
 }
 
 /// Manual move order: cancels gathering and combat pursuit, re-homes the unit at
 /// the destination (so Defensive stance leashes there).
 pub(crate) fn move_unit(world: &mut World, owner: u64, unit: u64, target: V2) {
     let Some(e) = find_owned(world, owner, unit) else { return };
-    if world.get::<Unit>(e).is_none_or(|u| u.garrisoned_in != 0) {
-        return;
-    }
+    let dom = match world.get::<Unit>(e) {
+        Some(u) if u.garrisoned_in == 0 => unit_def(u.kind).domain,
+        _ => return,
+    };
     let target = V2::new(clamp_world(target.x), clamp_world(target.y));
     let from = world.get::<Pos>(e).map(|p| p.pos);
     let Some(from) = from else { return };
@@ -33,12 +58,35 @@ pub(crate) fn move_unit(world: &mut World, owner: u64, unit: u64, target: V2) {
     let (occ, gates) = occupancy_and_gates(world, false);
     let passable = |tx: i32, ty: i32| {
         let k = tile_key(tx, ty);
-        is_passable(seed, tx, ty) && !occ.contains(&k) && !gate_blocks(&gates, k, owner)
+        domain_passable(seed, dom, tx, ty) && !occ.contains(&k) && !gate_blocks(&gates, k, owner)
     };
-    let cost = |tx: i32, ty: i32| move_cost_at(seed, tx, ty);
+    let cost = step_cost(seed, dom);
+    // The order lands on ground the mover can STAND on, in either domain — a
+    // click on the beach steers a boat to the water beside it, and a click on
+    // the water walks a man to the shore, which is what `lay_march` has always
+    // done with a group. Snapping is not a nicety: `find_path_costed` snaps only
+    // the SEARCH and hands back the raw target as its last waypoint, so an order
+    // onto water used to walk a column into the sea and leave it standing there
+    // — MEASURED, five Spearmen mustered onto a harbour berth and drowned-in-
+    // place for the rest of the match, because `movement` walks whatever it is
+    // handed and never tests the ground.
+    let target = if passable(target.x.to_num::<i32>(), target.y.to_num::<i32>()) {
+        target
+    } else {
+        nearest_passable_grid(&passable, target.x, target.y)
+    };
     let path = {
         let mut scratch = world.resource_mut::<PathScratch>();
-        scratch.0.find_path_costed(&passable, &cost, from.x, from.y, target.x, target.y, MAX_EXPANSIONS)
+        scratch.0.find_path_costed_in(
+            &passable,
+            &cost,
+            from.x,
+            from.y,
+            target.x,
+            target.y,
+            MAX_EXPANSIONS,
+            dom.smoothing(),
+        )
     };
     if let Some(mut u) = world.get_mut::<Unit>(e) {
         u.gather_state = GatherState::Idle;
@@ -87,20 +135,29 @@ pub(crate) fn gather(world: &mut World, owner: u64, unit: u64, node: u64) {
         Some(u) if u.garrisoned_in == 0 => u.kind,
         _ => return,
     };
-    if unit_def(kind).carry <= 0 {
+    let def = unit_def(kind);
+    // A barge is a hold, not a pair of hands: it ferries and it does not work.
+    if def.carry == 0 {
         return;
     }
+    let seed = world.resource::<WorldConfig>().seed;
     // Owner is OPTIONAL: a wild herd belongs to nobody, and a query that demands
     // one refuses every rock and tree on the map.
     let row = {
         let mut q = world
-            .query::<(&GameId, &ResourceNode, Option<&Owner>, Option<&FieldOf>, Option<&Crop>)>();
-        q.iter(world).find(|(g, _, _, _, _)| g.0 == node).map(|(_, n, o, f, c)| {
+            .query::<(&GameId, &Pos, &ResourceNode, Option<&Owner>, Option<&FieldOf>, Option<&Crop>)>();
+        q.iter(world).find(|(g, _, _, _, _, _)| g.0 == node).map(|(_, p, n, o, f, c)| {
             let mine = o.is_some_and(|o| o.0 == owner);
-            (f.filter(|_| mine).map(|f| f.0), reapable(n, f.is_some(), c))
+            (p.pos, f.filter(|_| mine).map(|f| f.0), reapable(n, f.is_some(), c))
         })
     };
-    let Some((own_farm, cut)) = row else { return };
+    let Some((npos, own_farm, cut)) = row else { return };
+    // A fishery is worked from a boat and a seam from the shore. A click that
+    // does nothing is worse than a wrong one, but so is one that walks a peasant
+    // to the water's edge to stand there.
+    if crate::systems::node_domain(seed, npos) != def.domain {
+        return;
+    }
     if let Some(farm) = own_farm
         && !cut
     {
@@ -168,7 +225,7 @@ pub(crate) fn assign_idle_gatherers(world: &mut World, owner: u64, prefer: Optio
     let Some(match_id) = player_match(world, owner) else { return };
     // GameId order, never ECS iteration order: the balanced round-robin below
     // indexes by position, so the walk order decides who digs what.
-    let mut idle: Vec<(u64, Entity, V2)> = {
+    let mut idle: Vec<(u64, Entity, V2, Domain)> = {
         let mut q = world.query::<(Entity, &GameId, &Owner, &Pos, &Unit)>();
         q.iter(world)
             .filter(|(_, _, o, _, u)| {
@@ -177,13 +234,13 @@ pub(crate) fn assign_idle_gatherers(world: &mut World, owner: u64, prefer: Optio
                     && u.gather_state == GatherState::Idle
                     && unit_def(u.kind).carry > 0
             })
-            .map(|(e, g, _, p, _)| (g.0, e, p.pos))
+            .map(|(e, g, _, p, u)| (g.0, e, p.pos, unit_def(u.kind).domain))
             .collect()
     };
     if idle.is_empty() {
         return;
     }
-    idle.sort_unstable_by_key(|(g, _, _)| *g);
+    idle.sort_unstable_by_key(|(g, _, _, _)| *g);
     let mut load: bevy_platform::collections::HashMap<u64, i32> = Default::default();
     {
         let mut q = world.query::<(&Owner, &Unit)>();
@@ -195,12 +252,12 @@ pub(crate) fn assign_idle_gatherers(world: &mut World, owner: u64, prefer: Optio
     }
     // A growing crop is not work: the balancer must never send a hand to stand in
     // a field that is not in, or a whole town walks to the farms and waits.
-    let nodes: Vec<(u64, V2, ResourceType)> = {
+    let nodes: Vec<(u64, V2, ResourceType, Domain)> = {
         let mut q =
             world.query::<(&GameId, &Pos, &ResourceNode, &MatchId, Option<&FieldOf>, Option<&Crop>)>();
         q.iter(world)
             .filter(|(_, _, n, m, f, c)| m.0 == match_id && reapable(n, f.is_some(), *c))
-            .map(|(g, p, n, _, _, _)| (g.0, p.pos, n.res_type))
+            .map(|(g, p, n, _, _, _)| (g.0, p.pos, n.res_type, crate::systems::node_domain(seed, p.pos)))
             .collect()
     };
     if nodes.is_empty() {
@@ -208,7 +265,7 @@ pub(crate) fn assign_idle_gatherers(world: &mut World, owner: u64, prefer: Optio
     }
     let available: Vec<ResourceType> = {
         let mut s = Vec::new();
-        for (_, _, rt) in &nodes {
+        for (_, _, rt, _) in &nodes {
             if !s.contains(rt) {
                 s.push(*rt);
             }
@@ -222,7 +279,7 @@ pub(crate) fn assign_idle_gatherers(world: &mut World, owner: u64, prefer: Optio
     // timber ran out.
     let committed: Vec<ResourceType> = {
         let by_node: bevy_platform::collections::HashMap<u64, ResourceType> =
-            nodes.iter().map(|(id, _, rt)| (*id, *rt)).collect();
+            nodes.iter().map(|(id, _, rt, _)| (*id, *rt)).collect();
         let mut q = world.query::<(&Owner, &Unit)>();
         q.iter(world)
             .filter(|(o, u)| o.0 == owner && u.gather_state != GatherState::Idle)
@@ -252,12 +309,15 @@ pub(crate) fn assign_idle_gatherers(world: &mut World, owner: u64, prefer: Optio
         q.iter(world).map(|(g, f)| (g.0, sizes.get(&f.0).copied().unwrap_or(1))).collect()
     };
     let (occ, gates) = occupancy_and_gates(world, false);
-    let passable = |tx: i32, ty: i32| {
-        let k = tile_key(tx, ty);
-        is_passable(seed, tx, ty) && !occ.contains(&k) && !gate_blocks(&gates, k, owner)
-    };
     let mut flood = world.remove_resource::<crate::PathScratch>();
-    for (_, e, pos) in idle.iter() {
+    for (_, e, pos, dom) in idle.iter() {
+        let dom = *dom;
+        let passable = |tx: i32, ty: i32| {
+            let k = tile_key(tx, ty);
+            domain_passable(seed, dom, tx, ty)
+                && !occ.contains(&k)
+                && !gate_blocks(&gates, k, owner)
+        };
         if let Some(s) = flood.as_mut() {
             s.1.explore(&passable, *pos, MAX_EXPANSIONS);
         }
@@ -268,11 +328,20 @@ pub(crate) fn assign_idle_gatherers(world: &mut World, owner: u64, prefer: Optio
         let mut best: Option<u64> = None;
         let mut bd = Fx::MAX;
         for pass in 0..2 {
-            for (id, p, rt) in &nodes {
+            for (id, p, rt, ndom) in &nodes {
+                // A skiff is only ever offered water and a peasant is never
+                // offered any: the domain gate is the whole statement of the
+                // design, and it belongs anywhere a node is handed to a mover.
+                if *ndom != dom {
+                    continue;
+                }
                 if pass == 0 && prefer.is_some_and(|w| w != *rt) {
                     continue;
                 }
-                if !node_reachable(seed, *pos, *p) {
+                if !match dom {
+                    Domain::Land => node_reachable(seed, *pos, *p),
+                    Domain::Sea => sea_reachable(seed, *pos, *p),
+                } {
                     continue;
                 }
                 if let Some(s) = flood.as_ref() {
@@ -304,7 +373,8 @@ pub(crate) fn assign_idle_gatherers(world: &mut World, owner: u64, prefer: Optio
                 u.has_target = false;
                 u.order = ORDER_NONE;
                 *load.entry(node).or_insert(0) += 1;
-                let taken = nodes.iter().find(|(id, _, _)| *id == node).map(|(_, _, rt)| *rt);
+                let taken =
+                    nodes.iter().find(|(id, _, _, _)| *id == node).map(|(_, _, rt, _)| *rt);
                 if let Some(slot) =
                     taken.and_then(|rt| have.iter_mut().find(|(t, _, _)| *t == rt))
                 {
@@ -459,6 +529,7 @@ fn untangle(members: &[Member], slots: &mut [(u64, V2)]) {
 fn lay_march(
     world: &mut World,
     owner: u64,
+    dom: Domain,
     members: &[Member],
     target: V2,
     shape: Option<FormationShape>,
@@ -470,10 +541,21 @@ fn lay_march(
     let (occ, gates) = occupancy_and_gates(world, false);
     let passable = |tx: i32, ty: i32| {
         let k = tile_key(tx, ty);
-        is_passable(seed, tx, ty) && !occ.contains(&k) && !gate_blocks(&gates, k, owner)
+        domain_passable(seed, dom, tx, ty) && !occ.contains(&k) && !gate_blocks(&gates, k, owner)
     };
-    let cost = |tx: i32, ty: i32| move_cost_at(seed, tx, ty);
+    let cost = step_cost(seed, dom);
     let free = |p: V2| passable(p.x.to_num::<i32>(), p.y.to_num::<i32>());
+    // Whether a mover may be sent down a straight leg. A man is measured with
+    // the sampled line every land march in the game has always used — shaving
+    // the corner of a wall for a tenth of a tile is invisible. A hull cannot be:
+    // that tenth of a tile is a boat on a hillside, and a corner clip is exactly
+    // what fits between two samples. So the sea is measured with the same exact
+    // DDA the string-puller inside A* already uses, and a leg it refuses is not
+    // walked at all.
+    let leg_ok = |a: V2, b: V2| match dom {
+        Domain::Land => line_of_sight(&passable, a, b),
+        Domain::Sea => clear_straight_line(&passable, a, b),
+    };
 
     let raw = V2::new(clamp_world(target.x), clamp_world(target.y));
     // an order dropped on water or on a roof left the whole group walking at a
@@ -508,7 +590,16 @@ fn lay_march(
     };
     let route = {
         let mut scratch = world.resource_mut::<PathScratch>();
-        scratch.0.find_path_costed(&passable, &cost, centroid.x, centroid.y, dest.x, dest.y, cap)
+        scratch.0.find_path_costed_in(
+            &passable,
+            &cost,
+            centroid.x,
+            centroid.y,
+            dest.x,
+            dest.y,
+            cap,
+            dom.smoothing(),
+        )
     };
 
     let mut slots: Vec<(u64, V2)> = Vec::with_capacity(members.len());
@@ -542,11 +633,7 @@ fn lay_march(
             near.clear();
             near.extend((0..route.len()).map(|i| (dist2(m.pos, route[i]), i)));
             near.sort_unstable_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
-            match near
-                .iter()
-                .take(JOIN_PROBES)
-                .find(|(_, i)| line_of_sight(&passable, m.pos, route[*i]))
-            {
+            match near.iter().take(JOIN_PROBES).find(|(_, i)| leg_ok(m.pos, route[*i])) {
                 // the men already ahead never walk back to the centre, and a
                 // stray on the wrong side of a wall never cuts through it
                 Some((_, j)) if *j < tail => path.extend_from_slice(&route[*j..tail]),
@@ -554,8 +641,12 @@ fn lay_march(
                 None => walks = false,
             }
         }
-        if walks {
+        // The last leg — route corner to formation slot — is the one A* never
+        // string-pulled, so it is the one a hull can sail across a spit on.
+        if walks && (dom == Domain::Land || leg_ok(path.last().copied().unwrap_or(m.pos), slot)) {
             path.push(slot);
+        } else if walks && path.is_empty() {
+            walks = false;
         }
         let Some(mut u) = world.get_mut::<Unit>(m.e) else { continue };
         u.gather_state = GatherState::Idle;
@@ -581,6 +672,23 @@ fn lay_march(
     }
 }
 
+/// One click can hold a column and a fleet at once. They march on SEPARATE
+/// routes because they cross separate ground — a shared A* would snap the whole
+/// selection onto whichever domain the destination happens to sit in, and half
+/// of it would then be handed a path over ground it can never enter.
+fn by_domain(members: Vec<Member>) -> Vec<(Domain, Vec<Member>)> {
+    let (mut land, mut sea): (Vec<Member>, Vec<Member>) =
+        members.into_iter().partition(|m| unit_def(m.kind).domain == Domain::Land);
+    let mut out = Vec::with_capacity(2);
+    if !land.is_empty() {
+        out.push((Domain::Land, std::mem::take(&mut land)));
+    }
+    if !sea.is_empty() {
+        out.push((Domain::Sea, std::mem::take(&mut sea)));
+    }
+    out
+}
+
 pub(crate) fn group_move(
     world: &mut World,
     owner: u64,
@@ -589,12 +697,10 @@ pub(crate) fn group_move(
     formation: u8,
     budget: &mut usize,
 ) {
-    let members = resolve_group(world, owner, ids);
-    if members.is_empty() {
-        return;
-    }
     let shape = FormationShape::from_u8(formation);
-    lay_march(world, owner, &members, target, shape, ORDER_MOVE, 0, budget);
+    for (dom, group) in by_domain(resolve_group(world, owner, ids)) {
+        lay_march(world, owner, dom, &group, target, shape, ORDER_MOVE, 0, budget);
+    }
 }
 
 /// March, but fight what turns up on the way. The march RESUMES when whatever
@@ -608,12 +714,10 @@ pub(crate) fn attack_move(
     formation: u8,
     budget: &mut usize,
 ) {
-    let members = resolve_group(world, owner, ids);
-    if members.is_empty() {
-        return;
-    }
     let shape = FormationShape::from_u8(formation);
-    lay_march(world, owner, &members, target, shape, ORDER_ATTACK_MOVE, 0, budget);
+    for (dom, group) in by_domain(resolve_group(world, owner, ids)) {
+        lay_march(world, owner, dom, &group, target, shape, ORDER_ATTACK_MOVE, 0, budget);
+    }
 }
 
 pub(crate) fn group_attack(
@@ -632,7 +736,9 @@ pub(crate) fn group_attack(
         q.iter(world).find(|(g, o, _)| g.0 == target && o.0 != owner).map(|(_, _, p)| p.pos)
     };
     let Some(tpos) = tpos else { return };
-    lay_march(world, owner, &members, tpos, None, ORDER_ATTACK, target, budget);
+    for (dom, group) in by_domain(members) {
+        lay_march(world, owner, dom, &group, tpos, None, ORDER_ATTACK, target, budget);
+    }
 }
 
 /// Halt: path, pursuit, gathering and building labour all released at once.

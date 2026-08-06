@@ -5,7 +5,9 @@ use bevy_app::prelude::*;
 use saladin_protocol::*;
 use saladin_sim::{
     AiDifficulty, BuildingKind, Faction, Fx, ResourceType, Stance, Stockpile,
-    UnitKind, V2, ZERO, building_def, compose_seed, operational, unit_def,
+    UnitKind, V2, WORLD_SIZE, ZERO, berth_of, building_def, check_place, compose_seed, dist,
+    find_keep_site, is_buildable_tile, is_sailable, node_reachable, operational, region_at,
+    unit_def,
 };
 
 fn build() -> App {
@@ -943,4 +945,349 @@ fn a_farming_bot_stays_in_lockstep() {
     };
     assert!(!fields.is_empty(), "no field was ever sown, so lockstep proved little");
     assert!(staffed >= 1, "no hand was ever in a field, so the labour path never ran");
+}
+
+// ── the sea ──────────────────────────────────────────────────────────────────
+
+/// Preset 3 is the Archipelago, and on it the first two spawn slots land on
+/// different islands more often than not — which is exactly the match the land
+/// AI could never finish.
+const ISLE: u8 = 3;
+
+/// A base seed whose slots 0 and 1 are on separate landmasses, so a crossing is
+/// the only way one bot ever reaches the other.
+fn split_seed(base: u32) -> u32 {
+    let seed = compose_seed(base, ISLE);
+    let a = find_keep_site(seed, 0, 2);
+    let b = find_keep_site(seed, 1, 2);
+    assert_ne!(
+        region_at(seed, a.x, a.y),
+        region_at(seed, b.x, b.y),
+        "base {base} no longer seats the first two starts on different islands"
+    );
+    seed
+}
+
+fn warchest(app: &mut App, amount: i32) {
+    let world = app.world_mut();
+    let mut q = world.query::<&mut Player>();
+    for mut p in q.iter_mut(world) {
+        p.stock = Stockpile { wood: amount, stone: amount, food: amount, gold: amount };
+    }
+}
+
+fn add_ai(app: &mut App, id: u64, faction: Faction, difficulty: AiDifficulty) {
+    cmd(app, PlayerCommand::AddAi { player_id: id, host: 1, difficulty, faction, match_id: 1 });
+}
+
+/// The first legal waterside site out from the keep — where a Fishing Hut used
+/// to go, because the anchor for every unremarkable building is the keep and the
+/// hut was never given one of its own.
+fn keep_anchored_shore(seed: u32, keep: V2) -> Option<V2> {
+    let (cx, cy) = (keep.x.to_num::<i32>(), keep.y.to_num::<i32>());
+    let half = saladin_sim::fx!("0.5");
+    for r in 0..=20i32 {
+        for dy in -r..=r {
+            for dx in -r..=r {
+                if dx.abs().max(dy.abs()) != r {
+                    continue;
+                }
+                let (tx, ty) = (cx + dx, cy + dy);
+                if tx < 0 || ty < 0 || tx >= WORLD_SIZE || ty >= WORLD_SIZE {
+                    continue;
+                }
+                if !is_buildable_tile(seed, tx, ty) {
+                    continue;
+                }
+                if [(1, 0), (-1, 0), (0, 1), (0, -1)]
+                    .iter()
+                    .any(|(ox, oy)| is_sailable(seed, tx + ox, ty + oy))
+                {
+                    return Some(V2::new(Fx::from_num(tx) + half, Fx::from_num(ty) + half));
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Fisheries inside a Fishing Hut's aura at `at` — what its `harvest_mult` and
+/// its restock actually reach, and therefore what the 40 wood buys.
+fn fish_in_aura(app: &mut App, seed: u32, at: V2) -> usize {
+    let world = app.world_mut();
+    let mut q = world.query::<(&Pos, &ResourceNode)>();
+    q.iter(world)
+        .filter(|(p, n)| {
+            n.res_type == ResourceType::Food
+                && is_sailable(seed, p.pos.x.to_num::<i32>(), p.pos.y.to_num::<i32>())
+                && dist(p.pos, at) <= saladin_sim::FISHING_HUT_RANGE
+        })
+        .count()
+}
+
+fn owned_building(app: &mut App, owner: u64, kind: BuildingKind) -> Option<(u64, V2)> {
+    let world = app.world_mut();
+    let mut q = world.query::<(&GameId, &Pos, &Owner, &Building)>();
+    q.iter(world)
+        .filter(|(_, _, o, b)| o.0 == owner && b.kind == kind && operational(b.state))
+        .map(|(g, p, _, _)| (g.0, p.pos))
+        .min_by_key(|(id, _)| *id)
+}
+
+/// A Fishing Hut's ONE working function is being a drop-off beside the fish, and
+/// its aura is what doubles the catch and restocks the school. It was anchored
+/// on the Keep — the single place in the town where a food drop-off is worth
+/// nothing, because the Keep already accepts food.
+///
+/// Measured on this fixture before the anchor existed: the keep-anchored site
+/// has NO fishery in reach at all.
+#[test]
+fn a_bot_sites_its_fishing_hut_at_the_fish_and_not_beside_its_keep() {
+    let seed = split_seed(4);
+    let mut app = build_on(seed);
+    add_ai(&mut app, 1000, Faction::Crusader, AiDifficulty::Hard);
+    step(app.world_mut());
+    warchest(&mut app, 6000);
+
+    let keep = keep_pos_of(&mut app, 1000);
+    let mut hut = None;
+    for _ in 0..12_000 {
+        step(app.world_mut());
+        if let Some(h) = owned_building(&mut app, 1000, BuildingKind::FishingHut) {
+            hut = Some(h.1);
+            break;
+        }
+    }
+    let hut = hut.expect("a Hard bot on a coast with fish in it never founded a Fishing Hut");
+    let old = keep_anchored_shore(seed, keep).expect("this coast has a legal waterside site");
+    let (now, before) = (fish_in_aura(&mut app, seed, hut), fish_in_aura(&mut app, seed, old));
+    assert!(
+        now > before,
+        "the hut went up with {now} fisheries in reach where the keep anchor had {before}"
+    );
+    assert!(now > 0, "a hut with nothing in its aura is a Storehouse with three fewer resources");
+}
+
+/// A hut with no hull nets nothing: the skiff is the only hand in the game that
+/// can work a fishery. And the fleet stops at the fish — a fourth boat over
+/// three schools is 30 wood of queue.
+#[test]
+fn a_bot_launches_the_boats_its_hut_is_for() {
+    let mut app = build_on(split_seed(4));
+    add_ai(&mut app, 1000, Faction::Crusader, AiDifficulty::Hard);
+    step(app.world_mut());
+    warchest(&mut app, 6000);
+
+    let mut most = 0;
+    let mut had_hut = false;
+    for _ in 0..12_000 {
+        step(app.world_mut());
+        let world = app.world_mut();
+        let mut q = world.query::<(&Owner, &Unit)>();
+        most = most.max(
+            q.iter(world)
+                .filter(|(o, u)| o.0 == 1000 && u.kind == UnitKind::FishingSkiff)
+                .count(),
+        );
+        had_hut |= owned_building(&mut app, 1000, BuildingKind::FishingHut).is_some();
+        if most >= 3 {
+            break;
+        }
+    }
+    assert!(had_hut, "no hut was ever raised, so this proved nothing about its boats");
+    assert!(most >= 1, "the bot paid 40 wood for a hut and never launched a boat off it");
+    assert!(
+        most as i32 <= saladin_sim::ai_profile(AiDifficulty::Hard).skiff_target,
+        "the bot launched {most} hulls over a target of {}",
+        saladin_sim::ai_profile(AiDifficulty::Hard).skiff_target
+    );
+}
+
+/// Stand a bot up on an island map with a finished Harbour, a Barge at its
+/// berth and a wave to carry — the state the build ladder reaches on its own in
+/// about fifteen minutes, without spending fifteen minutes of test time on it.
+fn island_invasion_world(base: u32) -> (App, u32, V2) {
+    let seed = split_seed(base);
+    let mut app = build_on(seed);
+    add_ai(&mut app, 1, Faction::Ayyubid, AiDifficulty::Hard);
+    add_ai(&mut app, 2, Faction::Crusader, AiDifficulty::Hard);
+    step(app.world_mut());
+    warchest(&mut app, 8000);
+
+    let keep = keep_pos_of(&mut app, 1);
+    // A Harbour needs a berth on the main body of water, so the site is found
+    // with the SAME rule set the command would apply.
+    let def = building_def(BuildingKind::Harbour);
+    let half = saladin_sim::fx!("0.5");
+    let (cx, cy) = (keep.x.to_num::<i32>(), keep.y.to_num::<i32>());
+    let mut site = None;
+    'find: for r in 2..=22i32 {
+        for dy in -r..=r {
+            for dx in -r..=r {
+                if dx.abs().max(dy.abs()) != r {
+                    continue;
+                }
+                let p = V2::new(Fx::from_num(cx + dx) + half, Fx::from_num(cy + dy) + half);
+                if check_place(seed, BuildingKind::Harbour, p.x, p.y, |_, _| false, &[keep]).is_ok()
+                {
+                    site = Some(p);
+                    break 'find;
+                }
+            }
+        }
+    }
+    let site = site.expect("an island start with no legal harbour site at all");
+    app.world_mut().spawn((
+        GameId(9000),
+        Owner(1),
+        MatchId(1),
+        Pos { pos: site, facing: ZERO },
+        Building::new(BuildingKind::Harbour, def.max_hp, site),
+    ));
+    let berth = berth_of(seed, def.footprint, site).expect("a placed harbour has a berth");
+    for i in 0..2u64 {
+        app.world_mut().spawn((
+            GameId(9100 + i),
+            Owner(1),
+            MatchId(1),
+            Pos { pos: berth, facing: ZERO },
+            Unit {
+                speed: unit_def(UnitKind::Barge).speed,
+                hp: unit_def(UnitKind::Barge).max_hp,
+                ..Unit::new(UnitKind::Barge, berth)
+            },
+        ));
+    }
+    // a wave to carry, standing in the town
+    for i in 0..10u64 {
+        let p = V2::new(keep.x + Fx::from_num(2 + (i % 4) as i32), keep.y + Fx::from_num(i as i32 / 4));
+        spawn_unit_row(&mut app, 9200 + i, 1, UnitKind::Spearman, p, Stance::Aggressive);
+    }
+    (app, seed, keep)
+}
+
+/// THE test this whole area exists for. Two bots on two islands: before a hull
+/// could carry men there was no order either of them could give that ended the
+/// match, and the land assault path spent a full A* budget every second on a
+/// keep it could never walk to.
+#[test]
+fn an_island_bot_ferries_an_army_onto_the_enemy_shore() {
+    let (mut app, seed, keep) = island_invasion_world(2);
+    let home = region_at(seed, keep.x, keep.y);
+    let enemy_keep = keep_pos_of(&mut app, 2);
+    assert!(
+        !node_reachable(seed, keep, enemy_keep),
+        "the fixture must put the enemy across water or it tests nothing"
+    );
+    let enemy_isle = region_at(seed, enemy_keep.x, enemy_keep.y);
+
+    let mut ever_aboard = 0;
+    let mut ashore = 0;
+    for _ in 0..20_000 {
+        step(app.world_mut());
+        let world = app.world_mut();
+        let mut q = world.query::<(&GameId, &Owner, &Pos, &Unit)>();
+        let rows: Vec<(u64, u64, V2, UnitKind, u64)> =
+            q.iter(world).map(|(g, o, p, u)| (g.0, o.0, p.pos, u.kind, u.garrisoned_in)).collect();
+        ever_aboard = ever_aboard.max(
+            rows.iter()
+                .filter(|(_, o, _, _, host)| {
+                    *o == 1 && rows.iter().any(|(g, _, _, k, _)| g == host && *k == UnitKind::Barge)
+                })
+                .count(),
+        );
+        ashore = rows
+            .iter()
+            .filter(|(_, o, p, k, host)| {
+                *o == 1
+                    && *host == 0
+                    && unit_def(*k).attack > 0
+                    && node_reachable(seed, *p, enemy_keep)
+            })
+            .count();
+        if ashore >= 3 {
+            break;
+        }
+    }
+    assert!(ever_aboard > 0, "no soldier ever boarded: the ferry never loaded");
+    assert!(ashore >= 3, "only {ashore} men reached the enemy island");
+    assert_ne!(home, enemy_isle, "the two islands must be different or nothing crossed");
+}
+
+/// The crossing writes sim state through commands — `garrisoned_in` on the way
+/// aboard, `Pos` on the way ashore — off a snapshot walk. Two worlds, hashes
+/// read EVERY tick, over load, cross and landing.
+#[test]
+fn a_ferrying_bot_stays_in_lockstep() {
+    let (mut a, _, _) = island_invasion_world(2);
+    let (mut b, _, _) = island_invasion_world(2);
+    for i in 0..3_000 {
+        step(a.world_mut());
+        step(b.world_mut());
+        assert_eq!(
+            a.world().resource::<StateHash>().0,
+            b.world().resource::<StateHash>().0,
+            "ferrying worlds diverged at tick {i}"
+        );
+    }
+    // and the run actually put men on a hull, or lockstep proved nothing
+    let world = a.world_mut();
+    let mut q = world.query::<(&GameId, &Unit)>();
+    let rows: Vec<(u64, UnitKind, u64)> = q.iter(world).map(|(g, u)| (g.0, u.kind, u.garrisoned_in)).collect();
+    let carried = rows
+        .iter()
+        .filter(|(_, _, host)| {
+            *host != 0 && rows.iter().any(|(g, k, _)| g == host && *k == UnitKind::Barge)
+        })
+        .count();
+    let landed = {
+        let mut q = world.query::<(&Owner, &Pos, &Unit)>();
+        q.iter(world).filter(|(o, _, u)| o.0 == 1 && u.garrisoned_in == 0 && unit_def(u.kind).attack > 0).count()
+    };
+    assert!(carried > 0 || landed > 0, "nothing was ever ferried, so the hashes covered nothing");
+}
+
+/// A waterside site is refused for reasons that PASS — a peasant standing on the
+/// one legal tile — as often as for reasons that do not, and the old code
+/// latched a single refusal for the whole match. It is a cooldown now: while it
+/// runs the bot spends its wood elsewhere, and when it lapses it asks again.
+#[test]
+fn a_refused_shoreline_comes_back() {
+    let seed = split_seed(4);
+    let mut app = build_on(seed);
+    add_ai(&mut app, 1000, Faction::Crusader, AiDifficulty::Hard);
+    step(app.world_mut());
+    warchest(&mut app, 6000);
+
+    // hold the cooldown down: the bot must not found one while it runs
+    for _ in 0..4_000 {
+        {
+            let world = app.world_mut();
+            let mut q = world.query::<&mut Bot>();
+            for mut b in q.iter_mut(world) {
+                b.waterside_cd = saladin_sim::fx!("45");
+            }
+        }
+        step(app.world_mut());
+        assert!(
+            owned_building(&mut app, 1000, BuildingKind::FishingHut).is_none(),
+            "the cooldown did not suppress the rung it is for"
+        );
+    }
+    // let it lapse: the rung comes back rather than staying latched off
+    let mut built = false;
+    for _ in 0..12_000 {
+        step(app.world_mut());
+        if owned_building(&mut app, 1000, BuildingKind::FishingHut).is_some() {
+            built = true;
+            break;
+        }
+    }
+    assert!(built, "a bot that was once refused a shoreline never asked again");
+    let world = app.world_mut();
+    let mut q = world.query::<&Bot>();
+    assert!(
+        q.iter(world).all(|b| b.waterside_cd >= Fx::ZERO),
+        "the cooldown ran past zero instead of resting there"
+    );
 }

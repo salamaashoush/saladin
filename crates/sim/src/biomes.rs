@@ -370,14 +370,51 @@ pub fn motherlode_density(b: Biome) -> Fx {
     }
 }
 
+/// What KIND of water a biome is, and the single authority on the question.
+/// Every "is this wet" predicate in the crate reads this one table: they used to
+/// be three separate `matches!` lists that disagreed (one omitted Lake, another
+/// accepted neither Lake nor River), which is how the fishing hut's aura came to
+/// target water nodes that the placement rule could never put on water.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WaterClass {
+    /// Dry ground — including Mountain and Cliff, which are impassable but not wet.
+    None,
+    /// The shelf: shallow salt water over a shore.
+    Shoal,
+    /// Open salt water.
+    Sea,
+    /// Fresh standing water in a closed basin.
+    Fresh,
+    /// Fresh running water in a channel.
+    Flowing,
+}
+
+pub fn water_class(b: Biome) -> WaterClass {
+    match b {
+        Biome::DeepWater => WaterClass::Sea,
+        Biome::ShallowWater => WaterClass::Shoal,
+        Biome::Lake => WaterClass::Fresh,
+        Biome::River => WaterClass::Flowing,
+        _ => WaterClass::None,
+    }
+}
+
+/// The open sea: the one body a hull can cross the map on. Deliberately NOT
+/// `!biome_passable` — that conflates water (a hull crosses it) with Mountain
+/// and Cliff (nothing does), and that exact conflation is what made the fishing
+/// hut's aura dead code.
+pub fn biome_sailable(b: Biome) -> bool {
+    matches!(water_class(b), WaterClass::Sea | WaterClass::Shoal)
+}
+
 /// Any water surface — sea, lake or river. Fords are crossings, not water.
 pub fn biome_is_water(b: Biome) -> bool {
-    matches!(b, Biome::DeepWater | Biome::ShallowWater | Biome::River | Biome::Lake)
+    water_class(b) != WaterClass::None
 }
 
 /// Fresh water: what a fishing hut can work inland and a farm can irrigate from.
 pub fn biome_is_fresh_water(b: Biome) -> bool {
-    matches!(b, Biome::River | Biome::Lake)
+    matches!(water_class(b), WaterClass::Fresh | WaterClass::Flowing)
 }
 
 #[cfg(test)]
@@ -395,5 +432,69 @@ mod tests {
     fn forest_is_treeful() {
         assert_eq!(tree_density(Biome::Forest), crate::fx!("0.85"));
         assert_eq!(tree_density(Biome::Desert), crate::fx!("0"));
+    }
+
+    const ALL: [Biome; 25] = [
+        Biome::DeepWater,
+        Biome::ShallowWater,
+        Biome::Sand,
+        Biome::Desert,
+        Biome::Dunes,
+        Biome::Steppe,
+        Biome::Grassland,
+        Biome::Forest,
+        Biome::Hills,
+        Biome::Mountain,
+        Biome::Snow,
+        Biome::Oasis,
+        Biome::River,
+        Biome::Ford,
+        Biome::Cliff,
+        Biome::Lake,
+        Biome::Marsh,
+        Biome::Wadi,
+        Biome::SaltFlat,
+        Biome::Hammada,
+        Biome::Savanna,
+        Biome::Scrub,
+        Biome::Pine,
+        Biome::OliveGrove,
+        Biome::Alpine,
+    ];
+
+    #[test]
+    fn water_class_is_the_only_definition_of_wet() {
+        for b in ALL {
+            let wet = matches!(b, Biome::DeepWater | Biome::ShallowWater | Biome::River | Biome::Lake);
+            assert_eq!(biome_is_water(b), wet, "{b:?}");
+            assert_eq!(water_class(b) != WaterClass::None, wet, "{b:?}");
+            assert_eq!(
+                biome_is_fresh_water(b),
+                matches!(b, Biome::River | Biome::Lake),
+                "{b:?}"
+            );
+            // no tile is both wet and walkable: a ford is a crossing, not water
+            assert!(!(wet && biome_passable(b)), "{b:?} is water AND walkable");
+        }
+    }
+
+    #[test]
+    fn sailable_is_the_open_sea_not_the_negation_of_passable() {
+        for b in ALL {
+            assert_eq!(
+                biome_sailable(b),
+                matches!(b, Biome::DeepWater | Biome::ShallowWater),
+                "{b:?}"
+            );
+        }
+        // the conflation that made the hut's aura dead code
+        for dry in [Biome::Mountain, Biome::Cliff] {
+            assert!(!biome_passable(dry) && !biome_sailable(dry) && !biome_is_water(dry));
+        }
+        for fresh in [Biome::Lake, Biome::River] {
+            assert!(!biome_sailable(fresh), "{fresh:?} is water but not the open sea");
+            assert!(biome_is_water(fresh));
+        }
+        assert!(!biome_sailable(Biome::Ford) && !biome_is_water(Biome::Ford));
     }
 }

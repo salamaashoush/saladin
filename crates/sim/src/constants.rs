@@ -28,6 +28,12 @@ pub const HARVEST_TIME: Fx = crate::fx!("1.2");
 /// Fishing-hut work aura: fish nodes within this range of a friendly hut are
 /// harvested at double speed (nets + boats).
 pub const FISHING_HUT_RANGE: Fx = crate::fx!("6");
+/// Harbour work aura: the same nets over a far wider stretch of water, which is
+/// what 160 resources buys over the hut's 40. Auras do not stack (the best one
+/// covering a node wins), so this is REACH, not a second multiplier.
+pub const HARBOUR_RANGE: Fx = crate::fx!("13");
+/// What a harbour multiplies a fishery's regrowth by — the rung above the hut.
+pub const HARBOUR_FISH_REGEN: i32 = 3;
 /// Granary work aura: friendly fields within this range are worked and regrow
 /// faster — a hub is worthless alone and transformative over a cluster. Sized
 /// against measured granary-to-farm spacing inside `TOWN_RADIUS` (3.6 to 18.4
@@ -35,6 +41,17 @@ pub const FISHING_HUT_RANGE: Fx = crate::fx!("6");
 pub const GRANARY_RANGE: Fx = crate::fx!("14");
 /// Mosque morale aura: the ground a standing mosque steadies.
 pub const MOSQUE_MORALE_RANGE: Fx = crate::fx!("14");
+
+// ── the ferry ───────────────────────────────────────────────────────────────
+
+/// How close a man must stand to a hull to step aboard. A barge floats on the
+/// water tile beside the beach and the man stands on the sand, so the gangplank
+/// has to clear a tile and both bodies.
+pub const EMBARK_RANGE: Fx = crate::fx!("3");
+/// How far from a hull a landing party may be put ashore, in tiles. Wider than
+/// the gangplank because a beach is not always the tile the hull is over — but
+/// narrow enough that "unload" never means "teleport inland".
+pub const LANDING_REACH: i32 = 3;
 
 // ── construction ────────────────────────────────────────────────────────────
 // Building, repairing and upgrading are ONE loop: a builder adds `work` to the
@@ -81,9 +98,30 @@ pub const PLACER_NODES: i32 = 60;
 /// as roughly half a dozen patches per map rather than one lucky pocket.
 pub const MOTHERLODE_GOLD_NODES: i32 = 40;
 pub const MOTHERLODE_STONE_NODES: i32 = 36;
-/// Fish replenished per economy tick on every water food node inside a
-/// fishing hut's reach — huts sustain their fishery; unmanaged waters fish out.
+/// What a fishing hut MULTIPLIES its fishery's own regrowth by. Not a top-up:
+/// a hut cannot conjure fish into water that has none, and the flat supply this
+/// replaces was measurably negative (the same aura doubles the DRAW, so a
+/// tended school emptied 20% faster than an untended one).
 pub const FISH_REGEN_PER_TICK: i32 = 2;
+
+// Fisheries. A school is a FLOW, not a stock: it has a natural ceiling and
+// swims back, which is what makes a boat on station worth more over a match than
+// the same hands on a herd. Inshore water is the on-ramp — thinner, closer, and
+// safe; the offshore grounds are where the food actually is, and they are out
+// past where a shore archer can protect you.
+// THE PER-NODE FLOW IS THE CAP, and these are the whole balance of the sea: a
+// skiff drains at ~4.7 food/s and a school refills at one or two, so what a boat
+// banks over a match IS the node's regen and never the hull. Measured against
+// the farm's 1.36 food/s per hand forever: a tended inshore school pays 1.0 and
+// a tended offshore shoal 1.6-2.0 for a much longer haul. Steadier and safer
+// than the plough, never richer per hand. Doubling these puts the sea 60% over
+// a farm and nobody sows again.
+pub const FISH_INSHORE_CAP: i32 = 120;
+pub const FISH_INSHORE_REGEN: i32 = 1;
+pub const FISH_OFFSHORE_CAP: i32 = 300;
+pub const FISH_OFFSHORE_REGEN: i32 = 2;
+/// Share of the fish quota that lies out in open water rather than on the shelf.
+pub const FISH_OFFSHORE_PCT: i32 = 34;
 
 // Farms: the only renewable food that scales, and the only node whose output is
 // a function of TIME AND CARE rather than of how many hands you put on it. Soil
@@ -153,5 +191,13 @@ pub const START_GOLD: i32 = 0;
 pub const PEASANT_COST: i32 = 20;
 
 pub const MAX_PLAYERS: usize = 8;
+/// The smallest landmass a player may be seated on, where the preset seats by
+/// island (`MapBias::sea_starts`). MEASURED, not chosen: a FAIR_RADIUS disc is
+/// 1257 tiles, so 1300 barely fits one start and leaves the top-up scan nowhere
+/// to place; at 2500 the number of qualifying islands on the worst archipelago
+/// seed falls to one and the whole guarantee evaporates. At 2000 every one of 25
+/// archipelago seeds carries at least two, averaging 3.2 and covering 82% of the
+/// land.
+pub const START_REGION_MIN: u32 = 2000;
 pub const SPAWN_MARGIN: i32 = 40;
 pub const SPAWN_CLUSTER: Fx = crate::fx!("2.2");

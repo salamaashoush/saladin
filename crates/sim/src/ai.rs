@@ -58,8 +58,24 @@ pub struct PlannerState {
     pub enemy: Census,
     pub enemy_has_walls: bool,
     pub threat_near_home: i32,
-    /// Open water within building reach of the keep — enables a Fishing Hut.
-    pub shore_near: bool,
+    /// Fisheries a hut on the bot's own shore could actually work. "Any water
+    /// tile in the box" was the old gate and it bought a hut on a puddle with
+    /// nothing in it; a fishery a skiff can reach is the thing worth 40 wood.
+    pub fisheries: i32,
+    /// Where those fisheries lie. A Fishing Hut's only working function is being
+    /// a drop-off NEAR THE FISH, and it was being planted beside the Keep, which
+    /// already accepts food.
+    pub fishery_centroid: Option<V2>,
+    /// A resource cluster on the bot's water but off its land — the economic
+    /// reason a Harbour exists. `remote_cluster` cannot see it: everything past
+    /// the beach is unreachable, so nothing over there is ever a candidate.
+    pub offshore_cluster: Option<V2>,
+    /// Hulls afloat, by trade: a skiff works, a barge ferries.
+    pub boats: i32,
+    pub ferries: i32,
+    /// Can the army WALK to the enemy? False is what forces a navy — without it
+    /// an island match never resolves.
+    pub enemy_by_land: bool,
     /// Soil good enough to sow within building reach of the keep.
     pub farmland_near: bool,
     /// Farms carrying a STANDING FIELD. A plot whose crop is gone is not a farm,
@@ -77,7 +93,7 @@ pub struct PlannerState {
     /// Unfinished sites by `BuildingKind` index. Build time now EXCEEDS a
     /// decision window, so without this the ladder re-sites the same hall every
     /// window until the bot is broke.
-    pub sites_in_flight: [i32; 16],
+    pub sites_in_flight: [i32; BuildingKind::ALL.len()],
     /// Own COMPLETE buildings below the repair threshold.
     pub damaged: i32,
     /// Peasants already on a job site.
@@ -117,6 +133,12 @@ pub struct PlannerTuning {
     pub mix_size: i32,
     pub wants_market: bool,
     pub wants_fishing: bool,
+    /// Skiffs the bot works its shore with, capped again by the fisheries in
+    /// reach — a fourth boat over three schools is 30 wood of queue.
+    pub skiff_target: i32,
+    /// Barges the bot keeps. Zero means the bot never crosses water, so it also
+    /// never founds a Harbour.
+    pub barge_target: i32,
     /// Fields the bot works toward once its economy is standing.
     pub farm_target: i32,
     /// Peasants the bot parks on each standing field to work it.
@@ -235,7 +257,7 @@ pub fn counter_dps(a: UnitKind, enemy: &Census) -> Fx {
     let mut total = 0;
     for ek in UnitKind::ALL {
         let n = enemy[*ek as usize];
-        if n <= 0 {
+        if n <= 0 || unit_def(*ek).role == UnitRole::Boat {
             continue;
         }
         total += n;
@@ -263,7 +285,10 @@ pub fn unit_power(a: UnitKind, enemy: &Census) -> Fx {
 /// wood.
 pub fn counter_score(a: UnitKind, enemy: &Census) -> Fx {
     let d = unit_def(a);
-    if d.attack <= 0 {
+    // A hull is not an answer to anything. `Census` is indexed by kind, so a
+    // barge lands in one for free; a bot facing a wall of Sergeants must never
+    // conclude that a ferry counters them.
+    if d.attack <= 0 || d.role == UnitRole::Boat {
         return Fx::ZERO;
     }
     unit_power(a, enemy) / Fx::from_num(d.resource_cost())
@@ -407,6 +432,31 @@ pub fn next_trade(s: &PlannerState, tune: &PlannerTuning) -> Option<TradeDecisio
         let want = (s.upkeep * tune.food_floor_mult).max(20);
         let amount = want.min(s.gold / MARKET_BUY_RATE);
         return Some(TradeDecision { res: ResourceType::Food, amount, buy: true });
+    }
+    // An island bot's Harbour is not a convenience, it is the only exit the map
+    // has: with no way to walk at the enemy, no quay means the match cannot end
+    // for either side. It costs 40 STONE, and an island's wild stone RUNS OUT —
+    // measured, a Hard bot sat on 912 wood, a standing Market, 107 gold and zero
+    // stone for fifteen minutes, unable to buy the one thing it needed, because
+    // the market rungs only ever sold into gold and never bought back.
+    //
+    // Buying stops the moment the quay is owned, and `naval_wanted` is false on
+    // every mainland preset (0 of 59 mainland bases seat two players apart), so
+    // nothing outside an island map can reach this at all.
+    if naval_wanted(s, tune)
+        && !s.enemy_by_land
+        && !s.owned.contains(&BuildingKind::Harbour)
+        && s.gold >= MARKET_BUY_RATE
+    {
+        let need = building_def(BuildingKind::Harbour).cost;
+        for (res, have, want) in
+            [(ResourceType::Stone, s.stone, need.stone), (ResourceType::Wood, s.wood, need.wood)]
+        {
+            let short = (want - have).min(s.gold / MARKET_BUY_RATE);
+            if short > 0 {
+                return Some(TradeDecision { res, amount: short, buy: true });
+            }
+        }
     }
     if s.gold >= tune.gold_floor {
         return None;
@@ -556,6 +606,13 @@ fn towers_below_cap(s: &PlannerState, tune: &PlannerTuning) -> bool {
     s.towers < tune.max_towers
 }
 
+/// Whether this bot needs hulls that carry men. Two reasons, and the second one
+/// is not optional: an enemy the army cannot walk to is an enemy the bot can
+/// never beat, so on an island map the ferry IS the win condition.
+pub fn naval_wanted(s: &PlannerState, tune: &PlannerTuning) -> bool {
+    tune.barge_target > 0 && (s.offshore_cluster.is_some() || !s.enemy_by_land)
+}
+
 /// The single best macro action to take next. One per call.
 ///
 /// Every rung that sites a structure also checks `sites_in_flight`: a build now
@@ -570,6 +627,8 @@ pub fn next_build(s: &PlannerState, tune: &PlannerTuning) -> Option<BuildDecisio
     let pop_full = pop_headroom <= 0;
     let peasant_goal = dynamic_peasant_target(s, tune);
     let army_goal = dynamic_army_target(s, tune);
+    let skiff_goal = tune.skiff_target.min(s.fisheries);
+    let wants_navy = naval_wanted(s, tune);
     let pick_army = || {
         let kind = next_army_kind(
             &s.enemy,
@@ -597,13 +656,19 @@ pub fn next_build(s: &PlannerState, tune: &PlannerTuning) -> Option<BuildDecisio
         // standing, in which case the answer is hands, not another foundation
         // that comes in a season too late.
         if s.fields_ripe == 0 {
+            // A boat off a standing hut is the fastest food there is: 30 wood,
+            // ten seconds, and a hull draws no rations, so it is the one thing
+            // a famine can buy that does not make the famine worse.
+            if has(BuildingKind::FishingHut) && s.boats < skiff_goal && !pop_full {
+                return Some(train(UnitKind::FishingSkiff, BuildingKind::FishingHut));
+            }
             if s.farmland_near
                 && s.farms + s.sites_in_flight[BuildingKind::Farm as usize] < tune.farm_target + 2
                 && s.wood >= 45
             {
                 return Some(build(BuildingKind::Farm));
             }
-            if tune.wants_fishing && s.shore_near && need(BuildingKind::FishingHut) {
+            if tune.wants_fishing && s.fisheries > 0 && need(BuildingKind::FishingHut) {
                 return Some(build(BuildingKind::FishingHut));
             }
         }
@@ -659,8 +724,13 @@ pub fn next_build(s: &PlannerState, tune: &PlannerTuning) -> Option<BuildDecisio
     if tune.wants_market && need(BuildingKind::Market) {
         return Some(build(BuildingKind::Market));
     }
-    if tune.wants_fishing && s.shore_near && need(BuildingKind::FishingHut) {
+    if tune.wants_fishing && s.fisheries > 0 && need(BuildingKind::FishingHut) {
         return Some(build(BuildingKind::FishingHut));
+    }
+    // A hut with no hull nets nothing at all: the skiff is the only hand that
+    // can work a fishery, so the 40 wood is a drop-off until one is launched.
+    if has(BuildingKind::FishingHut) && s.boats < skiff_goal && !pop_full {
+        return Some(train(UnitKind::FishingSkiff, BuildingKind::FishingHut));
     }
     // a hub with nothing to hub is a wasted 50 wood
     if s.farms > 0 && need(BuildingKind::Granary) {
@@ -691,6 +761,24 @@ pub fn next_build(s: &PlannerState, tune: &PlannerTuning) -> Option<BuildDecisio
         return Some(build(BuildingKind::Storehouse));
     }
 
+    // 3d) The sea. A Harbour is the only structure that ends a map at something
+    // other than the beach: it is where a barge is built, and a barge is the
+    // only way onto an ore island — or onto an enemy the army cannot walk to,
+    // which is the difference between an Archipelago match resolving and not.
+    if wants_navy && has(BuildingKind::FishingHut) && need(BuildingKind::Harbour) {
+        return Some(build(BuildingKind::Harbour));
+    }
+    // ...but a HULL that carries men is only ever loaded for a crossing. A quay
+    // is a wide fishing aura and a drop-off that takes every haul, and it earns
+    // its 160 on a coast; a ferry with nowhere to ferry to is 60 wood and 20
+    // gold of scenery, which is what an offshore ore island would have bought.
+    if !s.enemy_by_land
+        && has(BuildingKind::Harbour)
+        && s.ferries < tune.barge_target
+        && !pop_full
+    {
+        return Some(train(UnitKind::Barge, BuildingKind::Harbour));
+    }
 
     // 4) Defense under threat: towers to cap, then RAISE one where it already
     // stands rather than buying a second tower on new ground.
@@ -908,12 +996,17 @@ mod tests {
             enemy: EMPTY_CENSUS,
             enemy_has_walls: false,
             threat_near_home: 0,
-            shore_near: false,
+            fisheries: 0,
+            fishery_centroid: None,
+            offshore_cluster: None,
+            boats: 0,
+            ferries: 0,
+            enemy_by_land: true,
             farmland_near: false,
             farms: 0,
             fields_ripe: 0,
             enemy_towers: 0,
-            sites_in_flight: [0; 16],
+            sites_in_flight: [0; BuildingKind::ALL.len()],
             damaged: 0,
             builders_busy: 0,
             storehouses: 0,
@@ -944,6 +1037,8 @@ mod tests {
             mix_size: 1,
             wants_market: false,
             wants_fishing: false,
+            skiff_target: 0,
+            barge_target: 0,
             farm_target: 0,
             farm_hands: 1,
             gold_floor: 0,
@@ -1200,8 +1295,8 @@ mod tests {
         // the market is what it falls through to
         s.sites_in_flight[BuildingKind::Farm as usize] = 1000;
         assert_eq!(next_build(&s, &tune).map(|d| d.kind), Some(BuildingKind::Market as u8));
-        // a shore is still cheaper food than a merchant
-        s.shore_near = true;
+        // a shore with fish in reach is still cheaper food than a merchant
+        s.fisheries = 3;
         assert_eq!(next_build(&s, &tune).map(|d| d.kind), Some(BuildingKind::FishingHut as u8));
 
         // and a bot that already trades does not found a second market
@@ -1242,7 +1337,7 @@ mod tests {
         let mut tune = tuning();
         tune.wants_market = true;
         tune.wants_fishing = true;
-        s.shore_near = true;
+        s.fisheries = 4;
         let d = next_build(&s, &tune).unwrap();
         assert!(!d.is_unit && d.kind == BuildingKind::Market as u8);
         s.owned.insert(BuildingKind::Market);
@@ -1255,6 +1350,133 @@ mod tests {
         s.farms = 1;
         let d = next_build(&s, &tune).unwrap();
         assert!(!d.is_unit && d.kind == BuildingKind::Granary as u8);
+    }
+
+    /// A hut is a drop-off until a hull is launched off it — the skiff is the
+    /// only hand in the game that can work a fishery — and the fleet is capped
+    /// by the fish actually in reach, not by the profile's ambition.
+    #[test]
+    fn a_hut_without_a_hull_nets_nothing_and_the_fleet_stops_at_the_fish() {
+        let mut s = state(barracks_only());
+        let mut tune = tuning();
+        tune.wants_fishing = true;
+        tune.skiff_target = 3;
+        s.fisheries = 2;
+        assert_eq!(
+            next_build(&s, &tune).map(|d| d.kind),
+            Some(BuildingKind::FishingHut as u8),
+            "fish in reach and no hut: found one"
+        );
+        s.owned.insert(BuildingKind::FishingHut);
+        for boats in 0..2 {
+            s.boats = boats;
+            let d = next_build(&s, &tune).unwrap();
+            assert!(d.is_unit && d.kind == UnitKind::FishingSkiff as u8, "hut with {boats} hulls");
+        }
+        // two schools, two boats: the third is 30 wood of queue
+        s.boats = 2;
+        assert!(
+            next_build(&s, &tune).is_none_or(|d| d.kind != UnitKind::FishingSkiff as u8),
+            "launched a fourth hull over two schools"
+        );
+        // and no water in reach is no hut, however much the profile wants one
+        let mut dry = state(barracks_only());
+        dry.fisheries = 0;
+        assert!(
+            next_build(&dry, &tune).is_none_or(|d| d.kind != BuildingKind::FishingHut as u8),
+            "bought a shore camp with nothing to net"
+        );
+    }
+
+    /// The rung that makes an island map finishable. A bot that cannot walk to
+    /// its enemy has exactly one road left, and it costs 120 wood and 40 stone.
+    #[test]
+    fn an_enemy_across_water_forces_a_harbour_and_a_barge() {
+        let mut owned = barracks_only();
+        owned.insert(BuildingKind::FishingHut);
+        let mut s = state(owned);
+        let mut tune = tuning();
+        tune.barge_target = 2;
+
+        // walkable enemy, nothing offshore: no navy, as on every mainland map
+        assert!(!naval_wanted(&s, &tune));
+        assert!(
+            next_build(&s, &tune).is_none_or(|d| d.kind != BuildingKind::Harbour as u8),
+            "paid 160 for a quay it had no use for"
+        );
+
+        // an enemy it cannot reach on foot: the ferry is the only way to win
+        s.enemy_by_land = false;
+        assert!(naval_wanted(&s, &tune));
+        assert_eq!(next_build(&s, &tune).map(|d| d.kind), Some(BuildingKind::Harbour as u8));
+        s.owned.insert(BuildingKind::Harbour);
+        for ferries in 0..2 {
+            s.ferries = ferries;
+            let d = next_build(&s, &tune).unwrap();
+            assert!(d.is_unit && d.kind == UnitKind::Barge as u8, "harbour with {ferries} barges");
+        }
+        s.ferries = 2;
+        assert!(
+            next_build(&s, &tune).is_none_or(|d| d.kind != UnitKind::Barge as u8),
+            "kept building ferries past its target"
+        );
+
+        // ore across the water is the OTHER reason to raise a quay, and it does
+        // not need a war — but it buys no HULLS, because nothing would load them
+        s.enemy_by_land = true;
+        s.ferries = 0;
+        s.owned.remove(&BuildingKind::Harbour);
+        s.offshore_cluster = Some(V2::new(crate::fx!("40"), crate::fx!("200")));
+        assert_eq!(next_build(&s, &tune).map(|d| d.kind), Some(BuildingKind::Harbour as u8));
+        s.owned.insert(BuildingKind::Harbour);
+        assert!(
+            next_build(&s, &tune).is_none_or(|d| d.kind != UnitKind::Barge as u8),
+            "bought a ferry with nowhere to ferry to"
+        );
+        s.owned.remove(&BuildingKind::Harbour);
+
+        // a profile that never crosses water never buys the quay either
+        tune.barge_target = 0;
+        assert!(!naval_wanted(&s, &tune));
+
+        // and the quay is a LADDER rung: no hut, no harbour
+        tune.barge_target = 2;
+        s.owned.remove(&BuildingKind::FishingHut);
+        assert!(
+            next_build(&s, &tune).is_none_or(|d| d.kind != BuildingKind::Harbour as u8),
+            "founded a harbour with no fishing hut behind it"
+        );
+    }
+
+    /// `Census` is indexed by kind, so hulls land in one for free. A bot facing
+    /// a wall of Sergeants must never answer it with a ferry, and a barge in the
+    /// enemy column must not dilute what the real counter is measured against.
+    #[test]
+    fn no_bot_ever_answers_an_army_with_a_boat() {
+        let mut owned = barracks_only();
+        owned.insert(BuildingKind::Stable);
+        owned.insert(BuildingKind::FishingHut);
+        owned.insert(BuildingKind::Harbour);
+        let mut enemy: Census = EMPTY_CENSUS;
+        enemy[UnitKind::Sergeant as usize] = 8;
+        let clean = counter_composition(&enemy, &owned, Faction::Ayyubid, false, false);
+        assert!(unit_def(clean).attack > 0, "picked a hull against an army");
+
+        // the same enemy, now with a fishing fleet in the column
+        enemy[UnitKind::Barge as usize] = 4;
+        enemy[UnitKind::FishingSkiff as usize] = 6;
+        let with_hulls = counter_composition(&enemy, &owned, Faction::Ayyubid, false, false);
+        assert_eq!(with_hulls, clean, "a fishing fleet changed what counters the army");
+        for k in [UnitKind::Barge, UnitKind::FishingSkiff] {
+            assert_eq!(counter_score(k, &enemy), Fx::ZERO, "{k:?} scored as a counter");
+            assert!(ranked_counters(&enemy, &owned, Faction::Ayyubid).iter().all(|(r, _)| *r != k));
+        }
+        // and a fleet is not an army: it adds nothing to either side of the gate
+        let mut mine: Census = EMPTY_CENSUS;
+        mine[UnitKind::Spearman as usize] = 4;
+        let bare = army_power(&mine, &enemy);
+        mine[UnitKind::Barge as usize] = 5;
+        assert_eq!(army_power(&mine, &enemy), bare, "five barges made the wave stronger");
     }
 
     #[test]

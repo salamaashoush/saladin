@@ -6,9 +6,10 @@ use bevy_ecs::prelude::*;
 use saladin_sim::*;
 use std::collections::HashSet;
 
-/// Population headroom. Queued units are charged at ENQUEUE, and only
-/// OPERATIONAL structures grant housing — a hole in the ground shelters nobody.
-fn pop_room(world: &mut World, owner: u64) -> bool {
+/// Population headroom for one more of `kind`. Queued units are charged at
+/// ENQUEUE, and only OPERATIONAL structures grant housing — a hole in the
+/// ground shelters nobody.
+fn pop_room(world: &mut World, owner: u64, kind: UnitKind) -> bool {
     let mut bq = world.query::<(&Owner, &Building)>();
     let (mut cap, mut queued) = (0i32, 0i32);
     for (o, b) in bq.iter(world) {
@@ -18,16 +19,23 @@ fn pop_room(world: &mut World, owner: u64) -> bool {
         if operational(b.state) {
             cap += building_def(b.kind).pop;
         }
-        queued += b.queue_len as i32;
+        for i in 0..b.queue_len as usize {
+            queued += UnitKind::from_u8(b.queue[i]).map_or(1, |k| unit_def(k).pop_cost);
+        }
     }
     let mut uq = world.query::<(&Owner, &Unit)>();
-    let pop = uq.iter(world).filter(|(o, _)| o.0 == owner).count() as i32;
-    pop + queued < cap
+    let pop: i32 = uq
+        .iter(world)
+        .filter(|(o, _)| o.0 == owner)
+        .map(|(_, u)| unit_def(u.kind).pop_cost)
+        .sum();
+    pop + queued + unit_def(kind).pop_cost <= cap
 }
 
-/// Only carriers raise buildings — the same hands that gather.
+/// Only workers raise buildings. ROLE, not `carry > 0`: a fishing skiff carries
+/// more than a peasant and cannot reach a building site at all.
 fn is_builder(kind: UnitKind) -> bool {
-    unit_def(kind).carry > 0
+    unit_def(kind).builds()
 }
 
 /// The owner's lowest-`GameId` finished structure that trains `kind`. Raw ECS
@@ -82,7 +90,7 @@ pub(crate) fn train_at(world: &mut World, owner: u64, building: u64, kind: UnitK
         }
         None => false,
     };
-    if !room || !pop_room(world, owner) {
+    if !room || !pop_room(world, owner, kind) {
         return false;
     }
     {
@@ -153,30 +161,62 @@ pub(crate) fn spawn_trained(world: &mut World, building: u64) -> bool {
         let k = tile_key(tx, ty);
         is_passable(seed, tx, ty) && !occ.contains(&k) && !gate_blocks(&gates, k, owner)
     };
-    let snap = nearest_passable_grid(&passable, raw_x, raw_y);
+    let afloat = unit_def(kind).afloat();
+    let snap = if afloat {
+        // A hull launches at its hall's berth or not at all. Snapping it onto
+        // land instead would beach it forever: `movement` walks whatever path it
+        // is handed and would never bring it back to water.
+        match berth_of(seed, fp, bpos) {
+            Some(b) => b,
+            None => {
+                pop_queue_head(world, be);
+                let mut q = world.query::<&mut Player>();
+                if let Some(mut p) = q.iter_mut(world).find(|p| p.player_id == owner) {
+                    p.stock.credit(&unit_def(kind).cost);
+                }
+                return false;
+            }
+        }
+    } else {
+        nearest_passable_grid(&passable, raw_x, raw_y)
+    };
     let id = spawn::spawn_unit(world, owner, kind, snap, match_id, GatherState::Idle, 0);
     world.resource_mut::<crate::MatchStats>().of(owner).trained += 1;
-
-    if let Some(mut b) = world.get_mut::<Building>(be) {
-        for i in 1..b.queue_len as usize {
-            b.queue[i - 1] = b.queue[i];
-        }
-        b.queue_len -= 1;
-        b.train_work = Fx::ZERO;
-    }
+    pop_queue_head(world, be);
 
     if dist(rally, bpos) > saladin_sim::fx!("1.2") {
+        let sailable = |tx: i32, ty: i32| is_sailable(seed, tx, ty);
         let path = {
             let mut scratch = world.resource_mut::<PathScratch>();
-            scratch.0.find_path(&passable, snap.x, snap.y, rally.x, rally.y, MAX_EXPANSIONS)
+            if afloat {
+                if sea_reachable(seed, snap, rally) {
+                    scratch.0.find_path_costed_in(
+                        &sailable,
+                        &|_, _| Fx::ONE,
+                        snap.x,
+                        snap.y,
+                        rally.x,
+                        rally.y,
+                        MAX_EXPANSIONS,
+                        Domain::Sea.smoothing(),
+                    )
+                } else {
+                    Vec::new()
+                }
+            } else {
+                scratch.0.find_path(&passable, snap.x, snap.y, rally.x, rally.y, MAX_EXPANSIONS)
+            }
         };
         let mut q = world.query::<(&GameId, &mut Unit)>();
         if let Some((_, mut u)) = q.iter_mut(world).find(|(g, _)| g.0 == id) {
             // The flag is the ground this man is posted on. Without this his
             // home stays the hall door, so both leashes measure a rallied unit
             // against a building it was sent away from and it walks back to it
-            // the moment it sees an enemy.
-            u.home = rally;
+            // the moment it sees an enemy. A hull only takes the flag when it
+            // can actually float to it — otherwise home is the berth.
+            if !afloat || !path.is_empty() {
+                u.home = rally;
+            }
             if !path.is_empty() {
                 u.target = path[0];
                 u.path = path;
@@ -186,6 +226,18 @@ pub(crate) fn spawn_trained(world: &mut World, building: u64) -> bool {
         }
     }
     true
+}
+
+/// Drop the finished (or refused) order at the head of a queue and reset the
+/// work clock. Leaving it in place would jam the hall forever, retrying the
+/// same impossible spawn every tick.
+fn pop_queue_head(world: &mut World, be: Entity) {
+    let Some(mut b) = world.get_mut::<Building>(be) else { return };
+    for i in 1..b.queue_len as usize {
+        b.queue[i - 1] = b.queue[i];
+    }
+    b.queue_len = b.queue_len.saturating_sub(1);
+    b.train_work = Fx::ZERO;
 }
 
 fn find_by_id(world: &mut World, id: u64) -> Option<Entity> {
@@ -210,7 +262,7 @@ pub(crate) struct BuildContext {
     walls: Vec<(u64, i32)>,
     own: Vec<V2>,
     owned_kinds: HashSet<BuildingKind>,
-    counts: [i32; 16],
+    counts: [i32; BuildingKind::ALL.len()],
     stock: Stockpile,
     match_id: u64,
 }
@@ -225,7 +277,7 @@ pub(crate) fn build_context(world: &mut World, owner: u64) -> Option<BuildContex
     let mut walls = Vec::new();
     let mut own = Vec::new();
     let mut owned_kinds = HashSet::new();
-    let mut counts = [0i32; 16];
+    let mut counts = [0i32; BuildingKind::ALL.len()];
     {
         let mut q = world.query::<(&GameId, &Pos, &Owner, &Building)>();
         for (g, p, o, b) in q.iter(world) {

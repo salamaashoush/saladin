@@ -289,10 +289,13 @@ pub struct Bot {
     /// Soldier count when the last assault wave launched — the retreat baseline.
     #[serde(default)]
     pub wave_launched: i32,
-    /// Set when an affordable Fishing Hut found no legal shoreline tile, so the
-    /// planner stops asking for one instead of stalling its build ladder.
+    /// Seconds before the bot probes the shoreline again. A waterside site scan
+    /// walks the whole ring perimeter, so a bot that cannot place a hut must not
+    /// re-ask every window — but it must ASK AGAIN: a LATCH here meant one
+    /// blocked probe (a peasant standing on the only legal tile, a tightened
+    /// siting rule) disabled fishing for that bot for the rest of the match.
     #[serde(default)]
-    pub fishing_blocked: bool,
+    pub waterside_cd: Fx,
     /// Latch for the famine steer's hysteresis: entered at the food cushion,
     /// left at half again. Without it the whole workforce changes trade every
     /// time the larder crosses one number.

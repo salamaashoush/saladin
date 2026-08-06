@@ -254,7 +254,8 @@ fn register(kind: UnitKind) -> (f32, f32, f32) {
         UnitKind::Sergeant => (112.0, 0.58, 0.92),
         UnitKind::Chaplain => (132.0, 0.14, 0.8),
         UnitKind::Naffatun => (152.0, 0.5, 1.08),
-        UnitKind::Ram | UnitKind::Mangonel => (0.0, 0.0, 1.0), // creak instead
+        // vessels and engines creak instead of speaking
+        UnitKind::Ram | UnitKind::Mangonel | UnitKind::FishingSkiff | UnitKind::Barge => (0.0, 0.0, 1.0),
     }
 }
 
@@ -398,6 +399,8 @@ fn kind_name(kind: UnitKind) -> &'static str {
         UnitKind::Sergeant => "sergeant",
         UnitKind::Chaplain => "chaplain",
         UnitKind::Naffatun => "naffatun",
+        UnitKind::FishingSkiff => "skiff",
+        UnitKind::Barge => "barge",
     }
 }
 

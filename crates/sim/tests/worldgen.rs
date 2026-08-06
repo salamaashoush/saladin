@@ -100,12 +100,30 @@ fn rivers_and_cliffs_leave_one_dominant_landmass() {
 }
 
 #[test]
-fn keep_sites_are_buildable_open_and_on_the_mainland() {
+fn keep_sites_are_buildable_open_and_on_a_start_island() {
+    // Was `..._on_the_mainland`, asserting identity with `dominant_region`. That
+    // is now the SPECIAL CASE, not the rule: a keep must stand, whole, on the
+    // landmass its own start was seated on, and that landmass must be one the
+    // seating rule considers legal (big enough for a fair start, and reachable
+    // by sea from every other one). On presets 0..2 `start_regions` is exactly
+    // `[dominant_region]`, so this is provably the same assertion it replaced;
+    // on the archipelago it is strictly stronger — footprint-coherent AND on a
+    // legal island, where the old form could only have been satisfied by
+    // stranding all eight players on one shore.
     for base in 1..=25u32 {
         for preset in 0..4u8 {
             let seed = compose_seed(base, preset);
-            let main = dominant_region(seed);
+            let legal = start_regions(seed);
+            if preset < 3 {
+                assert_eq!(legal, [dominant_region(seed)], "seed {base} preset {preset} moved");
+            }
             for slot in 0..8 {
+                let start = start_point(seed, slot);
+                let home = region_at(seed, start.x, start.y);
+                assert!(
+                    legal.contains(&home),
+                    "seed {base} preset {preset} slot {slot}: seated on region {home}, not a legal start island"
+                );
                 let site = find_keep_site(seed, slot, 3);
                 let (sx, sy) = (site.x.to_num::<i32>(), site.y.to_num::<i32>());
                 for dy in -1..=1 {
@@ -117,8 +135,8 @@ fn keep_sites_are_buildable_open_and_on_the_mainland() {
                         );
                         assert_eq!(
                             region_at(seed, Fx::from_num(tx) + fx!("0.5"), Fx::from_num(ty) + fx!("0.5")),
-                            main,
-                            "seed {base} preset {preset} slot {slot}: keep off the mainland"
+                            home,
+                            "seed {base} preset {preset} slot {slot}: keep off its own start island"
                         );
                         let b = sample_terrain(
                             seed,
@@ -211,12 +229,145 @@ fn what_you_see_is_where_you_can_walk() {
     assert!(prev > Fx::ONE, "climbing costs a walker nothing ({prev})");
 }
 
+/// Which land regions a hull floating in `body` can put a keel ashore on, and
+/// how big each region is.
+fn regions_on_body(seed: u32, body: u16) -> (std::collections::HashSet<u16>, Vec<u32>) {
+    let rg = region_grid(seed);
+    let wb = water_region_grid(seed);
+    let mut on = std::collections::HashSet::new();
+    let mut sizes: Vec<u32> = Vec::new();
+    for ty in 0..WORLD_SIZE {
+        for tx in 0..WORLD_SIZE {
+            let r = rg[(ty * WORLD_SIZE + tx) as usize];
+            if r == u16::MAX {
+                continue;
+            }
+            if r as usize >= sizes.len() {
+                sizes.resize(r as usize + 1, 0);
+            }
+            sizes[r as usize] += 1;
+            if on.contains(&r) {
+                continue;
+            }
+            for (dx, dy) in [(1i32, 0i32), (-1, 0), (0, 1), (0, -1)] {
+                let (nx, ny) = (tx + dx, ty + dy);
+                if nx < 0 || ny < 0 || nx >= WORLD_SIZE || ny >= WORLD_SIZE {
+                    continue;
+                }
+                if wb[(ny * WORLD_SIZE + nx) as usize] == body {
+                    on.insert(r);
+                    break;
+                }
+            }
+        }
+    }
+    (on, sizes)
+}
+
+#[test]
+fn no_fishery_sits_on_walkable_land() {
+    // The defect this closes: `coastal_only` resolved through `is_coastal` to
+    // the LAND beside the sea, so every one of the ~105-139 "fisheries" a map
+    // placed stood on a beach and was worked like a rock. Measured before this
+    // change: 0 of them on water, on all four presets. The Fishing Hut's aura,
+    // its restock and the fish-school mesh all key off the water predicate, so
+    // all three were unreachable code for the whole life of the feature.
+    for base in [1u32, 5, 11, 13, 21, 48] {
+        for preset in 0..4u8 {
+            let seed = compose_seed(base, preset);
+            let (mut fish, mut land_food) = (0usize, 0usize);
+            for n in scatter_nodes(seed, &node_kinds()) {
+                if n.res_type != ResourceType::Food {
+                    assert_eq!(n.regen, 0, "seed {base}/{preset}: a {:?} node regrows", n.res_type);
+                    continue;
+                }
+                let (tx, ty) = (n.pos.x.to_num::<i32>(), n.pos.y.to_num::<i32>());
+                if n.regen > 0 {
+                    fish += 1;
+                    assert!(
+                        is_sailable(seed, tx, ty),
+                        "seed {base}/{preset}: a fishery at ({tx},{ty}) is not in water"
+                    );
+                    assert!(
+                        !is_passable(seed, tx, ty),
+                        "seed {base}/{preset}: a fishery at ({tx},{ty}) stands on walkable land"
+                    );
+                } else {
+                    land_food += 1;
+                    assert!(
+                        is_passable(seed, tx, ty) && !is_sailable(seed, tx, ty),
+                        "seed {base}/{preset}: a herd at ({tx},{ty}) is in the water"
+                    );
+                }
+            }
+            assert!(fish > 100, "seed {base}/{preset}: only {fish} fisheries placed");
+            assert!(land_food > 100, "seed {base}/{preset}: only {land_food} herds placed");
+        }
+    }
+}
+
+#[test]
+fn fisheries_reach_the_inland_water_the_biome_table_promised() {
+    // `Biome::Lake` carries the richest fish density in the table and calls
+    // itself "the inland fishery"; `Biome::River` carries its own. Neither could
+    // ever be chosen, because the old gate demanded a SEA neighbour before the
+    // density function ran at all. Highlands (many lakes) and River Valley (wide
+    // rivers) are where that shows.
+    let count = |seed: u32, want: Biome| {
+        scatter_nodes(seed, &node_kinds())
+            .into_iter()
+            .filter(|n| n.regen > 0 && sample_terrain(seed, n.pos.x, n.pos.y).biome == want)
+            .count()
+    };
+    let lakes: usize = (1..=8u32).map(|b| count(compose_seed(b, 2), Biome::Lake)).sum();
+    let rivers: usize = (1..=8u32).map(|b| count(compose_seed(b, 1), Biome::River)).sum();
+    assert!(lakes > 0, "not one lake fishery across eight highland maps");
+    assert!(rivers > 0, "not one river fishery across eight river-valley maps");
+}
+
+#[test]
+fn every_start_reaches_every_other_by_water() {
+    // The seating rule replaced "everyone on the dominant landmass" with
+    // "everyone on a landmass the sea connects". That is only a fair match if
+    // the sea really does connect them, so assert it directly on every preset:
+    // each start's island has a shore on the ONE main water body, which is what
+    // makes a barge between any two starts possible at all.
+    for base in 1..=25u32 {
+        for preset in 0..4u8 {
+            let seed = compose_seed(base, preset);
+            let ocean = main_water_body(seed);
+            let (on_ocean, sizes) = regions_on_body(seed, ocean);
+            for slot in 0..8 {
+                let s = start_point(seed, slot);
+                let home = region_at(seed, s.x, s.y);
+                assert!(
+                    on_ocean.contains(&home),
+                    "seed {base} preset {preset} slot {slot}: start island {home} has no shore on the main sea"
+                );
+                if preset == 3 {
+                    assert!(
+                        sizes[home as usize] >= START_REGION_MIN,
+                        "seed {base} slot {slot}: seated on a {}-tile islet, under START_REGION_MIN",
+                        sizes[home as usize]
+                    );
+                }
+            }
+        }
+    }
+}
+
 #[test]
 fn archipelago_keeps_playable_land() {
+    // The added half of this test is the one that pins the whole feature: before
+    // the seating change, a start could work 47.6% of the map's nodes on average
+    // and 13.1% on the worst seed, because all eight players were snapped onto a
+    // dominant region holding less than half the land.
     for base in [1u32, 5, 7, 13, 21, 34, 55, 99] {
         let seed = compose_seed(base, 3);
         let grid = region_grid(seed);
+        let wb = water_region_grid(seed);
         let main = dominant_region(seed);
+        let ocean = main_water_body(seed);
         let (mut pass, mut dom) = (0u32, 0u32);
         for &r in grid {
             if r != u16::MAX {
@@ -228,7 +379,138 @@ fn archipelago_keeps_playable_land() {
         }
         assert!(pass >= 5000, "seed {base}: archipelago nearly all water ({pass} land tiles)");
         assert!(dom >= 2500, "seed {base}: main island too small ({dom} tiles)");
+
+        let (on_ocean, sizes) = regions_on_body(seed, ocean);
+        let disc = (FAIR_RADIUS * FAIR_RADIUS * fx!("3.14159")).to_num::<u32>();
+        let nodes = scatter_nodes(seed, &node_kinds());
+        let extra = fair_start_nodes(seed, &nodes, 8, TREE_WOOD, STONE_YIELD, FOOD_YIELD);
+        let all: Vec<&ScatteredNode> = nodes.iter().chain(extra.iter()).collect();
+        for slot in 0..8 {
+            let s = start_point(seed, slot);
+            let home = region_at(seed, s.x, s.y);
+            assert!(
+                sizes[home as usize] >= disc,
+                "seed {base} slot {slot}: start island holds {} tiles, less than a FAIR_RADIUS disc ({disc})",
+                sizes[home as usize]
+            );
+            // a barge out of this start sails the main ocean, so every shore on
+            // it is landable and every node in it is workable
+            let mut reach = 0usize;
+            for nd in &all {
+                let (tx, ty) = (nd.pos.x.to_num::<i32>(), nd.pos.y.to_num::<i32>());
+                let mut ok = false;
+                for dy in -1..=1i32 {
+                    for dx in -1..=1i32 {
+                        let (nx, ny) = (tx + dx, ty + dy);
+                        if nx < 0 || ny < 0 || nx >= WORLD_SIZE || ny >= WORLD_SIZE {
+                            continue;
+                        }
+                        let i = (ny * WORLD_SIZE + nx) as usize;
+                        ok |= grid[i] == home || on_ocean.contains(&grid[i]) || wb[i] == ocean;
+                    }
+                }
+                if ok {
+                    reach += 1;
+                }
+            }
+            let share = reach * 100 / all.len();
+            assert!(
+                share >= 95,
+                "seed {base} slot {slot}: only {share}% of the map's resource nodes are reachable by land or sea"
+            );
+        }
     }
+}
+
+#[test]
+fn the_sea_is_one_body_and_no_tile_is_both_domains() {
+    // A ferry is only worth building if "the sea" is ONE place: a harbour on it
+    // has to be able to reach every other harbour on it.
+    //
+    // MEASURED over 25 bases x 4 presets (navalprobe --sea): the main body holds
+    // 98.0-99.9% of all salt water on average, but the WORST seed is 82.7%
+    // (river-valley base 9, whose second body is a 12 946-tile inland sea). So
+    // "one ocean" is true in the sense that matters — the main body is never
+    // below 59 000 tiles, 40% of the whole map — and a big enclosed sea is a
+    // legitimate feature, not a defect. It is exactly what `sea_reachable` is
+    // for: a skiff launched into a landlocked sea belongs to it and stays in it.
+    for base in [1u32, 5, 7, 8, 9, 11, 13, 21, 34, 48, 55, 99] {
+        for preset in 0..4u8 {
+            let seed = compose_seed(base, preset);
+            let g = worldgrid::world_grid(seed);
+            let bodies = water_region_grid(seed);
+            let main = main_water_body(seed);
+            let (mut sea, mut sea_main, mut wet, mut main_tiles) = (0u32, 0u32, 0u32, 0u32);
+            for i in 0..g.biome.len() {
+                let b = g.biome[i];
+                let (tx, ty) = ((i % WORLD_SIZE as usize) as i32, (i / WORLD_SIZE as usize) as i32);
+                // the two domains partition the map: nothing is both, and the
+                // grids agree with the biome table tile for tile
+                assert_eq!(is_sailable(seed, tx, ty), biome_is_water(b), "{base}/{preset} ({tx},{ty})");
+                assert!(
+                    !(is_sailable(seed, tx, ty) && is_passable(seed, tx, ty)),
+                    "{base}/{preset} ({tx},{ty}) {b:?} is both walkable and sailable"
+                );
+                assert_eq!(
+                    bodies[i] != u16::MAX,
+                    biome_is_water(b),
+                    "{base}/{preset} ({tx},{ty}): water label disagrees with the biome"
+                );
+                if biome_is_water(b) {
+                    wet += 1;
+                }
+                if bodies[i] == main {
+                    main_tiles += 1;
+                }
+                if biome_sailable(b) {
+                    sea += 1;
+                    if bodies[i] == main {
+                        sea_main += 1;
+                    }
+                }
+            }
+            assert!(sea > 1000 && wet >= sea, "{base}/{preset}: no sea to speak of ({sea}/{wet})");
+            assert!(
+                main_tiles >= 40_000,
+                "seed {base} preset {preset}: the main ocean is only {main_tiles} tiles"
+            );
+            let share = sea_main as f64 * 100.0 / sea as f64;
+            assert!(
+                share >= 80.0,
+                "seed {base} preset {preset}: the main water body holds only {share:.1}% of the sea"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_hull_cannot_sail_between_two_unconnected_waters() {
+    // `sea_reachable` is the naval twin of `node_reachable` and is what keeps an
+    // impossible order from flooding the whole 100k-tile ocean.
+    let seed = compose_seed(1000, 3);
+    let bodies = water_region_grid(seed);
+    let main = main_water_body(seed);
+    let half = fx!("0.5");
+    let at = |i: usize| {
+        V2::new(
+            Fx::from_num((i % WORLD_SIZE as usize) as i32) + half,
+            Fx::from_num((i / WORLD_SIZE as usize) as i32) + half,
+        )
+    };
+    let open: Vec<usize> = (0..bodies.len()).filter(|&i| bodies[i] == main).collect();
+    assert!(open.len() > 1000);
+    // opposite ends of the same ocean are mutually reachable
+    assert!(sea_reachable(seed, at(open[0]), at(open[open.len() - 1])));
+    assert!(sea_reachable(seed, at(open[open.len() - 1]), at(open[0])));
+    // a closed body (an inland lake or a rock pool) is a separate world
+    let closed = (0..bodies.len()).find(|&i| bodies[i] != u16::MAX && bodies[i] != main);
+    if let Some(c) = closed {
+        assert!(!sea_reachable(seed, at(c), at(open[0])), "a pond drained into the ocean");
+        assert!(sea_reachable(seed, at(c), at(c)));
+    }
+    // a hull that somehow stands on dry land is not over-filtered
+    let dry = (0..bodies.len()).find(|&i| bodies[i] == u16::MAX).unwrap();
+    assert!(sea_reachable(seed, at(dry), at(open[0])));
 }
 
 #[test]
@@ -520,7 +802,11 @@ fn resources_read_the_relief_not_just_the_biome_label() {
                 match n.res_type {
                     ResourceType::Stone => stone.push(s),
                     ResourceType::Wood => wood.push(s),
-                    ResourceType::Food if !is_coastal(seed, n.pos.x, n.pos.y) => herd.push(s),
+                    // herds are the food that stands on GROUND. This used to read
+                    // `!is_coastal`, which was the same set only because every
+                    // fishery was on a beach; now that they are in the water it
+                    // would sweep every school into the herd sample.
+                    ResourceType::Food if is_land(seed, n.pos.x, n.pos.y) => herd.push(s),
                     _ => {}
                 }
             }

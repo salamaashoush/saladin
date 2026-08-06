@@ -7,7 +7,10 @@ use crate::economy::{ResourceCost, Stockpile};
 use crate::enums::{BuildState, BuildingKind, ResourceType};
 use crate::math::{Fx, V2, dist2};
 use crate::tech::has_prereq_all;
-use crate::terrain::{fertility_at, is_buildable_tile, is_passable, is_water_tile};
+use crate::terrain::{
+    fertility_at, is_buildable_tile, is_passable, is_sailable, is_water_tile, main_water_body,
+    water_region_at,
+};
 use std::collections::HashSet;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -173,6 +176,43 @@ pub fn repair_charge(cost: &ResourceCost, hp_added: i32, max_hp: i32) -> Resourc
     scaled_cost(cost, REPAIR_COST_PCT as i64 * hp_added.clamp(0, max_hp.max(1)) as i64, 100 * m)
 }
 
+/// The tile a waterside structure's hulls float on: the water tile orthogonally
+/// bordering its footprint, ocean first and then lowest `tile_key`. Ocean first
+/// so a hut wedged between a puddle and the sea berths its skiff on the sea;
+/// lowest key after that so the answer is the same on every peer forever. A
+/// landlocked footprint has none, which is what refuses a beached hull.
+pub fn berth_of(seed: u32, footprint: i32, pos: V2) -> Option<V2> {
+    let tiles = footprint_tiles(footprint, pos.x, pos.y);
+    let inside: HashSet<i32> = tiles.iter().map(|t| tile_key(t.tx, t.ty)).collect();
+    let ocean = main_water_body(seed);
+    let mut best: Option<((bool, i32), i32, i32)> = None;
+    for t in &tiles {
+        for (dx, dy) in DIRS4 {
+            let (nx, ny) = (t.tx + dx, t.ty + dy);
+            let key = tile_key(nx, ny);
+            if inside.contains(&key) || !is_sailable(seed, nx, ny) {
+                continue;
+            }
+            let half = crate::fx!("0.5");
+            let off_ocean =
+                water_region_at(seed, Fx::from_num(nx) + half, Fx::from_num(ny) + half) != ocean;
+            let rank = ((off_ocean, key), nx, ny);
+            if best.is_none() || rank.0 < best.unwrap().0 {
+                best = Some(rank);
+            }
+        }
+    }
+    let half = crate::fx!("0.5");
+    best.map(|(_, tx, ty)| V2::new(Fx::from_num(tx) + half, Fx::from_num(ty) + half))
+}
+
+/// True when a structure's berth is on the map's main body of water — the ocean
+/// every coast shares, and therefore the only water a barge can cross anywhere.
+pub fn berth_is_seagoing(seed: u32, footprint: i32, pos: V2) -> bool {
+    berth_of(seed, footprint, pos)
+        .is_some_and(|b| water_region_at(seed, b.x, b.y) == main_water_body(seed))
+}
+
 /// True when a gatherer may deposit `res` here.
 pub fn accepts(def: &BuildingDef, res: ResourceType) -> bool {
     def.accepts & res_bit(res) != 0
@@ -195,6 +235,8 @@ pub enum PlaceError {
     Occupied,
     /// `requires_water` building with no open water (sea/river) on its border.
     NeedsWaterside,
+    /// Waterside, but only onto a lake or a creek: no berth on the main sea.
+    NeedsSeaBerth,
     /// Farther than TOWN_RADIUS from every building you own — towns grow
     /// outward, you cannot plant structures across the map.
     OutsideTown,
@@ -223,6 +265,7 @@ pub fn place_error_text(e: PlaceError) -> String {
         PlaceError::Terrain => "Cannot build here".into(),
         PlaceError::Occupied => "Blocked".into(),
         PlaceError::NeedsWaterside => "Needs a shoreline".into(),
+        PlaceError::NeedsSeaBerth => "Needs a sea berth".into(),
         PlaceError::OutsideTown => "Outside your town".into(),
         PlaceError::NoApproach => "No way in".into(),
         PlaceError::PoorSoil => "Soil too poor to farm".into(),
@@ -327,6 +370,11 @@ pub fn check_place<O: Fn(i32, i32) -> bool>(
         if !waterside {
             return Err(PlaceError::NeedsWaterside);
         }
+    }
+    if def.needs_sea_berth
+        && !berth_is_seagoing(seed, def.footprint, footprint_center(def.footprint, x, y))
+    {
+        return Err(PlaceError::NeedsSeaBerth);
     }
     if !own_buildings.is_empty() {
         let c = footprint_center(def.footprint, x, y);
@@ -540,6 +588,7 @@ mod tests {
             PlaceError::Terrain,
             PlaceError::Occupied,
             PlaceError::NeedsWaterside,
+            PlaceError::NeedsSeaBerth,
             PlaceError::OutsideTown,
             PlaceError::NoApproach,
             PlaceError::PoorSoil,
@@ -553,6 +602,142 @@ mod tests {
             let t = place_error_text(e);
             assert!(t.is_ascii() && !t.is_empty(), "{e:?} -> {t:?}");
         }
+    }
+
+    /// A berth is a place, not a search: the same footprint has to hand back the
+    /// same tile forever, and a hut in the middle of a field has none at all.
+    #[test]
+    fn a_berth_is_the_same_tile_every_time_and_only_beside_water() {
+        let seed = 1;
+        let mut found = 0;
+        for slot in 0..8 {
+            let start = crate::terrain::start_point(seed, slot);
+            // sweep the start's quarter for a shoreline tile a hut could sit on
+            let (mut shore, mut sx, mut sy) = (None, 0, 0);
+            for r in 1..60i32 {
+                if shore.is_some() {
+                    break;
+                }
+                for dy in -r..=r {
+                    for dx in -r..=r {
+                        if dx.abs().max(dy.abs()) != r {
+                            continue;
+                        }
+                        let (tx, ty) =
+                            (start.x.to_num::<i32>() + dx, start.y.to_num::<i32>() + dy);
+                        let c = footprint_center(1, Fx::from_num(tx), Fx::from_num(ty));
+                        if is_buildable_tile(seed, tx, ty) && berth_of(seed, 1, c).is_some() {
+                            shore = Some(c);
+                            (sx, sy) = (tx, ty);
+                            break;
+                        }
+                    }
+                    if shore.is_some() {
+                        break;
+                    }
+                }
+            }
+            let Some(c) = shore else { continue };
+            found += 1;
+            let first = berth_of(seed, 1, c).unwrap();
+            for _ in 0..100 {
+                assert_eq!(berth_of(seed, 1, c), Some(first), "berth wandered at {sx},{sy}");
+            }
+            let (bx, by) = (first.x.to_num::<i32>(), first.y.to_num::<i32>());
+            assert!(is_sailable(seed, bx, by), "berth is on dry land");
+            assert!(!is_passable(seed, bx, by), "a hull cannot berth where a man walks");
+            assert_eq!((bx - sx).abs() + (by - sy).abs(), 1, "berth is not beside the hut");
+        }
+        assert!(found > 0, "no start on seed {seed} has a shoreline at all");
+        // deep inland there is no berth, and that is what refuses a beached hull
+        let dry = footprint_center(1, Fx::from_num(WORLD_SIZE / 2), Fx::from_num(WORLD_SIZE / 2));
+        let inland = (0..WORLD_SIZE)
+            .flat_map(|ty| (0..WORLD_SIZE).map(move |tx| (tx, ty)))
+            .find(|(tx, ty)| {
+                is_passable(seed, *tx, *ty)
+                    && berth_of(seed, 1, footprint_center(1, Fx::from_num(*tx), Fx::from_num(*ty)))
+                        .is_none()
+            });
+        assert!(inland.is_some(), "every tile on the map touches water? {dry:?}");
+    }
+
+    /// The hut and the harbour ask DIFFERENT questions of the same shoreline —
+    /// which is the whole reason a naval base is a decision.
+    /// The hut and the harbour ask DIFFERENT questions of the same shoreline —
+    /// which is the whole reason a naval base is a decision and not a formality.
+    /// The Storehouse is the control: same 2x2 ground rules, no water rule at
+    /// all, so a site it accepts isolates the berth clause exactly.
+    #[test]
+    fn a_lake_takes_a_hut_and_refuses_a_harbour() {
+        let free = |_: i32, _: i32| false;
+        let (mut huts, mut quays) = (0, 0);
+        for seed in 1..40u32 {
+            let ocean = crate::terrain::main_water_body(seed);
+            let off_ocean = |fp: i32, c: V2| {
+                berth_of(seed, fp, c).is_some_and(|b| water_region_at(seed, b.x, b.y) != ocean)
+            };
+            for ty in 0..WORLD_SIZE {
+                for tx in 0..WORLD_SIZE {
+                    if !is_buildable_tile(seed, tx, ty) {
+                        continue;
+                    }
+                    let (x, y) = (Fx::from_num(tx), Fx::from_num(ty));
+                    if huts < 3 && off_ocean(1, footprint_center(1, x, y)) {
+                        // the hut only wants a shoreline, and a lake is one
+                        if check_place(seed, BuildingKind::FishingHut, x, y, free, &[]) == Ok(()) {
+                            huts += 1;
+                        }
+                    }
+                    if quays < 3
+                        && off_ocean(2, footprint_center(2, x, y))
+                        && check_place(seed, BuildingKind::Storehouse, x, y, free, &[]) == Ok(())
+                    {
+                        assert_eq!(
+                            check_place(seed, BuildingKind::Harbour, x, y, free, &[]),
+                            Err(PlaceError::NeedsSeaBerth),
+                            "seed {seed} sited a harbour on a lake at {tx},{ty}"
+                        );
+                        quays += 1;
+                    }
+                }
+            }
+            if huts >= 3 && quays >= 3 {
+                break;
+            }
+        }
+        assert!(huts > 0, "no seed in 1..40 accepted a hut on fresh water");
+        assert!(quays > 0, "no seed in 1..40 grew a lake big enough to test a harbour against");
+    }
+
+    /// And the ocean shore takes both — otherwise the rule above would pass by
+    /// refusing every harbour everywhere.
+    #[test]
+    fn the_ocean_shore_takes_a_harbour() {
+        let free = |_: i32, _: i32| false;
+        let mut sited = 0;
+        for seed in 1..12u32 {
+            let ocean = crate::terrain::main_water_body(seed);
+            'seed: for ty in 0..WORLD_SIZE {
+                for tx in 0..WORLD_SIZE {
+                    let (x, y) = (Fx::from_num(tx), Fx::from_num(ty));
+                    let c = footprint_center(2, x, y);
+                    let on_ocean =
+                        berth_of(seed, 2, c).is_some_and(|b| water_region_at(seed, b.x, b.y) == ocean);
+                    if !on_ocean || check_place(seed, BuildingKind::Storehouse, x, y, free, &[]) != Ok(())
+                    {
+                        continue;
+                    }
+                    assert_eq!(
+                        check_place(seed, BuildingKind::Harbour, x, y, free, &[]),
+                        Ok(()),
+                        "seed {seed} refused a harbour on the open coast at {tx},{ty}"
+                    );
+                    sited += 1;
+                    break 'seed;
+                }
+            }
+        }
+        assert!(sited >= 10, "only {sited} of 11 seeds had a legal harbour site anywhere");
     }
 
     #[test]

@@ -5,10 +5,11 @@ use crate::{GameIndex, MatchStatuses, PathScratch, WorldConfig};
 use bevy_ecs::prelude::*;
 use bevy_platform::collections::HashMap;
 use saladin_sim::{
-    AuraTarget, DEPOSIT_RANGE, Fx, GatherState, harvest_reach,
-    HARVEST_TIME, MAX_EXPANSIONS, Occupant, ResourceType, V2, WorkAura, approach_tile, building_def, dist, is_passable, move_cost_at,
+    AuraTarget, DEPOSIT_RANGE, Domain, Fx, GatherState, harvest_reach,
+    HARVEST_TIME, MAX_EXPANSIONS, Occupant, ResourceType, V2, WorkAura, approach_tile_in, berth_of, building_def, dist, domain_passable, is_sailable, move_cost_at,
     gate_blocks, nearest_reachable_passable_grid, occupancy_set, operational,
-    reach_budget, res_bit, tile_key, unit_def,
+    reach_budget, region_at, region_grid, res_bit, sea_reachable, tile_key, unit_def,
+    water_region_at, water_region_grid,
 };
 
 const AI_DT: Fx = saladin_sim::AI_DT;
@@ -33,9 +34,11 @@ const APPROACH_RADIUS: i32 = 4;
 /// see — buildings sealing a pocket the terrain leaves open — and it now reports
 /// whether it ran out of budget, because a walker must never conclude a node is
 /// unreachable from a search that simply stopped looking.
+#[allow(clippy::too_many_arguments)]
 fn move_patch(
     scratch: &mut PathScratch,
     seed: u32,
+    dom: Domain,
     occ: &std::collections::HashSet<i32>,
     gates: &[(i32, u64)],
     viewer: u64,
@@ -44,12 +47,31 @@ fn move_patch(
 ) -> Option<MovePatch> {
     let passable = |tx: i32, ty: i32| {
         let k = tile_key(tx, ty);
-        is_passable(seed, tx, ty) && !occ.contains(&k) && !gate_blocks(gates, k, viewer)
+        domain_passable(seed, dom, tx, ty) && !occ.contains(&k) && !gate_blocks(gates, k, viewer)
     };
-    let cost = |tx: i32, ty: i32| move_cost_at(seed, tx, ty);
-    if let Some(goal) = approach_tile(seed, &passable, from, to, APPROACH_RADIUS) {
+    // Open water costs the same everywhere: there is no naval move-cost grid,
+    // and the flat cost is what keeps the straight-line fast path — which IS
+    // the common case for a haul that never leaves the bay.
+    let cost = |tx: i32, ty: i32| match dom {
+        Domain::Land => move_cost_at(seed, tx, ty),
+        Domain::Sea => Fx::ONE,
+    };
+    let (regions, region) = match dom {
+        Domain::Land => (region_grid(seed), region_at(seed, from.x, from.y)),
+        Domain::Sea => (water_region_grid(seed), water_region_at(seed, from.x, from.y)),
+    };
+    if let Some(goal) = approach_tile_in(regions, region, &passable, from, to, APPROACH_RADIUS) {
         let path =
-            scratch.0.find_path_costed(&passable, &cost, from.x, from.y, goal.x, goal.y, MAX_EXPANSIONS);
+            scratch.0.find_path_costed_in(
+                &passable,
+                &cost,
+                from.x,
+                from.y,
+                goal.x,
+                goal.y,
+                MAX_EXPANSIONS,
+                dom.smoothing(),
+            );
         if !path.is_empty() {
             return Some(MovePatch { target: path[0], path, end: goal });
         }
@@ -64,7 +86,16 @@ fn move_patch(
         reach = nearest_reachable_passable_grid(&mut scratch.1, &passable, from, to, MAX_EXPANSIONS)?;
     }
     let path =
-        scratch.0.find_path_costed(&passable, &cost, from.x, from.y, reach.at.x, reach.at.y, MAX_EXPANSIONS);
+        scratch.0.find_path_costed_in(
+            &passable,
+            &cost,
+            from.x,
+            from.y,
+            reach.at.x,
+            reach.at.y,
+            MAX_EXPANSIONS,
+            dom.smoothing(),
+        );
     if path.is_empty() {
         None
     } else {
@@ -85,6 +116,11 @@ struct Dropoff {
     pos: V2,
     footprint: i32,
     accepts: u8,
+    /// Where a hull ties up. A haul that crosses the land/sea boundary is the
+    /// one deposit the region filter cannot answer on its own — the store is on
+    /// ground the boat can never enter, and its berth is the address that means
+    /// the same thing in both domains.
+    berth: Option<V2>,
 }
 
 /// A standing work bonus a building projects over the nodes around it.
@@ -129,11 +165,17 @@ pub fn gather(
         .filter(|(_, _, b, _)| operational(b.state))
         .filter_map(|(_, p, b, owner)| {
             let def = building_def(b.kind);
-            (def.accepts != 0).then_some(Dropoff {
+            (def.accepts != 0).then(|| Dropoff {
                 owner: owner.0,
                 pos: p.pos,
                 footprint: def.footprint,
                 accepts: def.accepts,
+                // only a waterside structure can ever have one, and only those
+                // pay for the lookup
+                berth: def
+                    .requires_water
+                    .then(|| berth_of(seed, def.footprint, p.pos))
+                    .flatten(),
             })
         })
         .collect();
@@ -181,14 +223,14 @@ pub fn gather(
     // itself for a school of fish. A GROWING crop stays in the map — a reaper
     // already walking to its own field keeps it — but never enters the candidate
     // list, so `best_node` can no longer offer anybody a field that is not in.
-    let mut node_map: HashMap<u64, (V2, Fx, bool)> = HashMap::new();
-    let mut nodes_list: Vec<(u64, V2, u64)> = Vec::new();
+    let mut node_map: HashMap<u64, (V2, Fx, bool, bool)> = HashMap::new();
+    let mut nodes_list: Vec<(u64, V2, u64, Domain)> = Vec::new();
     for (gid, p, n, m, crop) in q_nodes.iter() {
         let field = field_nodes.get(&gid.0).copied();
         let cut = reapable(n, field.is_some(), crop);
-        node_map.insert(gid.0, (p.pos, node_reach(seed, p.pos, field), cut));
+        node_map.insert(gid.0, (p.pos, node_reach(seed, p.pos, field), cut, n.regen > 0));
         if cut {
-            nodes_list.push((gid.0, p.pos, m.0));
+            nodes_list.push((gid.0, p.pos, m.0, node_domain(seed, p.pos)));
         }
     }
 
@@ -196,8 +238,10 @@ pub fn gather(
     let player_ent: HashMap<u64, Entity> =
         q_players.iter().map(|(e, p)| (p.player_id, e)).collect();
 
-    // nearest dropoff for (owner, carry_type) from a position
-    let nearest_dropoff = |owner: u64, carry: ResourceType, from: V2| -> Option<Dropoff> {
+    // nearest dropoff for (owner, carry_type) from a position. A hull can only
+    // bank where it can tie up, and only on water its own hull can cross —
+    // otherwise a skiff picks the keep two tiles inland and strands itself.
+    let nearest_dropoff = |owner: u64, carry: ResourceType, from: V2, dom: Domain| -> Option<Dropoff> {
         let mut best: Option<Dropoff> = None;
         let mut best_d = Fx::MAX;
         for d in &dropoffs {
@@ -205,6 +249,9 @@ pub fn gather(
                 continue;
             }
             if d.accepts & res_bit(carry) == 0 {
+                continue;
+            }
+            if dom == Domain::Sea && !d.berth.is_some_and(|b| sea_reachable(seed, from, b)) {
                 continue;
             }
             let dd = dist(from, d.pos);
@@ -233,18 +280,24 @@ pub fn gather(
         }
         let here = pos.pos;
         let mid = mid.0;
+        let dom = unit_def(u.kind).domain;
 
         match u.gather_state {
             GatherState::ToResource => {
-                let Some((node_pos, reach, _)) = node_map.get(&u.target_node).copied() else {
-                    retarget(&mut u, best_node(&mut scratch.1, &look, here, mid, owner.0, 0));
+                let Some((node_pos, reach, _, _)) = node_map.get(&u.target_node).copied() else {
+                    retarget(&mut u, best_node(&mut scratch.1, &look, dom, here, mid, owner.0, 0));
                     continue;
                 };
-                if !saladin_sim::node_reachable(seed, here, node_pos) {
-                    // across water — retarget (region-filtered) instead of
-                    // marching to the shore and discovering it there
+                // A fishery is worked from a boat and a seam from the shore.
+                // The filter is here as well as in `best_node` because an order
+                // and a save both put a node in `target_node` without asking,
+                // and `harvest_reach` on a water node is 1.7 tiles — enough for
+                // a peasant on the beach to net the first tile of sea.
+                if node_domain(seed, node_pos) != dom
+                    || !reachable(seed, dom, here, node_pos)
+                {
                     let skip = u.target_node;
-                    retarget(&mut u, best_node(&mut scratch.1, &look, here, mid, owner.0, skip));
+                    retarget(&mut u, best_node(&mut scratch.1, &look, dom, here, mid, owner.0, skip));
                     continue;
                 }
                 if dist(here, node_pos) <= reach {
@@ -252,7 +305,7 @@ pub fn gather(
                     u.harvest_timer = Fx::ZERO;
                     u.has_target = false;
                 } else if !u.has_target {
-                    let patch = move_patch(&mut scratch, seed, &occ, &gates, owner.0, here, node_pos)
+                    let patch = move_patch(&mut scratch, seed, dom, &occ, &gates, owner.0, here, node_pos)
                         .filter(|p| !stuck(here, p.end, node_pos, reach));
                     match patch {
                         Some(p) => {
@@ -269,7 +322,7 @@ pub fn gather(
                         // judgement here is now A* actually failing.
                         None => {
                             let skip = u.target_node;
-                            retarget(&mut u, best_node(&mut scratch.1, &look, here, mid, owner.0, skip));
+                            retarget(&mut u, best_node(&mut scratch.1, &look, dom, here, mid, owner.0, skip));
                         }
                     }
                 }
@@ -277,16 +330,23 @@ pub fn gather(
             GatherState::Harvesting => {
                 let Some(node_e) = index.get(u.target_node) else {
                     if !back_to_work(&mut u) {
-                        retarget(&mut u, best_node(&mut scratch.1, &look, here, mid, owner.0, 0));
+                        retarget(&mut u, best_node(&mut scratch.1, &look, dom, here, mid, owner.0, 0));
                     }
                     continue;
                 };
                 let Ok((_, npos, mut node, _, mut crop)) = q_nodes.get_mut(node_e) else {
                     if !back_to_work(&mut u) {
-                        retarget(&mut u, best_node(&mut scratch.1, &look, here, mid, owner.0, 0));
+                        retarget(&mut u, best_node(&mut scratch.1, &look, dom, here, mid, owner.0, 0));
                     }
                     continue;
                 };
+                if node_domain(seed, npos.pos) != dom {
+                    let skip = u.target_node;
+                    if !back_to_work(&mut u) {
+                        retarget(&mut u, best_node(&mut scratch.1, &look, dom, here, mid, owner.0, skip));
+                    }
+                    continue;
+                }
                 let is_field = field_nodes.contains_key(&u.target_node);
                 // A crop that is still growing cannot be cut. A hand who has a
                 // plot of his own goes back to TENDING it — that is the whole
@@ -301,15 +361,27 @@ pub fn gather(
                         u.harvest_timer = Fx::ZERO;
                     }
                     if !back_to_work(&mut u) {
-                        retarget(&mut u, best_node(&mut scratch.1, &look, here, mid, owner.0, 0));
+                        retarget(&mut u, best_node(&mut scratch.1, &look, dom, here, mid, owner.0, 0));
                     }
                     continue;
                 }
                 // another harvester may have emptied it earlier THIS tick (its
                 // despawn is deferred): treat 0-remaining as gone, never dupe
                 if node.remaining <= 0 {
+                    // A boat over a school it has just fished out WAITS for it.
+                    // `gather` never looks at an idle hand with no job site, so
+                    // a hull that stands down here never fishes again — and the
+                    // node itself leaves and re-enters the candidate list, so
+                    // holding needs no state of its own. A boat on station is
+                    // always empty; the harvest step always banks.
+                    if dom == Domain::Sea && node.regen > 0 {
+                        if u.harvest_timer != Fx::ZERO {
+                            u.harvest_timer = Fx::ZERO;
+                        }
+                        continue;
+                    }
                     if !back_to_work(&mut u) {
-                        retarget(&mut u, best_node(&mut scratch.1, &look, here, mid, owner.0, 0));
+                        retarget(&mut u, best_node(&mut scratch.1, &look, dom, here, mid, owner.0, 0));
                     }
                     continue;
                 }
@@ -318,7 +390,7 @@ pub fn gather(
                 let target = if is_field {
                     Some(AuraTarget::Field)
                 } else if node.res_type == ResourceType::Food
-                    && !is_passable(seed, npos.pos.x.to_num::<i32>(), npos.pos.y.to_num::<i32>())
+                    && is_sailable(seed, npos.pos.x.to_num::<i32>(), npos.pos.y.to_num::<i32>())
                 {
                     Some(AuraTarget::WaterFood)
                 } else {
@@ -351,9 +423,12 @@ pub fn gather(
                 }
                 // ONLY finite deposits retire. A field reaped bare is stubble,
                 // not a hole: it re-sows itself next economy tick, and deleting
-                // it here is what turned worked farms into 50 wood of scenery —
-                // and what killed a fishery FASTER once a hut doubled the draw.
-                if rem <= 0 && node.regen == 0 && !tended_water(&auras, npos.pos) {
+                // it here is what turned worked farms into 50 wood of scenery.
+                // A fishery is renewable in its own right, so `regen` answers
+                // this on its own — the old "is a hut near it" shim answered it
+                // for the WOOD and STONE beside a hut too, and every one of
+                // those became a permanent zero-remaining row.
+                if rem <= 0 && node.regen == 0 {
                     commands.entity(node_e).despawn();
                 }
                 u.carrying = take;
@@ -361,12 +436,20 @@ pub fn gather(
                 u.gather_state = GatherState::ToStockpile;
             }
             GatherState::ToStockpile => {
-                let Some(drop) = nearest_dropoff(owner.0, u.carry_type, here) else {
+                let Some(drop) = nearest_dropoff(owner.0, u.carry_type, here, dom) else {
                     u.gather_state = GatherState::Idle;
                     u.has_target = false;
                     continue;
                 };
-                if !saladin_sim::node_reachable(seed, here, drop.pos) {
+                // A hull steers for the berth, not the door. The banking test
+                // below is unchanged and still measures the BUILDING: a
+                // waterside store always has a sailable tile abutting it, so
+                // standing on the berth is standing at the store.
+                let goal = match dom {
+                    Domain::Sea => drop.berth.unwrap_or(drop.pos),
+                    Domain::Land => drop.pos,
+                };
+                if !reachable(seed, dom, here, goal) {
                     // the dropoff sits in a region this carrier can never walk
                     // to — idle now rather than failing pathfinds forever
                     u.gather_state = GatherState::Idle;
@@ -391,13 +474,22 @@ pub fn gather(
                     // — a field cut to stubble is not that, so the carrier goes
                     // back to the plot he belongs to (or takes other work) rather
                     // than standing in the furrows waiting out a whole season
-                    if node_map.get(&u.target_node).is_some_and(|(_, _, cut)| *cut) {
+                    // A boat goes back to its school even when the school is
+                    // empty: it holds station over the water it fished until the
+                    // fish come back. Standing it down instead loses it for the
+                    // match — `gather` never looks at an idle hand with no job
+                    // site, and a boat has none.
+                    let mine = node_map.get(&u.target_node);
+                    let back = mine.is_some_and(|(_, _, cut, renews)| {
+                        *cut || (dom == Domain::Sea && *renews)
+                    });
+                    if back {
                         u.gather_state = GatherState::ToResource;
                     } else if !back_to_work(&mut u) {
-                        retarget(&mut u, best_node(&mut scratch.1, &look, here, mid, owner.0, 0));
+                        retarget(&mut u, best_node(&mut scratch.1, &look, dom, here, mid, owner.0, 0));
                     }
                 } else if !u.has_target {
-                    match move_patch(&mut scratch, seed, &occ, &gates, owner.0, here, drop.pos) {
+                    match move_patch(&mut scratch, seed, dom, &occ, &gates, owner.0, here, goal) {
                         Some(p) => {
                             u.path = p.path;
                             u.path_idx = 0;
@@ -422,7 +514,7 @@ pub fn gather(
             GatherState::Constructing => {
                 let Some(&field) = farm_field.get(&u.job_site) else { continue };
                 if unit_def(u.kind).carry > 0
-                    && node_map.get(&field).is_some_and(|(_, _, cut)| *cut)
+                    && node_map.get(&field).is_some_and(|(_, _, cut, _)| *cut)
                 {
                     u.target_node = field;
                     u.gather_state = GatherState::ToResource;
@@ -506,10 +598,12 @@ fn retarget(u: &mut Unit, node: Option<u64>) {
 /// How far a harvester must be able to get to work a node. The span of
 /// unstandable ground UNDER the node is what the reach has to clear: a farm's
 /// whole footprint for a crop, the water tile itself for a school of fish.
+/// WATER, not "impassable" — a cliff is impassable and dry, and a herd grazing
+/// under one was being handed the fishery's span.
 pub(crate) fn node_reach(seed: u32, pos: V2, field_footprint: Option<i32>) -> Fx {
     let span = match field_footprint {
         Some(fp) => fp,
-        None if !is_passable(seed, pos.x.to_num::<i32>(), pos.y.to_num::<i32>()) => 1,
+        None if is_sailable(seed, pos.x.to_num::<i32>(), pos.y.to_num::<i32>()) => 1,
         None => 0,
     };
     harvest_reach(span)
@@ -537,13 +631,25 @@ pub(crate) fn workable(flood: &saladin_sim::Flood, npos: V2, reach: Fx) -> bool 
     false
 }
 
-/// Does a hut's nets cover this water? Water a hut restocks is a fishery, not a
-/// deposit — stripping it bare must not delete the very thing the hut was raised
-/// to sustain.
-fn tended_water(auras: &[Aura], at: V2) -> bool {
-    auras.iter().any(|a| {
-        a.aura.target == AuraTarget::WaterFood && a.aura.regen > 0 && dist(a.pos, at) <= a.aura.radius
-    })
+/// Which domain a node belongs to, and therefore who may work it. "Is this
+/// aquatic" is a pure function of the GROUND — it never changes, it is already
+/// cached O(1), and it needs no field on the row, no word in the StateHash and
+/// no save migration. The old test was `!is_passable`, which called a cliff
+/// face the sea.
+pub(crate) fn node_domain(seed: u32, at: V2) -> Domain {
+    if is_sailable(seed, at.x.to_num::<i32>(), at.y.to_num::<i32>()) {
+        Domain::Sea
+    } else {
+        Domain::Land
+    }
+}
+
+/// "Could this mover ever get there" — the region filter of its own domain.
+fn reachable(seed: u32, dom: Domain, from: V2, to: V2) -> bool {
+    match dom {
+        Domain::Land => saladin_sim::node_reachable(seed, from, to),
+        Domain::Sea => sea_reachable(seed, from, to),
+    }
 }
 
 /// Everything `best_node` needs to judge a node without touching the world.
@@ -551,8 +657,8 @@ struct Look<'a> {
     seed: u32,
     occ: &'a std::collections::HashSet<i32>,
     gates: &'a [(i32, u64)],
-    nodes: &'a [(u64, V2, u64)],
-    node_map: &'a HashMap<u64, (V2, Fx, bool)>,
+    nodes: &'a [(u64, V2, u64, Domain)],
+    node_map: &'a HashMap<u64, (V2, Fx, bool, bool)>,
 }
 
 /// How many nearest candidates to try before standing the walker down. Each
@@ -573,9 +679,11 @@ const NODE_TRIES: usize = 8;
 /// then asks of each candidate in ascending distance whether any tile it reached
 /// is inside that node's harvest reach. One flood answers it for every
 /// candidate; an A* per candidate would not be affordable.
+#[allow(clippy::too_many_arguments)]
 fn best_node(
     flood: &mut saladin_sim::Flood,
     look: &Look,
+    dom: Domain,
     from: V2,
     match_id: u64,
     owner: u64,
@@ -584,7 +692,9 @@ fn best_node(
     let seed = look.seed;
     let passable = |tx: i32, ty: i32| {
         let k = tile_key(tx, ty);
-        is_passable(seed, tx, ty) && !look.occ.contains(&k) && !gate_blocks(look.gates, k, owner)
+        domain_passable(seed, dom, tx, ty)
+            && !look.occ.contains(&k)
+            && !gate_blocks(look.gates, k, owner)
     };
     if !flood.explore(&passable, from, MAX_EXPANSIONS) {
         return None;
@@ -594,11 +704,14 @@ fn best_node(
     loop {
         let mut best: Option<u64> = None;
         let mut best_d = Fx::MAX;
-        for (id, pos, mid) in look.nodes {
-            if *mid != match_id || *id == skip || rejected[..n_rej].contains(id) {
+        for (id, pos, mid, ndom) in look.nodes {
+            // Domain first, and BEFORE the retry budget: `NODE_TRIES` is 8, and
+            // a shore start with eight schools nearer than any rock would burn
+            // every retry on water and stand the peasant down.
+            if *ndom != dom || *mid != match_id || *id == skip || rejected[..n_rej].contains(id) {
                 continue;
             }
-            if !saladin_sim::node_reachable(seed, from, *pos) {
+            if !reachable(seed, dom, from, *pos) {
                 continue;
             }
             let dd = saladin_sim::dist2(from, *pos);
@@ -608,7 +721,7 @@ fn best_node(
             }
         }
         let id = best?;
-        let (npos, reach, _) = look.node_map.get(&id).copied()?;
+        let (npos, reach, _, _) = look.node_map.get(&id).copied()?;
         if workable(flood, npos, reach) {
             return Some(id);
         }

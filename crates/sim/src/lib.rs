@@ -44,6 +44,7 @@ pub use ai::{
     dynamic_peasant_target, eats_food, food_crisis, mustered, next_army_kind, next_build,
     next_phase, next_trade, raid_quota, ranked_counters, recall_count, should_assault,
     should_recall, should_retreat, squad_role, target_for_role, counter_dps, unit_power,
+    naval_wanted,
 };
 pub use content::{
     AiDifficulty, AiProfile, MATCH_PRESETS, MAX_AI_OPPONENTS, MatchPreset, PLAYER_COLORS,
@@ -56,27 +57,33 @@ pub use los::{
 };
 pub use match_state::{MatchStatus, match_simulates};
 pub use biomes::{
-    Biome, BiomeDef, biome_buildable, biome_def,
-    biome_is_fresh_water, biome_is_water, biome_passable, fish_density,
+    Biome, BiomeDef, WaterClass, biome_buildable, biome_def,
+    biome_is_fresh_water, biome_is_water, biome_passable, biome_sailable, fish_density,
     game_density, gold_density, motherlode_density, move_cost_mul, rock_density, tree_density,
+    water_class,
 };
 pub use climate::{CLIMATES, ClimateArchetype, climate_archetype, highland, whittaker};
 pub use plates::{PlateSample, Plates};
 pub use pathfinding::{
-    AStar, Flood, MAX_EXPANSIONS, Reach, approach_tile, find_path_grid, line_of_sight,
-    nearest_passable_grid, nearest_reachable_passable_grid, reach_budget,
+    AStar, Flood, MAX_EXPANSIONS, Reach, Smoothing, approach_tile, approach_tile_in,
+    clear_straight_line, find_path_grid, line_of_sight, nearest_passable_grid,
+    nearest_reachable_passable_grid, reach_budget,
 };
 pub use terrain::{
-    FAIR_MIN_FOOD, FAIR_MIN_STONE, FAIR_MIN_WOOD, FAIR_RADIUS, ScatterRule, ScatteredNode,
+    Domain, FAIR_MIN_FOOD, FAIR_MIN_STONE, FAIR_MIN_WOOD, FAIR_RADIUS, ScatterRule, ScatteredNode,
     TerrainSample, compose_seed, fair_start_nodes, find_land_near, is_coastal, is_land,
     NodeSite, belt_at, fertility_at, is_passable, node_reachable, node_site, ore_at, passable_grid,
     region_at, slope_at,
     region_grid, surface_height, temp_at, world_climate, move_cost_at, move_cost_grid,
-    dominant_region, buildable_grid, find_keep_site, is_buildable_tile, is_water_tile, sample_terrain, scatter_nodes,
-    seed_base, seed_bias, seed_preset, start_point,
+    dominant_region, buildable_grid, domain_passable, find_keep_site, is_buildable_tile,
+    is_sailable, is_water_tile, main_water_body, sailable_grid, sample_terrain, scatter_nodes,
+    sea_reachable, seed_base, seed_bias, seed_preset, start_point, start_regions,
+    water_region_at,
+    water_region_grid,
 };
 pub use buildings::{
-    BUILD_SLOPE_MAX, FOUNDATION_RELIEF, Occupant, PlaceError, Tile, accepts, build_rate,
+    BUILD_SLOPE_MAX, FOUNDATION_RELIEF, Occupant, PlaceError, Tile, accepts, berth_is_seagoing,
+    berth_of, build_rate,
     cancel_refund, check_build, check_place, composes_with_walls, demolish_refund,
     find_buildable_near, footprint_relief, soil_quality, gate_blocks, hp_step, operational,
     place_error_text, repair_charge, site_start_hp, work_step,

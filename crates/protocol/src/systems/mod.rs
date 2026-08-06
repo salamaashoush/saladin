@@ -8,7 +8,7 @@ mod combat;
 mod construction;
 mod economy;
 mod gather;
-pub(crate) use gather::{node_reach, workable};
+pub(crate) use gather::{node_domain, node_reach, workable};
 mod movement;
 mod research;
 mod separation;

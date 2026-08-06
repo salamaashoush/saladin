@@ -411,9 +411,10 @@ fn build_parts(kind: UnitKind) -> (Vec<Mesh>, Spans) {
 
     let mounted = is_mounted(kind);
     let siege = matches!(kind, UnitKind::Ram | UnitKind::Mangonel);
+    let hull = unit_def(kind).afloat();
 
-    // ---- Infantry / rider body (skipped for siege engines) ----
-    if !siege {
+    // ---- Infantry / rider body (skipped for siege engines and hulls) ----
+    if !siege && !hull {
         let base_y = if mounted { h * SADDLE_Y } else { 0.0 };
 
         if mounted {
@@ -1077,10 +1078,151 @@ fn build_parts(kind: UnitKind) -> (Vec<Mesh>, Spans) {
                 }
             }
         }
+        UnitKind::FishingSkiff => push_skiff(&mut parts, &p),
+        UnitKind::Barge => push_barge(&mut parts, &p),
         _ => {}
     }
 
     (parts, spans)
+}
+
+// ---- Hulls ----------------------------------------------------------------
+// A hull is not a body: no legs, no arms, nothing that walks. It is sized in
+// WORLD units rather than off `radius`, because a boat's footprint radius is a
+// separation number (the barge shares the ram's, deliberately) and a boat that
+// read as 0.9 tiles long would look like flotsam. Everything lands in `Body`,
+// so `animate_units` leaves it alone and the bob/wake belong to the water.
+// Authored bow-toward +Z, like every other kind.
+
+/// Authored (length, beam) of a hull in world units. ONE table: the rig, the
+/// impostor, the selection ring and the wake all size off it, so a boat can
+/// never grow a wake wider than itself.
+pub fn hull_dims(kind: UnitKind) -> (f32, f32) {
+    match kind {
+        UnitKind::Barge => (2.5, 1.15),
+        _ => (1.7, 0.66),
+    }
+}
+
+/// Planked deck with a raised gunwale rail; the rail carries the team stripe.
+fn push_deck(parts: &mut Vec<Mesh>, p: &Pal, len: f32, beam: f32, y: f32, rail: f32) {
+    parts.push(part(boxm(beam * 0.94, 0.05, len * 0.9), p.wood, xyz(0.0, y, 0.0)));
+    for sx in [-1.0f32, 1.0] {
+        parts.push(part(
+            boxm(0.055, rail, len * 0.92),
+            TINT,
+            xyz(sx * beam * 0.47, y + rail * 0.5, 0.0),
+        ));
+    }
+}
+
+/// Fishing Skiff: an open double-ended boat under one lateen yard, with the
+/// net it works over the stern. Small, and it has to read as a BOAT at
+/// gameplay zoom, which is what the sail is for.
+fn push_skiff(parts: &mut Vec<Mesh>, p: &Pal) {
+    let (len, beam) = hull_dims(UnitKind::FishingSkiff);
+    // OPEN boat: bottom, two strakes and a pointed prow. A closed rounded hull
+    // reads as a lozenge of wood from the iso camera — you have to see INTO it.
+    parts.push(part(boxm(beam * 0.82, 0.1, len * 0.7), p.wood, xyz(0.0, 0.07, 0.0)));
+    for sx in [-1.0f32, 1.0] {
+        parts.push(part(boxm(0.055, 0.24, len * 0.72), p.wood, xyz(sx * beam * 0.4, 0.18, 0.0)));
+    }
+    // Raked prow and a small transom.
+    parts.push(part(
+        cone(beam * 0.4, len * 0.3, 6),
+        p.wood,
+        at(0.0, 0.15, len * 0.42, Quat::from_rotation_x(FRAC_PI_2)),
+    ));
+    parts.push(part(boxm(beam * 0.8, 0.24, 0.07), p.wood, xyz(0.0, 0.18, -len * 0.36)));
+    // Sheer strake in the team colour: the one thing you read at a glance.
+    for sx in [-1.0f32, 1.0] {
+        parts.push(part(boxm(0.07, 0.07, len * 0.74), TINT, xyz(sx * beam * 0.41, 0.31, 0.0)));
+    }
+    // Thwarts across the open boat, and the deck boards under them.
+    parts.push(part(boxm(beam * 0.78, 0.04, len * 0.66), p.wood_dark, xyz(0.0, 0.13, 0.0)));
+    for cz in [0.28f32, -0.24] {
+        parts.push(part(boxm(beam * 0.78, 0.05, 0.13), p.wood, xyz(0.0, 0.26, cz)));
+    }
+    // Mast, raked lateen yard, and the sail hung off it. The sail is canted off
+    // the keel line so an overhead camera never catches it edge-on and loses it.
+    parts.push(part(cyl(0.026, 0.032, 1.0, 5), p.wood_dark, xyz(0.0, 0.72, 0.16)));
+    parts.push(part(
+        cyl(0.018, 0.018, 1.05, 5),
+        p.wood_dark,
+        at(0.0, 1.0, 0.24, Quat::from_rotation_x(-0.9)),
+    ));
+    parts.push(part(
+        boxm(0.05, 0.62, 0.62),
+        p.white_cloth,
+        at(0.1, 0.7, 0.3, Quat::from_rotation_y(0.5) * Quat::from_rotation_x(-0.22)),
+    ));
+    // The net over the stern quarter on its float line — this is the JOB.
+    parts.push(part(boxm(beam * 0.5, 0.13, 0.26), p.rope, xyz(-0.06, 0.3, -len * 0.26)));
+    for (fx_, fz) in [(beam * 0.36, -0.5f32), (beam * 0.36, -0.66)] {
+        parts.push(part(sphere(0.05, 6, 5), p.wood_dark, xyz(fx_, 0.36, fz)));
+    }
+    // Steering oar off the quarter.
+    parts.push(part(
+        cyl(0.022, 0.022, 0.62, 5),
+        p.wood,
+        at(beam * 0.46, 0.32, -len * 0.3, Quat::from_rotation_z(0.6)),
+    ));
+}
+
+/// Barge: a beamy flat-bottomed lighter with a lowering bow ramp, cargo lashed
+/// amidships and a steering oar aft. It has to read as CAPACITY next to the
+/// skiff, so it is wide, square and loaded.
+fn push_barge(parts: &mut Vec<Mesh>, p: &Pal) {
+    let (len, beam) = hull_dims(UnitKind::Barge);
+    // Flat bottom + slab sides: a barge is built, not carved.
+    parts.push(part(boxm(beam, 0.16, len * 0.82), p.wood, xyz(0.0, 0.1, 0.0)));
+    for sx in [-1.0f32, 1.0] {
+        parts.push(part(boxm(0.08, 0.34, len * 0.82), p.wood, xyz(sx * beam * 0.46, 0.28, 0.0)));
+    }
+    // Raked bow wedge and a square transom.
+    parts.push(part(
+        boxm(beam, 0.3, len * 0.24),
+        p.wood,
+        at(0.0, 0.2, len * 0.46, Quat::from_rotation_x(-0.42)),
+    ));
+    parts.push(part(boxm(beam, 0.34, 0.09), p.wood_dark, xyz(0.0, 0.26, -len * 0.42)));
+    // Wale strake along both sides at the sheer.
+    for sx in [-1.0f32, 1.0] {
+        parts.push(part(
+            boxm(0.06, 0.07, len * 0.84),
+            p.wood_dark,
+            xyz(sx * beam * 0.49, 0.44, 0.0),
+        ));
+    }
+    push_deck(parts, p, len * 0.8, beam, 0.2, 0.26);
+    // Cargo lashed amidships: crates, a barrel, rope over the lot.
+    for (cx, cz, w) in [(-0.22f32, 0.1f32, 0.34f32), (0.26, -0.24, 0.3), (-0.06, -0.55, 0.26)] {
+        parts.push(part(boxm(w, w * 0.8, w), p.leather, xyz(cx, 0.2 + w * 0.4, cz)));
+    }
+    parts.push(part(cyl(0.13, 0.13, 0.3, 7), p.wood_dark, xyz(0.3, 0.35, 0.42)));
+    parts.push(part(boxm(beam * 0.9, 0.03, 0.03), p.rope, xyz(0.0, 0.5, -0.1)));
+    // Short mast with the sail furled to the yard — a ferry under oars.
+    parts.push(part(cyl(0.045, 0.05, 0.8, 5), p.wood_dark, xyz(0.0, 0.58, 0.55)));
+    parts.push(part(
+        cyl(0.055, 0.055, 0.76, 6),
+        p.white_cloth,
+        at(0.0, 0.92, 0.55, Quat::from_rotation_z(FRAC_PI_2)),
+    ));
+    // Gaskets round the bundle, so it reads as furled canvas and not a pipe.
+    for sx in [-0.24f32, 0.0, 0.24] {
+        parts.push(part(
+            cyl(0.062, 0.062, 0.035, 6),
+            p.rope,
+            at(sx, 0.92, 0.55, Quat::from_rotation_z(FRAC_PI_2)),
+        ));
+    }
+    // Steering oar over the transom, and a pole for the shallows.
+    parts.push(part(
+        cyl(0.03, 0.03, 0.85, 5),
+        p.wood,
+        at(beam * 0.42, 0.42, -len * 0.4, Quat::from_rotation_z(0.55)),
+    ));
+    parts.push(part(boxm(0.05, 0.24, 0.22), p.wood_dark, xyz(beam * 0.6, 0.16, -len * 0.5)));
 }
 
 /// Low-poly far-zoom impostor: gross shape (foot vs mounted vs siege), team
@@ -1099,6 +1241,14 @@ pub fn unit_impostor_mesh(kind: UnitKind) -> Mesh {
         // A single tinted block roughly the size of the engine, plus a wood base.
         parts.push(part(boxm(h * 1.1, h * 0.5, h * 0.7), wood, xyz(0.0, r * 0.5, 0.0)));
         parts.push(part(boxm(h * 1.0, h * 0.5, h * 0.6), TINT, xyz(0.0, h * 0.9, 0.0)));
+        return merge(parts);
+    }
+    if d.afloat() {
+        // Hull block plus one tinted mark: at far zoom a boat is a long dark
+        // shape on the water, and the only thing worth reading is whose it is.
+        let (len, beam) = hull_dims(kind);
+        parts.push(part(boxm(beam, 0.26, len * 0.9), wood, xyz(0.0, 0.14, 0.0)));
+        parts.push(part(boxm(beam * 0.5, 0.2, len * 0.3), TINT, xyz(0.0, 0.36, 0.0)));
         return merge(parts);
     }
 
@@ -1156,6 +1306,29 @@ mod tests {
                 assert!(p.mesh.count_vertices() > 0, "{kind:?} {:?} is an empty mesh", p.group);
             }
             assert!(unit_impostor_mesh(kind).count_vertices() > 0, "{kind:?} impostor");
+        }
+    }
+
+    /// A hull heels as ONE rigid piece about the waterline. `animate_units`
+    /// rotates every rig part about that part's OWN pivot, so the moment a hull
+    /// part lands in a group whose pivot is off the origin — a leg, an arm, a
+    /// wheel slot — the boat shears apart the first time it rolls.
+    #[test]
+    fn a_hull_is_one_rigid_part_pivoted_on_its_waterline() {
+        for &kind in UnitKind::ALL {
+            if !unit_def(kind).afloat() {
+                continue;
+            }
+            let rig = unit_rig(kind);
+            assert_eq!(rig.len(), 1, "{kind:?} is {} rig parts, not one hull", rig.len());
+            assert_eq!(rig[0].group, RigGroup::Body, "{kind:?} hull is not in Body");
+            assert_eq!(rig[0].pivot, Vec3::ZERO, "{kind:?} hull pivots at {:?}", rig[0].pivot);
+            // and it is sized like a boat: `radius` is a separation number (the
+            // barge shares the ram's on purpose) and would draw flotsam
+            let (len, beam) = hull_dims(kind);
+            let r = unit_def(kind).radius.to_num::<f32>();
+            assert!(len > r * 2.0, "{kind:?} is {len} long against a {r} radius");
+            assert!(len > beam * 1.6, "{kind:?} is {len}x{beam} — that is a raft");
         }
     }
 

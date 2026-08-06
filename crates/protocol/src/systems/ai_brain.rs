@@ -1,7 +1,7 @@
 use crate::commands::{
-    assign_builders, assign_idle_gatherers, build_context, build_with, garrison, group_attack,
-    group_move, market_buy_cmd, market_trade, move_unit, repair, start_research, train,
-    ungarrison, upgrade_building,
+    assign_builders, assign_idle_gatherers, build_context, build_with, disembark, embark,
+    garrison, group_attack, group_move, market_buy_cmd, market_trade, move_unit, repair,
+    start_research, train, ungarrison, upgrade_building,
 };
 use crate::components::*;
 use bevy_ecs::prelude::*;
@@ -12,7 +12,27 @@ use std::collections::HashSet as StdSet;
 const AI_BRAIN_DT: Fx = saladin_sim::AI_BRAIN_DT;
 const HOME_THREAT_RADIUS: Fx = saladin_sim::fx!("24"); // enemy combatants this close to home = a threat
 const HOME_RADIUS: Fx = saladin_sim::fx!("18"); // own combat units this close to a building count as "home"
-const SHORE_SCAN: i32 = 14; // tile radius around the keep that counts as "shore near"
+// Tile radius around the keep the bot looks for a shoreline in. 14 missed
+// several percent of starts outright — a Highlands keep sits up to ~18 tiles
+// from the nearest water — and 20 is still inside TOWN_RADIUS on the diagonal,
+// so nothing it finds is refused for being outside the town.
+const SHORE_SCAN: i32 = 20;
+/// How far out a bot looks for ground it can SOW. Deliberately narrower than
+/// `SHORE_SCAN`: a soil probe is re-run every decision window forever, a shore
+/// probe once behind a cooldown.
+const SOIL_SCAN: i32 = 14;
+/// How far out a skiff is worth sending. Also the fleet cap: three boats over
+/// one school is 60 wood of queue.
+const FISHERY_RANGE: Fx = saladin_sim::fx!("40");
+/// Seconds before a bot probes the shoreline again after a waterside site was
+/// refused. This used to be a LATCH, so one blocked probe — a peasant standing
+/// on the only legal tile — disabled fishing for that bot for the whole match.
+const WATERSIDE_RETRY: Fx = saladin_sim::fx!("45");
+/// Open sea this close to a stranded cluster means a barge can put men on it.
+const OFFSHORE_COAST_SCAN: i32 = 6;
+/// A hull this close to its quay is loading, and this close to the far shore is
+/// landing.
+const BERTH_NEAR: Fx = saladin_sim::fx!("2.5");
 // How far out a bot will plant a forward Storehouse. Past this the outpost is
 // indefensible and the haul home costs more than the drop-off saves.
 const REMOTE_CLUSTER_MAX: Fx = saladin_sim::fx!("48");
@@ -60,7 +80,7 @@ struct BotSnap {
     match_id: u64,
     defeated: bool,
     wave_launched: i32,
-    fishing_blocked: bool,
+    waterside_cd: Fx,
     famine: bool,
 }
 
@@ -116,7 +136,7 @@ pub fn ai_brain(world: &mut World) {
                 match_id: m.0,
                 defeated: p.defeated,
                 wave_launched: b.wave_launched,
-                fishing_blocked: b.fishing_blocked,
+                waterside_cd: b.waterside_cd,
                 famine: b.famine,
             })
             .collect()
@@ -152,6 +172,32 @@ pub fn ai_brain(world: &mut World) {
         let mut q = world.query::<(&GameId, &Pos, &Owner, &Building, &MatchId)>();
         q.iter(world).map(|(g, p, o, b, m)| (g.0, p.pos, o.0, b.kind, m.0)).collect()
     };
+    // Hulls paid for and still in a hall's queue. A skiff takes ten seconds to
+    // build and a Hard bot decides every 0.6 — without this the fleet rung
+    // re-orders the same boat until the first one splashes, and a three-boat
+    // target buys six.
+    let mut queued_hulls: HashMap<u64, (i32, i32)> = HashMap::new();
+    {
+        let mut q = world.query::<(&Owner, &Building)>();
+        for (o, b) in q.iter(world) {
+            for k in b.queued() {
+                let Some(def) = UnitKind::from_u8(*k).map(unit_def) else { continue };
+                if !def.afloat() {
+                    continue;
+                }
+                let e = queued_hulls.entry(o.0).or_insert((0, 0));
+                if def.cargo_cap > 0 {
+                    e.1 += 1;
+                } else {
+                    e.0 += 1;
+                }
+            }
+        }
+    }
+    // Every footprint on the map, for the one question the brain asks about
+    // ground it does not own: where beside a berth can a column actually stand.
+    let occupants: Vec<Occupant> =
+        buildings.iter().map(|(_, p, _, k, _)| Occupant { kind: *k, pos: *p }).collect();
     // lifecycle of every structure, for the planner's site/damage view
     let mut lifecycles: Vec<Lifecycle> = {
         let mut q = world.query::<(&GameId, &Pos, &Owner, &Building)>();
@@ -225,11 +271,22 @@ pub fn ai_brain(world: &mut World) {
         // my census
         let mut army_comp: Census = saladin_sim::EMPTY_CENSUS;
         let (mut peasants, mut soldiers, mut sieges, mut pop) = (0, 0, 0, 0);
+        // Hulls by trade, never by kind: a skiff carries a load and a barge
+        // carries men, and the two rungs that build them ask exactly that.
+        let (mut boats, mut ferries) = queued_hulls.get(&owner).copied().unwrap_or((0, 0));
         for u in &units {
             if u.owner != owner {
                 continue;
             }
-            pop += 1;
+            let def = unit_def(u.kind);
+            pop += def.pop_cost;
+            if def.afloat() {
+                if def.cargo_cap > 0 {
+                    ferries += 1;
+                } else {
+                    boats += 1;
+                }
+            }
             if u.kind == UnitKind::Peasant {
                 peasants += 1;
             }
@@ -301,20 +358,95 @@ pub fn ai_brain(world: &mut World) {
             })
             .count() as i32;
 
-        // open water within building reach of the keep enables a Fishing Hut
-        let shore_near = !bot.fishing_blocked && {
-            let seed = world.resource::<crate::WorldConfig>().seed;
-            let (kx, ky) = (keep_pos.x.to_num::<i32>(), keep_pos.y.to_num::<i32>());
-            let mut found = false;
-            'scan: for dy in -SHORE_SCAN..=SHORE_SCAN {
-                for dx in -SHORE_SCAN..=SHORE_SCAN {
-                    if is_water_tile(seed, kx + dx, ky + dy) {
-                        found = true;
-                        break 'scan;
-                    }
+        let seed = world.resource::<crate::WorldConfig>().seed;
+
+        // The fish a hut on this coast could actually put a boat on. "Any water
+        // tile in the box" was the old gate: it bought a 40-wood drop-off beside
+        // a puddle with nothing in it, and it could not tell a bot how many
+        // hulls that water was worth.
+        // ...and only while it can still change a decision. Once the hut stands
+        // and its fleet is out, `min(skiff_target, fisheries)` cannot move a rung
+        // whatever the count is, and this is a per-bot per-brain-tick scan.
+        let counts_fish = tune.wants_fishing
+            && (!owned.contains(&BuildingKind::FishingHut) || boats < tune.skiff_target);
+        let home_water = counts_fish.then(|| nearest_water(seed, keep_pos, SHORE_SCAN)).flatten();
+        let mut fish_near: Vec<V2> = Vec::new();
+        if let Some(water) = home_water {
+            let far2 = FISHERY_RANGE * FISHERY_RANGE;
+            for (id, npos) in &node_pos {
+                if node_type.get(id) != Some(&ResourceType::Food) {
+                    continue;
                 }
+                if !is_sailable(seed, npos.x.to_num::<i32>(), npos.y.to_num::<i32>()) {
+                    continue;
+                }
+                if dist2(*npos, keep_pos) > far2 || !sea_reachable(seed, water, *npos) {
+                    continue;
+                }
+                fish_near.push(*npos);
             }
-            found
+        }
+        // Only counted and summed below, both order-independent — but the list
+        // is ordered anyway so that a future reader that picks ONE of these
+        // cannot pick a different one on a different peer.
+        fish_near.sort_unstable_by(|a, b| a.x.cmp(&b.x).then(a.y.cmp(&b.y)));
+        let fisheries = fish_near.len() as i32;
+        let fishery_centroid = (fisheries > 0).then(|| {
+            let mut sum = V2::new(Fx::ZERO, Fx::ZERO);
+            for p in &fish_near {
+                sum = V2::new(sum.x + p.x, sum.y + p.y);
+            }
+            V2::new(sum.x / Fx::from_num(fisheries), sum.y / Fx::from_num(fisheries))
+        });
+
+        // The enemy the bot must reach, and whether it can WALK there. An enemy
+        // across water is an enemy a land army can never touch, which is what
+        // turns a ferry from a convenience into the win condition.
+        let enemy_keep = buildings
+            .iter()
+            .filter(|(_, _, o, k, m)| {
+                *m == bot.match_id
+                    && *k == BuildingKind::Keep
+                    && faction_of.get(o).copied() == Some(saladin_sim::enemy_faction(bot.faction))
+            })
+            .min_by_key(|(id, p, _, _, _)| (dist2(keep_pos, *p), *id))
+            .map(|(_, p, _, _, _)| *p);
+        let enemy_by_land =
+            enemy_keep.is_none_or(|p| saladin_sim::node_reachable(seed, keep_pos, p));
+
+        // A cluster on the bot's water but off its land. `remote_cluster` cannot
+        // see one — everything past the beach fails `node_reachable`, so nothing
+        // over there is ever a candidate — and it is the economic half of the
+        // reason a Harbour exists.
+        // Only while there is no quay: past that the cluster gates nothing, and
+        // this walks every node on the map.
+        let offshore_cluster = if tune.barge_target > 0
+            && !lifecycles.iter().any(|l| l.owner == owner && l.kind == BuildingKind::Harbour)
+        {
+            let mut best: Option<(Fx, u64, V2)> = None;
+            for (id, npos) in &node_pos {
+                if is_sailable(seed, npos.x.to_num::<i32>(), npos.y.to_num::<i32>()) {
+                    continue; // a fishery is the skiff's job, not the barge's
+                }
+                if saladin_sim::node_reachable(seed, keep_pos, *npos) {
+                    continue;
+                }
+                let d = dist2(*npos, keep_pos);
+                if let Some((bd, bid, _)) = best
+                    && (d > bd || (d == bd && *id >= bid))
+                {
+                    continue;
+                }
+                // ...and a barge has to be able to get there. An inland pocket
+                // behind a cliff reads the same as an island until you ask.
+                if !sea_touches(seed, *npos, OFFSHORE_COAST_SCAN) {
+                    continue;
+                }
+                best = Some((d, *id, *npos));
+            }
+            best.map(|(_, _, p)| p)
+        } else {
+            None
         };
 
         // soil worth sowing within building reach of the keep, and the fields
@@ -340,10 +472,9 @@ pub fn ai_brain(world: &mut World) {
         let farm_centroid = (farms > 0)
             .then(|| V2::new(farm_sum.x / Fx::from_num(farms), farm_sum.y / Fx::from_num(farms)));
         let farmland_near = {
-            let seed = world.resource::<crate::WorldConfig>().seed;
             let mut found = false;
-            'soil: for dy in -SHORE_SCAN..=SHORE_SCAN {
-                for dx in -SHORE_SCAN..=SHORE_SCAN {
+            'soil: for dy in -SOIL_SCAN..=SOIL_SCAN {
+                for dx in -SOIL_SCAN..=SOIL_SCAN {
                     let p = V2::new(keep_pos.x + Fx::from_num(dx), keep_pos.y + Fx::from_num(dy));
                     if saladin_sim::fertility_at(seed, p.x, p.y) >= saladin_sim::FARM_MIN_FERTILITY {
                         found = true;
@@ -356,7 +487,7 @@ pub fn ai_brain(world: &mut World) {
 
         // sites rising, structures hurt, towers worth raising
         let mask = tech_of.get(&owner).copied().unwrap_or(0);
-        let mut sites_in_flight = [0i32; 16];
+        let mut sites_in_flight = [0i32; BuildingKind::ALL.len()];
         let (mut damaged, mut storehouses, mut upgradable_towers) = (0, 0, 0);
         let mut worst: Option<(i32, u64)> = None;
         let mut oldest_tower = 0u64;
@@ -439,7 +570,12 @@ pub fn ai_brain(world: &mut World) {
             enemy,
             enemy_has_walls,
             threat_near_home: threat,
-            shore_near,
+            fisheries,
+            fishery_centroid,
+            offshore_cluster,
+            boats,
+            ferries,
+            enemy_by_land,
             farmland_near,
             farms,
             fields_ripe,
@@ -581,7 +717,7 @@ pub fn ai_brain(world: &mut World) {
 
         // ── phase + one macro decision per profile-paced window ───────────────
         let phase = next_phase(&state, &tune);
-        let mut fishing_blocked = bot.fishing_blocked;
+        let mut waterside_cd = (bot.waterside_cd - AI_BRAIN_DT).max(Fx::ZERO);
         let mut decision_cd = bot.decision_cd - AI_BRAIN_DT;
         if decision_cd <= Fx::ZERO {
             decision_cd = prof.decision_interval;
@@ -592,6 +728,15 @@ pub fn ai_brain(world: &mut World) {
             // 872 wood and 800 stone asking for an eighth farm it could not
             // site, and never bought the market standing one rung below.
             let mut plan_state = state.clone();
+            // A refused shoreline is suppressed the same way any other blocked
+            // rung is, and for the same reason — except it comes BACK, because a
+            // waterside site is refused for reasons that pass (a peasant on the
+            // one legal tile) as often as for reasons that do not.
+            if waterside_cd > Fx::ZERO {
+                for k in [BuildingKind::FishingHut, BuildingKind::Harbour] {
+                    plan_state.sites_in_flight[k as usize] += LADDER_SUPPRESS;
+                }
+            }
             for _ in 0..LADDER_RETRIES {
                 let Some(plan) = next_build(&plan_state, &tune) else { break };
                 let mut blocked = None;
@@ -608,9 +753,37 @@ pub fn ai_brain(world: &mut World) {
                             // re-checks the rest).
                             let reserve_ok = kind != BuildingKind::Tower
                                 || stock.wood >= building_def(kind).cost.wood + tune.wood_buffer;
+                            // WHERE a building goes is half of what it does. A
+                            // Fishing Hut was anchored on the keep, which is the
+                            // one place its drop-off is worth nothing, because
+                            // the keep already accepts food.
                             let anchor = match kind {
                                 BuildingKind::Storehouse => {
                                     state.remote_cluster.unwrap_or(keep_pos)
+                                }
+                                // A hut is sited on the SCHOOLS it can reach,
+                                // not on the average position of every fish in
+                                // forty tiles: scattered fisheries average out
+                                // to open water with nothing in it.
+                                BuildingKind::FishingHut => {
+                                    shore_anchor(seed, keep_pos, SHORE_SCAN, false, |c| {
+                                        let n = fish_near
+                                            .iter()
+                                            .filter(|f| dist(**f, c) <= FISHING_HUT_RANGE)
+                                            .count() as i32;
+                                        (-n, dist2(c, keep_pos))
+                                    })
+                                    .unwrap_or(keep_pos)
+                                }
+                                BuildingKind::Harbour => {
+                                    let aim = offshore_cluster
+                                        .or(enemy_keep)
+                                        .or(fishery_centroid)
+                                        .unwrap_or(keep_pos);
+                                    shore_anchor(seed, keep_pos, SHORE_SCAN, true, |c| {
+                                        (0, dist2(c, aim))
+                                    })
+                                    .unwrap_or(keep_pos)
                                 }
                                 _ if tends_fields(kind) => farm_centroid.unwrap_or(keep_pos),
                                 _ => keep_pos,
@@ -619,10 +792,8 @@ pub fn ai_brain(world: &mut World) {
                                 let placed = place_near(world, owner, kind, anchor);
                                 if placed.is_none() && stock.can_afford(&building_def(kind).cost) {
                                     blocked = Some(kind);
-                                    // a shoreline is the one kind of ground that
-                                    // never comes back, so that one stays latched
-                                    if kind == BuildingKind::FishingHut {
-                                        fishing_blocked = true;
+                                    if building_def(kind).requires_water {
+                                        waterside_cd = WATERSIDE_RETRY;
                                     }
                                 }
                             }
@@ -687,7 +858,18 @@ pub fn ai_brain(world: &mut World) {
             role: SquadRole,
             at_home: bool,
             idle: bool,
+            /// The landmass the man is standing on. An order across water is not
+            /// a slow order, it is an A* that walks its whole expansion budget
+            /// and then hands back nothing — so who can reach what is asked HERE,
+            /// with an O(1) read off a cached grid, and never by trying.
+            region: u16,
         }
+        // A unit on a tile with no region at all is never filtered out, exactly
+        // as `node_reachable` refuses to over-filter a walker on odd ground.
+        let home_region = region_at(seed, keep_pos.x, keep_pos.y);
+        let enemy_region = enemy_keep.map(|p| region_at(seed, p.x, p.y));
+        let marches = |r: u16| enemy_region.is_none_or(|e| r == u16::MAX || r == e);
+        let returns = |r: u16| r == u16::MAX || r == home_region;
         let army: Vec<FieldUnit> = units
             .iter()
             .filter(|u| {
@@ -704,6 +886,7 @@ pub fn ai_brain(world: &mut World) {
                 role: squad_role(u.kind),
                 at_home: owned_b_pos.iter().any(|b| dist(u.pos, *b) <= HOME_RADIUS),
                 idle: u.idle,
+                region: region_at(seed, u.pos.x, u.pos.y),
             })
             .collect();
 
@@ -786,10 +969,6 @@ pub fn ai_brain(world: &mut World) {
             }
         }
 
-        // ── assault: muster to wave_size, then march squads onto role targets ──
-        // Hold while Defending or recalling; commit a full wave at once. Siege
-        // leads onto fortifications, the main body besieges the keep, and the
-        // fastest raider-class units peel off to harass the enemy economy.
         let mut wave_timer = bot.wave_timer - AI_BRAIN_DT;
         let mut wave_launched = bot.wave_launched;
         // Power gate: only commit a wave with a real strength edge over the
@@ -798,6 +977,156 @@ pub fn ai_brain(world: &mut World) {
         let overwhelming = soldiers >= prof.wave_size * 2;
         let strong_enough =
             overwhelming || should_assault(&army_comp, &enemy, enemy_towers, tac.advantage_margin_pct);
+
+        // ── the crossing: an army that cannot walk to the enemy sails at him ──
+        // Crude by design: muster on the quay, fill the hold, cross, put the
+        // party on the nearest legal enemy shore and hand STRAIGHT OFF to the
+        // land assault below. No escort, no beach selection, no withdrawal by
+        // sea. It will lose to a competent human every time — and it is the
+        // difference between an island match resolving and two bots staring at
+        // each other across the water until the clock runs out.
+        let crossing = !enemy_by_land
+            && ferries > 0
+            && phase != AiPhase::Defend
+            && !under_attack
+            && mustered(soldiers, prof.wave_size)
+            && strong_enough;
+        // A hold with men in it finishes its crossing whatever the muster gate
+        // says NOW. The gate falls the moment the wave takes casualties, and a
+        // laden barge left floating is a landing party deleted from the match.
+        let afloat: Vec<u64> = units
+            .iter()
+            .filter(|u| u.owner == owner && unit_def(u.kind).cargo_cap > 0 && u.garrisoned_in == 0)
+            .map(|u| u.id)
+            .collect();
+        let laden = !afloat.is_empty()
+            && units.iter().any(|u| u.garrisoned_in != 0 && afloat.contains(&u.garrisoned_in));
+        let quay = lifecycles
+            .iter()
+            .find(|l| l.owner == owner && l.kind == BuildingKind::Harbour && operational(l.state))
+            .and_then(|h| berth_of(seed, building_def(BuildingKind::Harbour).footprint, h.pos));
+
+        let mut hulls: Vec<(u64, V2, i32, bool)> = units
+            .iter()
+            .filter(|u| u.owner == owner && unit_def(u.kind).cargo_cap > 0 && u.garrisoned_in == 0)
+            .map(|u| (u.id, u.pos, unit_def(u.kind).cargo_cap, u.idle))
+            .collect();
+        hulls.sort_unstable_by_key(|(id, _, _, _)| *id);
+
+        // The water this crossing happens on. It is the quay's while the quay
+        // stands — but a LADEN hull has to finish whatever happens ashore. The
+        // party aboard is already paid for, it is off the muster roll and out of
+        // the fight, and a barge with nowhere left to report back to is six men
+        // deleted from the match. So a razed harbour falls back to the hull's own
+        // water, lowest id first so every peer picks the same body.
+        let anchor = quay.or_else(|| hulls.first().map(|(_, p, _, _)| *p));
+        if (crossing || laden)
+            && let Some(ekeep) = enemy_keep
+            && let Some(anchor) = anchor
+        {
+            let body = water_region_at(seed, anchor.x, anchor.y);
+            let landing = landing_water(seed, ekeep, body, LANDING_SCAN);
+            let occ = occupancy_set(&occupants, false);
+            // The men and the hull are sent to the SAME point. A hull at its
+            // berth and a column at the quay beside it end up four tiles apart
+            // across a corner, which is outside a gangplank, and the barge then
+            // sits full of nobody forever. With no quay there is no muster at
+            // all: a hold cannot be filled from a shore that has no jetty, and
+            // the only thing left to do is land what is already aboard.
+            //
+            // And the muster is DRY GROUND or it is nothing. Falling back to the
+            // berth itself put the column on a water tile: every called man
+            // marched to it, arrived, and stood in the sea for the rest of the
+            // match. A quay with no standing room beside it cannot be loaded
+            // from, and pretending otherwise deletes the men who try.
+            let muster = quay.and_then(|b| quay_spot(seed, &occ, b, keep_pos));
+
+            // The men still on the wrong side of the water, nearest the muster
+            // first — the same order on every peer, because it decides who
+            // boards.
+            let rally = muster.unwrap_or(anchor);
+            let mut party: Vec<(Fx, u64, bool, V2)> = army
+                .iter()
+                .filter(|a| !marches(a.region))
+                .map(|a| (dist2(a.pos, rally), a.id, a.idle, a.pos))
+                .collect();
+            party.sort_unstable_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
+
+            // Call up exactly the boarding party — the hold that is standing
+            // empty, no more. The rest of the army holds the island; dragging it
+            // all onto one quay is how a bot loses its home while it is away.
+            //
+            // ONE ORDER PER MAN, not a group march: `lay_march` routes from the
+            // GROUP CENTROID, and a knot of men whose centroid falls on a
+            // building footprint gets an empty route and NOBODY moves. Measured,
+            // that was six men re-issued the same doomed order every second for
+            // the rest of the match while a seventh walked in alone.
+            let berths_free: i32 = hulls
+                .iter()
+                .map(|(bid, _, cap, _)| {
+                    (*cap - units.iter().filter(|u| u.garrisoned_in == *bid).count() as i32).max(0)
+                })
+                .sum();
+            let called: Vec<u64> = match muster {
+                Some(_) if crossing => party
+                    .iter()
+                    .filter(|(d2, _, idle, _)| *idle && *d2 > EMBARK_RANGE * EMBARK_RANGE)
+                    .take(berths_free.max(0) as usize)
+                    .map(|(_, id, _, _)| *id)
+                    .collect(),
+                _ => Vec::new(),
+            };
+            for id in called {
+                move_unit(world, owner, id, rally);
+            }
+
+            for (bid, bpos, cap, bidle) in &hulls {
+                let aboard = units.iter().filter(|u| u.garrisoned_in == *bid).count() as i32;
+                // A hold that waits to be full waits forever on a bot with five
+                // soldiers; a hold that sails with one shuttles all match.
+                // A hold that waits for the quay that no longer exists waits
+                // forever: with no muster left, whatever is aboard IS the party.
+                let want = if muster.is_some() { (*cap).min(soldiers).max(1) } else { 1 };
+                if aboard >= want {
+                    let Some(l) = landing else { continue };
+                    if dist(*bpos, l) <= BERTH_NEAR {
+                        disembark(world, owner, *bid, ekeep);
+                        // A landing IS a launch: without this the party stands
+                        // on the beach until the next muster interval, because
+                        // `recommit` only moves men from a wave that went out.
+                        wave_launched = wave_launched.max(soldiers);
+                    } else if *bidle {
+                        move_unit(world, owner, *bid, l);
+                    }
+                } else if muster.is_none() {
+                    continue; // an empty hull with no quay has nothing to do
+                } else if dist(*bpos, rally) > BERTH_NEAR {
+                    if *bidle {
+                        move_unit(world, owner, *bid, rally);
+                    }
+                } else if crossing {
+                    // whoever is within a gangplank of THIS hull, closest first
+                    let mut reach: Vec<(Fx, u64)> = party
+                        .iter()
+                        .map(|(_, id, _, p)| (dist2(*p, *bpos), *id))
+                        .filter(|(d2, _)| *d2 <= EMBARK_RANGE * EMBARK_RANGE)
+                        .collect();
+                    reach.sort_unstable_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
+                    let take: Vec<u64> = reach
+                        .into_iter()
+                        .take((want - aboard).max(0) as usize)
+                        .map(|(_, id)| id)
+                        .collect();
+                    party.retain(|(_, id, _, _)| !take.contains(id));
+                    embark(world, owner, &take, *bid);
+                }
+            }
+        }
+
+        // ── assault: muster to wave_size, then march squads onto role targets ──
+        // Hold while Defending or recalling; commit a full wave at once. Siege
+        // leads onto fortifications, the main body besieges the keep, and the
+        // fastest raider-class units peel off to harass the enemy economy.
         let wants_assault = phase != AiPhase::Defend
             && !under_attack
             && mustered(soldiers, prof.wave_size)
@@ -811,7 +1140,7 @@ pub fn ai_brain(world: &mut World) {
         let recommit = !wants_assault
             && wave_launched > 0
             && !under_attack
-            && army.iter().any(|a| !a.at_home && a.idle);
+            && army.iter().any(|a| !a.at_home && a.idle && marches(a.region));
         let mut launched = false;
         if wants_assault || recommit {
             let intel = assault_intel(&units, &buildings, &faction_of, owner, bot.faction, bot.match_id);
@@ -836,6 +1165,12 @@ pub fn ai_brain(world: &mut World) {
                 for a in &army {
                     // a re-commit moves the men who have stopped, and nobody else
                     if !wants_assault && (a.at_home || !a.idle) {
+                        continue;
+                    }
+                    // A march order across water is an A* that spends its whole
+                    // budget and returns nothing, every brain tick, for the rest
+                    // of the match. The men on the wrong side wait for a hull.
+                    if !marches(a.region) {
                         continue;
                     }
                     // A raider not picked for the raid marches as Main so the
@@ -875,8 +1210,13 @@ pub fn ai_brain(world: &mut World) {
 
         // ── retreat: a wave bled below the threshold breaks off and regroups
         //    at the keep instead of trickling into the meat grinder.
-        let field_units: Vec<(Entity, u64)> =
-            army.iter().filter(|a| !a.at_home).map(|a| (a.entity, a.id)).collect();
+        // A party put ashore on the far island cannot walk home, so it is not
+        // part of a retreat: ordering it to would buy a failed path per man.
+        let field_units: Vec<(Entity, u64)> = army
+            .iter()
+            .filter(|a| !a.at_home && returns(a.region))
+            .map(|a| (a.entity, a.id))
+            .collect();
         if !launched && wave_launched > 0 {
             if field_units.is_empty() {
                 wave_launched = 0; // wave resolved (won, died, or walked home)
@@ -897,7 +1237,9 @@ pub fn ai_brain(world: &mut World) {
         //    keep once, so the bot reacts to the real map. Re-scout when it dies.
         let mut scout_id = bot.scout_id;
         let scout_alive = scout_id != 0 && units.iter().any(|u| u.id == scout_id && u.owner == owner);
-        if tac.scouts && !scout_alive && !launched {
+        // A scout cannot swim: sending one at an enemy across water buys a failed
+        // full-budget A* and a peasant that never leaves the yard.
+        if tac.scouts && enemy_by_land && !scout_alive && !launched {
             let target = buildings
                 .iter()
                 .filter(|(_, _, o, k, m)| {
@@ -930,7 +1272,7 @@ pub fn ai_brain(world: &mut World) {
             b.threat_timer = threat_timer;
             b.scout_id = scout_id;
             b.wave_launched = wave_launched;
-            b.fishing_blocked = fishing_blocked;
+            b.waterside_cd = waterside_cd;
             b.famine = food_emergency;
         }
     }
@@ -950,8 +1292,14 @@ fn place_near(world: &mut World, owner: u64, kind: BuildingKind, keep: V2) -> Op
     }
     // A field needs soil and a hut needs a shore; both are scarce enough that
     // the eight-spoke scan below walks straight past them.
+    //
+    // The two radii are SEPARATE on purpose. A bot at its soil limit re-probes
+    // for a farm it cannot place every decision window, so this loop's width is
+    // a per-window cost paid forever — widening it to reach a Highlands
+    // shoreline cost 60% of the AI's whole budget on a mainland map, measured.
     if building_def(kind).requires_water || building_def(kind).min_fertility > Fx::ZERO {
-        for r in 2..=SHORE_SCAN {
+        let scan = if building_def(kind).requires_water { SHORE_SCAN } else { SOIL_SCAN };
+        for r in 2..=scan {
             for (dx, dy) in ring_perimeter(r) {
                 let pos = V2::new(keep.x + Fx::from_num(dx), keep.y + Fx::from_num(dy));
                 if let Some(id) = try_at(world, pos) {
@@ -1109,6 +1457,148 @@ fn staff_jobs(
             }
         }
     }
+}
+
+/// How far out from an enemy keep the brain looks for water to land beside.
+const LANDING_SCAN: i32 = 24;
+/// How far from a berth a column will stand to wait for it.
+const QUAY_SCAN: i32 = 5;
+
+/// The best tile on the FIRST square ring out from `at` that satisfies `ok` —
+/// `score` orders the ring (lower wins) and `tile_key` breaks its ties, so every
+/// peer answers with the same tile.
+fn ring_pick<A: Fn(i32, i32) -> bool, S: Fn(V2) -> Fx>(
+    at: V2,
+    scan: i32,
+    ok: A,
+    score: S,
+) -> Option<V2> {
+    let (cx, cy) = (at.x.to_num::<i32>(), at.y.to_num::<i32>());
+    let half = saladin_sim::fx!("0.5");
+    for r in 0..=scan {
+        let mut best: Option<(Fx, i32, V2)> = None;
+        for (dx, dy) in ring_perimeter(r) {
+            let (tx, ty) = (cx + dx, cy + dy);
+            if tx < 0 || ty < 0 || tx >= WORLD_SIZE || ty >= WORLD_SIZE || !ok(tx, ty) {
+                continue;
+            }
+            let c = V2::new(Fx::from_num(tx) + half, Fx::from_num(ty) + half);
+            let (s, k) = (score(c), tile_key(tx, ty));
+            match best {
+                Some((bs, bk, _)) if s > bs || (s == bs && k >= bk) => {}
+                _ => best = Some((s, k, c)),
+            }
+        }
+        if best.is_some() {
+            return best.map(|(_, _, p)| p);
+        }
+    }
+    None
+}
+
+/// The water this coast opens onto: nearest sailable tile to `at`.
+fn nearest_water(seed: u32, at: V2, scan: i32) -> Option<V2> {
+    ring_pick(at, scan, |tx, ty| is_sailable(seed, tx, ty), |c| dist2(c, at))
+}
+
+/// Open sea on the map's MAIN body within `r` of `at` — whether a barge could
+/// ever put men on this ground. An inland pocket behind a cliff reads exactly
+/// like an island until you ask.
+fn sea_touches(seed: u32, at: V2, r: i32) -> bool {
+    let ocean = main_water_body(seed);
+    let (cx, cy) = (at.x.to_num::<i32>(), at.y.to_num::<i32>());
+    let half = saladin_sim::fx!("0.5");
+    for dy in -r..=r {
+        for dx in -r..=r {
+            let (tx, ty) = (cx + dx, cy + dy);
+            if tx < 0 || ty < 0 || tx >= WORLD_SIZE || ty >= WORLD_SIZE {
+                continue;
+            }
+            if is_sailable(seed, tx, ty)
+                && water_region_at(seed, Fx::from_num(tx) + half, Fx::from_num(ty) + half) == ocean
+            {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Where a waterside building belongs: buildable ground inside `scan` of the
+/// keep with water against it, ranked by `score` (lower wins, ties on tile key).
+/// This is the whole fix for a Fishing Hut planted beside the Keep — a hut's
+/// only working function is being a drop-off near the fish, and the Keep already
+/// accepts food.
+fn shore_anchor<S: Fn(V2) -> (i32, Fx)>(
+    seed: u32,
+    keep: V2,
+    scan: i32,
+    sea_only: bool,
+    score: S,
+) -> Option<V2> {
+    let ocean = main_water_body(seed);
+    let (cx, cy) = (keep.x.to_num::<i32>(), keep.y.to_num::<i32>());
+    let half = saladin_sim::fx!("0.5");
+    let mut best: Option<((i32, Fx), i32, V2)> = None;
+    for dy in -scan..=scan {
+        for dx in -scan..=scan {
+            let (tx, ty) = (cx + dx, cy + dy);
+            if tx < 0 || ty < 0 || tx >= WORLD_SIZE || ty >= WORLD_SIZE {
+                continue;
+            }
+            if !is_buildable_tile(seed, tx, ty) {
+                continue;
+            }
+            let waterside = [(1, 0), (-1, 0), (0, 1), (0, -1)].iter().any(|(ox, oy)| {
+                let (nx, ny) = (tx + ox, ty + oy);
+                is_sailable(seed, nx, ny)
+                    && (!sea_only
+                        || water_region_at(seed, Fx::from_num(nx) + half, Fx::from_num(ny) + half)
+                            == ocean)
+            });
+            if !waterside {
+                continue;
+            }
+            let c = V2::new(Fx::from_num(tx) + half, Fx::from_num(ty) + half);
+            let (s, k) = (score(c), tile_key(tx, ty));
+            match best {
+                Some((bs, bk, _)) if s > bs || (s == bs && k >= bk) => {}
+                _ => best = Some((s, k, c)),
+            }
+        }
+    }
+    best.map(|(_, _, p)| p)
+}
+
+/// Water beside the enemy, on the body the hull is already floating in: where a
+/// crossing ends. `disembark` finds the beach from there.
+fn landing_water(seed: u32, target: V2, body: u16, scan: i32) -> Option<V2> {
+    ring_pick(
+        target,
+        scan,
+        |tx, ty| {
+            let half = saladin_sim::fx!("0.5");
+            is_sailable(seed, tx, ty)
+                && water_region_at(seed, Fx::from_num(tx) + half, Fx::from_num(ty) + half) == body
+        },
+        |c| dist2(c, target),
+    )
+}
+
+/// Dry ground beside a berth for a column to wait on, ties toward `toward` (the
+/// town) so the muster forms on the landward side of the quay.
+fn quay_spot(
+    seed: u32,
+    occ: &std::collections::HashSet<i32>,
+    berth: V2,
+    toward: V2,
+) -> Option<V2> {
+    ring_pick(
+        berth,
+        QUAY_SCAN,
+        |tx, ty| is_passable(seed, tx, ty) && !occ.contains(&tile_key(tx, ty)),
+        |c| dist2(c, toward),
+    )
 }
 
 /// Every tile on the square ring of radius `r`, in deterministic scan order.

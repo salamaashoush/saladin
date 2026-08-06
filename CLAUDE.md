@@ -43,6 +43,14 @@ crates/
    `passable_grid` / `region_grid` / `elevation_at` (thread-local last-seed
    memo). Use them — never resample fbm in a hot loop.
    `node_reachable(seed, from, to)` answers "can a walker ever get there".
+   The SEA is a second movement domain with the same shape: `sailable_grid` /
+   `water_region_grid` / `main_water_body` / `sea_reachable` mirror the land
+   four, each with its OWN thread-local last-seed cell (one shared cell would
+   thrash — A* touches the closure ~16x per expansion). `biomes::water_class`
+   is the single authority on "is this wet"; never write `!biome_passable`,
+   which calls a cliff water. The A* core knows nothing about domains: it takes
+   a `passable` closure, and `approach_tile_in` takes the region labelling as a
+   parameter so a hull and a walker share one implementation.
 8. **The map preset rides in the seed's top 3 bits** (`compose_seed(base,
    preset)`), so every per-seed cache and the wire stay plain u32. Always
    compose before writing `WorldConfig.seed`; `seed_base`/`seed_preset`/
@@ -51,12 +59,25 @@ crates/
 ## Commands
 
 ```bash
-cargo test --workspace                 # 166 tests, all must stay green
+cargo test --workspace                 # 475 tests, all must stay green
 cargo run -p saladin-client --bin saladin-client          # single player
 cargo run -p saladin-client --bin saladin-client connect <ip>   # dev shortcut (menus cover all MP flows)
 cargo run -p saladin-server                                # internet relay (rooms) — VPS docs: crates/server/README.md
 cargo run --release -p saladin-protocol --example net_bench -- 2 50000 200
                                        # lockstep benchmark: clients units ticks
+cargo run --release -p saladin-protocol --example naval_war -- [diff] [secs] [seeds]
+                                       # DOES THE BOT SAIL: two bots on the
+                                       # archipelago seeds whose first two starts
+                                       # are on DIFFERENT islands (the only
+                                       # configuration a land army cannot
+                                       # resolve). Reports harbours, hulls, men
+                                       # aboard, men put ashore on the far
+                                       # island, and whether the match ended.
+                                       # NW_BEACH=1 checks EVERY tick that no
+                                       # hull stands on land and no land unit
+                                       # stands in water; NW_DETAIL=1 prints the
+                                       # ladder's stocks and buildings; NW_SEEDS,
+                                       # NW_PRESET override the sweep.
 cargo run -p saladin-sim --example mapdump -- <base> <preset> [out.ppm]
                                        # worldgen tuning: biome map + dominant-region dump
 cargo run --release -p saladin-sim --example worldstat -- [seeds] [preset|all] [--per-seed] [--seeds a,b,c]
@@ -66,6 +87,15 @@ cargo run --release -p saladin-sim --example worldstat -- [seeds] [preset|all] [
 cargo run --release -p saladin-sim --example massifprobe [start <preset>]
                                        # per-seed counts worldstat rounds away;
                                        # `start` finds seeds with a massif by slot 0
+cargo run --release -p saladin-sim --example navalprobe -- [seeds] [--sea|--starts|--reach|--grids|--fish|--nodes]
+                                       # THE water audit: is the sea one body,
+                                       # where the eight starts sit, what share
+                                       # of the map's nodes a start can reach on
+                                       # foot vs by sea, what the sea grids cost,
+                                       # where fisheries land. `--starts` output
+                                       # is diffable: that is how a change to the
+                                       # seating rule is PROVED not to move the
+                                       # mainland presets.
 cargo run --release -p saladin-sim --example resprobe -- [seeds] [preset|all] [--per-seed] [--seeds a,b,c] [--fair]
                                        # where the resource scatter lands vs the
                                        # terrain it reads (slope/ore/fertility per
@@ -92,8 +122,18 @@ uv run scripts/bake_voices.py          # Chatterbox TTS bark bake -> assets/voic
    #   SALADIN_SURVEY=1 tallies what the food-node variant table draws on every
    #   farm-eligible tile of the map, SALADIN_WORK=1 pins peasants in the
    #   reaping pose) |
-   # units (every unit kind + one node of each type + a water fish node beside
-   # the keep — model verification).
+   # units (every unit kind + one node of each type + a SHELF fishery and a
+   #   DEEP one beside the keep, which are two different meshes — model
+   #   verification) |
+   # ferry (the naval loop as one still: a barge standing off the beach and
+   #   running in with a party aboard AND SELECTED so the card shows its hold,
+   #   a landing party on the sand, a skiff under way over the nearest school,
+   #   a Harbour on the beach beside the anchorage, camera framed on the
+   #   landing. Pair it with SALADIN_YAW=2 — an iso camera hides a berth behind
+   #   its own keep — and SALADIN_SHOT_AT=<s> to catch the boat where you want
+   #   it) |
+   # harbour (the quay conjured + selected beside the keep, like every other
+   #   building mode — inland, so it is the MODEL and the panel under test).
    # Overrides: SALADIN_SEED, SALADIN_PRESET, SALADIN_TAB, SALADIN_ZOOM
    # (view_size, min 4 = close-up model inspection), SALADIN_YAW,
    # SALADIN_PERF=1 (starts the F3 frame-time overlay on, so a shot can be
@@ -168,8 +208,15 @@ makes Highlands actually mountainous).
 
 Fair starts: `fair_start_nodes` tops every spawn slot up to wood/stone/food
 minima within `FAIR_RADIUS` (guaranteed stone takes a rocky-ground pass first,
-then an unfiltered one that keeps the guarantee absolute); `start_point` snaps
-spawns to `dominant_region`.
+then an unfiltered one that keeps the guarantee absolute). `start_point` snaps
+spawns to `start_regions(seed)`: on a mainland preset that is exactly
+`[dominant_region]` and nothing moved, but where a preset sets
+`MapBias::sea_starts` (archipelago only) it is every island of at least
+`START_REGION_MIN` tiles with a shore on the main water body, seated
+area-proportionally with a per-island cap. The guarantee is no longer "one
+landmass" but "landmasses the sea connects" — which is why every start island
+must touch `main_water_body`, and why the keep-site test asserts the start's own
+island rather than the dominant one.
 Invariants tested in `sim/tests/worldgen.rs` - fair starts over 100 worlds, no
 map is a single biome, archetypes change the world, highlands reach the high
 country, soil is richest where the water runs, ore follows the belts. Keep them
@@ -184,18 +231,19 @@ renders as rock face — the taper tracks `client terrain::ROCK_LO/HI`), quarry
 (exposed rock: scarp slope + ore + height, and above `SCREE_T` the soil has
 slid off so bedrock quarries whatever the label says — this is what puts
 outcrops on foothill flanks instead of the plain), herds (grazing = fertility
-+ rain, penalized by slope), fishery (the water the shore FACES - lake teems,
-river runs thin), vein (mineralized rock only), placer (channel gravel below
++ rain, penalized by slope), fishery (IN the water, split inshore/offshore -
+lake teems, river runs thin, the deep is richer and further out), vein (mineralized rock only), placer (channel gravel below
 ore-bearing highlands - cheap, safe, early, finite), motherlode (remote high
 country, gated on ore and broken ground). `NodeSite.slope` is the same field
 the camera draws and the pathfinder charges for, so a deposit that reads as
 clinging to a scarp is on one. `resprobe` is the dial.
 
 `ResourceNode` carries `cap` + `regen`. Wild timber/ore/herds are FINITE on
-purpose. A node drawn to zero is only DESPAWNED when nothing brings it back
-(`regen == 0` and no hut's nets over it) — a field reaped bare is stubble, not a
-hole, and deleting it is what used to turn every worked farm into 50 wood of
-scenery.
+purpose. A node drawn to zero is DESPAWNED exactly when nothing brings it back
+(`regen == 0`, full stop) — a field reaped bare is stubble, not a hole, and
+deleting it is what used to turn every worked farm into 50 wood of scenery. The
+gate used to ALSO spare anything near a fishing hut, which made every wood and
+stone node emptied within six tiles of one a permanent zero-remaining row.
 
 **Farming is a SEASON, not a bucket** (`sim/farming.rs` + `systems/economy.rs`).
 A rock's output is a function of how many hands you put on it; a field's is a
@@ -226,6 +274,226 @@ falling — is now the ONLY way a field dies.
 
 Movement costs are real: `find_path_costed` + `move_cost_at` make marsh drag
 and dunes bite. Costs clamp at 1 so the octile heuristic stays admissible.
+
+## The naval roster (sim/units.rs + buildings_defs.rs)
+
+`UnitRole::Boat` is the one role that moves in `Domain::Sea`. `UnitDef.domain`
+and `UnitDef.cargo_cap` are STATIC (nothing serialized, nothing hashed), so a
+hull costs zero bytes on the wire and zero in a save. Two hulls, both
+FACTION_BOTH — crossing the sea is not an asymmetry; WHAT you land is:
+- **Fishing Skiff** (13) — trained at the Fishing Hut, `carry` 20, the only hand
+  that can work a fishery now that fisheries are in the water.
+- **Barge** (14) — trained at the Harbour, `cargo_cap` 6. Its `radius` is
+  EXACTLY the Ram's, the widest body already in the roster, so `MAX_SEP` and
+  the separation cell scan do not widen for every unit on the map.
+
+A hull never fights (`attack == 0`), so it never enters the duel matrix, never
+draws rations (`draws_rations` reads ROLE), never builds (`UnitDef::builds()` is
+`role == Worker`, NOT `carry > 0` — a skiff carries more than a peasant and
+cannot reach a site), and combat keeps exactly ONE passability grid.
+
+**A hull launches at a BERTH or not at all.** `buildings::berth_of(seed,
+footprint, pos)` is the water tile orthogonally bordering a footprint — ocean
+first, then lowest `tile_key`, so a hut wedged between a puddle and the sea
+berths its skiff on the sea and every peer picks the same tile forever. No
+berth = the training order is REFUSED and refunded (`spawn_trained`), because a
+hull snapped onto land would be beached forever: `movement` walks whatever path
+it is handed and never tests terrain.
+
+**Harbour** (BuildingKind 16, Economy tab) carries `needs_sea_berth`: shoreline
+is not scarce (93-99.7% of coastal land passes `requires_water`), so the
+constraint that makes siting a naval base a decision is a berth on
+`main_water_body` PLUS the Fishing Hut prerequisite PLUS 40 stone. `requires_water`
+alone would float a harbour on a one-tile puddle.
+
+## The fishing loop (systems/gather.rs + economy.rs)
+
+**A node on water is workable ONLY by a `Domain::Sea` unit, and a node on land
+ONLY by a walker.** `node_domain(seed, pos)` answers it as a pure O(1) read of
+the cached sailable grid — no field on the row, no word in the StateHash, no
+save migration. The gate sits in FOUR places and needs all four: `best_node`'s
+candidate loop (before the `NODE_TRIES` budget, or a shore start burns every
+retry on schools no walker can work), the idle-gatherer balancer, the `Gather`
+command, and the `ToResource`/`Harvesting` arms themselves — because
+`harvest_reach` on a water node is 1.7 tiles, which is exactly enough for a
+peasant on the sand to net the first tile of sea.
+
+`move_patch` and `best_node` build their closures from `domain_passable` and
+pick their region grid to match (`region_grid` / `water_region_grid`,
+`node_reachable` / `sea_reachable`). Sea pathing uses a FLAT step cost: there is
+no naval move-cost grid, and the flat cost is what keeps `clear_straight_line`'s
+fast path, which is the common open-water hop.
+
+**A hull banks at a BERTH.** `Dropoff` carries `berth: Option<V2>`, computed only
+for `requires_water` structures, and a sea hauler steers for it while the
+banking test still measures the BUILDING — a waterside store always has a
+sailable tile abutting it. A hull's drop-offs are filtered to berths its own
+water body reaches, so a skiff never picks the keep two tiles inland.
+
+**A boat HOLDS STATION over a school it has emptied**, in `Harvesting` and on
+the return leg both. This needs no state: `gather` never looks at an idle hand
+with no job site, and a hull has none, so standing it down at the last fish
+loses it for the match. `reapable` takes the node out of the candidate list and
+puts it back on its own, and a boat on station has always just banked.
+
+**A hut MULTIPLIES its fishery's regrowth; it does not supply it.** The flat
+top-up this replaces was measurably NEGATIVE — the same aura doubles the draw,
+so a tended school emptied 20% faster than an untended one — and it filled to
+`FOOD_YIELD` instead of the node's own cap. `WorkAura.regen` therefore means
+growth-per-tick for `Field` and a MULTIPLIER for `WaterFood`.
+
+Measured (`examples/fish_econ`, 600 s runs, against a farm's 1.36 food/s per
+hand forever): tended inshore 1.19 food/s per skiff, tended offshore at a hut
+1.48, harbour-tended offshore 3.49. **The per-node flow is the cap** — a skiff
+drains at ~4.7 food/s, so a second boat on one school halves each one's rate
+with no magic number anywhere. An average start has 2.5-3.6 fisheries inside
+`TOWN_RADIUS`: the sea is a supplement that never out-scales the plough.
+
+## The second movement domain, and the ferry
+
+**A domain is chosen where a closure is BUILT, and nowhere else.** `movement`
+walks whatever path it is handed with no terrain test at all, so a wrong-domain
+closure does not fail a pathfind — it drives a boat inland, silently, and no
+existing test notices. Every site that builds one reads the mover's
+`unit_def(kind).domain`: `path_to`, `move_unit`, `lay_march`,
+`assign_idle_gatherers`, `best_node`, `move_patch`, `spawn_trained` and
+`separation`. `crates/protocol/tests/naval.rs::no_boat_ever_stands_on_land` is
+the net.
+
+`separation` filters PAIRS by domain as well as landings. Without the landing
+filter a hull on open water has all three candidate tiles refused and stacks
+into one sprite; without the pair filter a column on the beach shoves the barge
+it is unloading from. Measured cost of the pair filter at 20k units: nil
+(3.577 ms vs 3.598 ms sim avg, inside noise).
+
+**`line_of_sight` is a SAMPLED test and `clear_straight_line` is an exact one.**
+A leg that clips a tile corner between two samples reads as clear — invisible
+when a man shaves a wall, a boat on a hillside when a hull shaves a headland.
+`AStar::find_path_costed_in` therefore takes a `Smoothing`, and `Domain::
+smoothing()` is the single place that says a hull is `Exact`: it measures every
+string-pulled leg with the DDA **and the tail onto the caller's raw target**,
+which `find_path_costed` otherwise hands back unchecked ("pass a passable target
+for a clean finish" is a footgun, not a contract). Land stays `Sampled` and every
+land path in the game is bit-identical — `net_bench 2 3000 400` returns the same
+lockstep hash, which is the proof.
+
+**A CORRECT PATH IS NOT ENOUGH: `movement` refuses to beach a hull.** `step_toward`
+is fixed point and `separation` nudges, so a leg that runs along a tile boundary
+crosses it on a hair of drift with a perfectly legal path still in hand —
+MEASURED, a Hard bot's fishing fleet beached itself inside fifteen minutes on
+four of eight archipelago seeds. `movement` slides a `Domain::Sea` step along
+whichever axis still floats, the same three-way landing `separation` uses, and a
+slid hull is NOT counted as arrived. Land pays one enum compare.
+`tests/naval.rs::a_hull_handed_a_leg_across_land_still_never_stands_on_it` hands
+a hull a leg straight through a headland, which is the worst any producer could
+do; the order-driven test above it cannot catch this class because every order
+lays a leg that WAS clear when it was laid.
+
+**The mirror image: a land unit must not be ordered onto water.** `move_unit`
+snaps its target into the mover's own domain in BOTH directions now (`lay_march`
+always did) — a column mustered onto a harbour berth marched into the sea and
+stood there for the rest of the match. And a pursuit whose quarry stands where
+the hunter cannot go — a hull at sea, which is new — asks for `Exact` so the
+chase ends at the water's edge instead of walking three crossbowmen into open
+water. One bitset read per pursuit; a pursuit over ground the hunter can stand on
+is unchanged.
+
+**Cargo is `Unit::garrisoned_in` pointed at a HULL.** Already serialized,
+already hashed, already skipped by movement and combat — zero new state. It has
+its own verb (`Embark`/`Disembark`) because `garrison()` demands a `Building`
+row and a `garrisonable` kind. Three things a moving host broke, all fixed in
+place: `movement` now copies a hull's `Pos` onto its cargo every move tick (so
+supply, foraging, desertion and the state hash all read a TRUTHFUL position
+instead of the beach it boarded from — hosts are resolved through `GameIndex`,
+with a scan only when the four-tick index has not caught up); `combat` walks a
+UNIT-host death branch (`CombatScratch.cargo`) so a sunk barge's party DROWNS
+rather than orphaning units that point at a dead GameId; and `Disembark` snaps
+to the legal LAND tile nearest the click within `LANDING_REACH`, so a landing
+needs no harbour at the far end.
+
+## The bot at sea (sim/ai.rs + systems/ai_brain.rs)
+
+A naval system the bot cannot use means the Archipelago preset stays unplayable
+against bots, which is most of how this game is played. Measured over 8 seeds
+whose first two starts are on DIFFERENT islands (46 of 59 archipelago bases are,
+0 of 59 on every mainland preset), 30-minute Hard-vs-Hard: **0 of 8 matches
+resolved before this landed, 6 of 8 after — 8 of 8 raise a harbour, launch a
+barge and put a party on the far island.** `examples/naval_war` is the
+instrument (`NW_BEACH=1` checks the hull and land-unit ground invariants EVERY
+tick, `NW_DETAIL=1` prints the ladder's stocks and buildings).
+
+**A quay is bought with STONE, and an island runs out of it.** `next_trade` sold
+gluts into gold and never bought back, so a bot with 912 wood, a standing Market,
+107 gold and zero stone sat for fifteen minutes unable to afford the one building
+that could end the match. It now buys the Harbour's shortfall — gated on
+`naval_wanted && !enemy_by_land && !owns(Harbour)`, so no mainland preset can
+reach the rung at all. That single clause is 5 of 8 resolved -> 6 of 8.
+
+**A LADEN hull outlives its quay.** The crossing used to need a standing Harbour
+for its berth, so razing the quay left a barge floating with six men aboard, off
+the muster roll and out of the match forever. The water body now falls back to
+the hull's own (lowest id, so every peer agrees) and a hold with men in it lands
+them. The muster, though, is DRY GROUND or it is nothing — `quay_spot` returning
+`None` used to fall back to the berth itself, which is a water tile.
+
+`PlannerState` reads the sea through four fields and nothing else:
+`fisheries` + `fishery_centroid` (schools a hut on THIS coast could put a boat
+on — reachable by `sea_reachable` from the nearest water, inside
+`FISHERY_RANGE`), `offshore_cluster` (a cluster on the bot's water but off its
+land, which `remote_cluster` structurally cannot see because everything past the
+beach fails `node_reachable`), `boats`/`ferries` (hulls afloat AND queued — a
+skiff takes 10 s and a Hard window is 0.6, so without the queue count a
+three-boat target buys six), and `enemy_by_land`. `naval_wanted` is
+`barge_target > 0 && (offshore_cluster.is_some() || !enemy_by_land)`: the second
+clause is what FORCES a harbour on an island map.
+
+**WHERE a building goes is half of what it does.** The anchor match in
+`ai_brain` ended `_ => keep_pos`, so the Fishing Hut — whose only working
+function is being a drop-off NEAR THE FISH — was planted beside the Keep, which
+already accepts food. `shore_anchor` now ranks buildable waterside ground by
+what it can REACH (fisheries inside `FISHING_HUT_RANGE` for the hut, distance to
+the offshore cluster or the enemy for the harbour), not by distance from the
+keep. `SHORE_SCAN` is 20, not 14: a Highlands keep sits up to ~18 tiles from
+water, and 20 is still inside `TOWN_RADIUS` on the diagonal.
+
+**A refused shoreline is a COOLDOWN (`Bot.waterside_cd`), never a latch.** The
+old `fishing_blocked` bool disabled fishing for a whole match on one blocked
+probe — including one blocked by a peasant standing on the only legal tile. It
+suppresses the rung through the same `sites_in_flight` mechanism every other
+blocked rung uses, and it comes back.
+
+**The crossing is crude ON PURPOSE**: muster on the quay, fill the hold, sail,
+put the party on the nearest legal enemy shore, hand straight off to the LAND
+assault that already exists. No escort, no beach selection, no withdrawal by
+sea. Three things it must keep doing:
+- Men and hull are sent to the SAME point (`quay_spot`). A hull at its berth and
+  a column at the quay beside it end up outside a gangplank across a corner.
+- The muster is ONE ORDER PER MAN, not a group march. `lay_march` routes from
+  the group CENTROID; a knot whose centroid falls on a building footprint gets
+  an empty route and NOBODY moves — measured, six men re-issued the same doomed
+  order every second for the rest of the match while a seventh walked in alone.
+- A LADEN hull finishes its crossing whatever the muster gate says now. The gate
+  falls the moment the wave takes casualties, and a laden barge left floating is
+  a landing party deleted from the match.
+
+`FieldUnit.region` is why none of this costs a pathfind: an order across water is
+an A* that spends its whole expansion budget every brain tick and hands back
+nothing, so who can reach what is answered with an O(1) read off `region_grid` —
+in the assault, the recommit, the retreat and the scout alike. Measured on 6 Hard
+bots x 8000 ticks: **+0.2%** on a mainland map (5.135 -> 5.146 ms/tick) and
+**-31%** on an archipelago (0.477 -> 0.327), because the doomed A* is what the
+region read replaces.
+
+**`SHORE_SCAN` and `SOIL_SCAN` are separate numbers.** `place_near` ring-probes
+the full perimeter for anything with a soil or a water requirement, and a bot at
+its soil limit re-probes for a farm it cannot site EVERY decision window forever.
+Widening the one radius to reach a Highlands shoreline widened the farm probe
+too and cost 60% of the whole AI budget on a mainland map — measured, 5.6 ->
+9.1 ms/tick. A shore probe is once behind a cooldown; a soil probe is forever.
+
+Hulls are scored OUT of `counter_score`/`counter_dps`: `Census` is indexed by
+kind, so a barge lands in one for free, and a bot facing a wall of Sergeants must
+never answer it with a ferry.
 
 ## Sim cadences
 
@@ -308,6 +576,20 @@ Every gameplay fix ships with a test (`crates/protocol/tests/`).
   +X). Wheel axles along X. Mounted: wheel-group slots are the four horse
   legs (per-leg hip pivots — a shared pivot sweeps sawhorse arcs); rider is
   authored foot-size then shrunk `RIDER_SCALE` about the saddle.
+- ANYTHING AFLOAT USES `float_y`, NEVER `height_at`: hulls and fish schools are
+  clamped to `WATERLINE_Y` (-0.015, the highest value `surface_height` returns
+  for a wet tile). Measured, the drawn water is not one plane — deep water is
+  exactly -0.215 on every preset, shallows ramp up to -0.015, rivers floor
+  -0.063..-0.192, lakes -0.063..-0.215 — so a fixed sea plane buries a lake
+  skiff; and raw `height_at` bilinear-blends the beach in and walks a boat up
+  the sand. Hulls are ONE `Body` rig part pivoted at the origin (that origin is
+  the waterline) so `animate_units` can heave/roll the whole boat; they get no
+  walk `hop`. The wake is one shared quad + one shared material per hull, shown
+  only while moving AND floating.
+- WHICH FOOD NODE IS A FISHERY IS THE SIM'S ANSWER (`is_sailable`), never a
+  render height. The two disagree — 221/6793/8919/0 tiles per preset over base
+  11 — and every disagreement is dry ground drawn low, which is how a HERD came
+  to wear ripple rings. Deep water draws the bigger `fish_shoal` mesh.
 - Animal food nodes wander render-only (`AnimalNode` + `animate_animals`):
   graze/stand mesh swap at waypoints around the SIM anchor (gatherers walk
   to the anchor), and on the first harvest tick (remaining < first-seen)

@@ -43,6 +43,8 @@ u8_enum!(UnitKind {
     Sergeant = 10,
     Chaplain = 11,
     Naffatun = 12,
+    FishingSkiff = 13,
+    Barge = 14,
 } default Peasant);
 
 // What a unit is FOR. Every capability the upgrade table, the supply ledger and
@@ -57,6 +59,10 @@ u8_enum!(UnitRole {
     HorseArcher = 4,
     Siege = 5,
     Support = 6,
+    /// A hull. The one role that moves in `Domain::Sea`, and the reason a hull
+    /// is not simply a Worker with a boat mesh: it never fights, never eats,
+    /// never garrisons, and cannot stand where the other six stand.
+    Boat = 7,
 } default Worker);
 
 u8_enum!(DamageType {
@@ -90,6 +96,7 @@ u8_enum!(BuildingKind {
     Farm = 13,
     Storehouse = 14,
     Mosque = 15,
+    Harbour = 16,
 } default Keep);
 
 u8_enum!(ResourceType {

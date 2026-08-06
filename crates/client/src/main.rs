@@ -322,7 +322,7 @@ fn main() {
             render::sync::update_tool_visibility,
             render::sync::animate_animals,
             render::sync::animate_crops,
-            render::sync::animate_fish,
+            (render::sync::animate_fish, render::sync::animate_wakes),
             render::sync::animate_dying,
             render::sync::building_damage_fx,
             (render::sync::field_work_fx, render::sync::tick_particles),

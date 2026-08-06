@@ -26,7 +26,9 @@ pub struct WorkAura {
     pub target: AuraTarget,
     /// Harvest speed multiplier for nodes in reach.
     pub harvest_mult: Fx,
-    /// Units restocked per economy tick on each node in reach.
+    /// For `Field`, units of growth added per economy tick. For `WaterFood`, the
+    /// MULTIPLIER on the fishery's own regrowth — a hut speeds the water up, it
+    /// does not stock it.
     pub regen: i32,
 }
 
@@ -60,6 +62,9 @@ pub struct BuildingDef {
     pub prereqs: &'static [BuildingKind],
     pub enables_trade: bool,
     pub requires_water: bool,
+    /// Needs a berth on the MAIN water body, not merely a shoreline: a puddle
+    /// or a river too narrow to float anything satisfies `requires_water`.
+    pub needs_sea_berth: bool,
     pub garrison_cap: i32,
     pub garrison_survives_death: bool,
     /// Soil this structure needs under it (0 = anywhere). Farms only.
@@ -106,6 +111,7 @@ const DEFAULT: BuildingDef = BuildingDef {
     prereqs: &[],
     enables_trade: false,
     requires_water: false,
+    needs_sea_berth: false,
     garrison_cap: 0,
     garrison_survives_death: false,
     min_fertility: crate::fx!("0"),
@@ -122,7 +128,7 @@ const DEFAULT: BuildingDef = BuildingDef {
     max_count: 0,
 };
 
-const BUILDING_DEFS: [BuildingDef; 16] = [
+const BUILDING_DEFS: [BuildingDef; 17] = [
     // 0 Keep
     BuildingDef {
         label: "Keep",
@@ -314,6 +320,7 @@ const BUILDING_DEFS: [BuildingDef; 16] = [
         max_hp: 250,
         armor_class: ArmorClass::Leather,
         accepts: ACCEPTS_FOOD,
+        trains: &[UnitKind::FishingSkiff],
         requires_water: true,
         aura: Some(WorkAura {
             radius: crate::FISHING_HUT_RANGE,
@@ -406,6 +413,33 @@ const BUILDING_DEFS: [BuildingDef; 16] = [
         max_count: 1,
         ..DEFAULT
     },
+    // 16 Harbour — the deliberate commitment the Fishing Hut is the on-ramp to.
+    // Shoreline is NOT scarce (93-99.7% of coastal land already passes the
+    // waterside rule), so the SEA berth plus the hut plus 40 stone is what makes
+    // siting a naval base a decision rather than a formality.
+    BuildingDef {
+        label: "Harbour",
+        blurb: "Deep-water quay: barges, a wide fishery, every haul.",
+        icon: "⚓",
+        footprint: 2,
+        height: crate::fx!("1.35"),
+        cost: ResourceCost::new(120, 40, 0, 0),
+        max_hp: 700,
+        armor_class: ArmorClass::Leather,
+        accepts: ACCEPTS_ALL,
+        trains: &[UnitKind::Barge],
+        requires: Some(BuildingKind::FishingHut),
+        requires_water: true,
+        needs_sea_berth: true,
+        aura: Some(WorkAura {
+            radius: crate::HARBOUR_RANGE,
+            target: AuraTarget::WaterFood,
+            harvest_mult: crate::fx!("2"),
+            regen: crate::HARBOUR_FISH_REGEN,
+        }),
+        build_time: crate::fx!("30"),
+        ..DEFAULT
+    },
 ];
 
 pub fn building_def(kind: BuildingKind) -> &'static BuildingDef {
@@ -429,6 +463,7 @@ pub const BUILD_CATEGORIES: [BuildCategory; 4] = [
             BuildingKind::Farm,
             BuildingKind::Granary,
             BuildingKind::FishingHut,
+            BuildingKind::Harbour,
             BuildingKind::Market,
         ],
     },
@@ -497,11 +532,24 @@ mod tests {
 
         let auras: Vec<_> =
             BuildingKind::ALL.iter().filter(|k| building_def(**k).aura.is_some()).collect();
-        assert_eq!(auras.len(), 2, "one aura mechanic, two rows");
+        assert_eq!(auras.len(), 3, "one aura mechanic, three rows");
         assert_eq!(
             building_def(BuildingKind::Granary).aura.unwrap().target,
             AuraTarget::Field
         );
+        // the two water rows are a LADDER, not a duplicate: the harbour buys
+        // reach, and auras do not stack, so the multiplier stays one nets-worth
+        let hut = building_def(BuildingKind::FishingHut).aura.unwrap();
+        let quay = building_def(BuildingKind::Harbour).aura.unwrap();
+        assert_eq!((hut.target, quay.target), (AuraTarget::WaterFood, AuraTarget::WaterFood));
+        assert!(quay.radius > hut.radius && quay.regen > hut.regen);
+        assert_eq!(quay.harvest_mult, hut.harvest_mult);
+        // and only a structure with a berth on the ocean can be one
+        assert!(building_def(BuildingKind::Harbour).needs_sea_berth);
+        for &k in BuildingKind::ALL {
+            let d = building_def(k);
+            assert!(!d.needs_sea_berth || d.requires_water, "{k:?} wants a berth but not a shore");
+        }
 
         for &k in BuildingKind::ALL {
             let d = building_def(k);

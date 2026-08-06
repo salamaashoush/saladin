@@ -130,7 +130,7 @@ mod tests {
         );
         // the one-per-town structure
         owned.insert(BuildingKind::Barracks);
-        let mut counts = [0i32; 16];
+        let mut counts = [0i32; BuildingKind::ALL.len()];
         counts[BuildingKind::Mosque as usize] = 1;
         assert_eq!(
             build_row_state(BuildingKind::Mosque, &owned, &counts, &rich()).status,

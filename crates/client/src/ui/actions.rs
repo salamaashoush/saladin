@@ -60,7 +60,7 @@ fn crew_for(
     }
     let carriers = || {
         q_units.iter().filter(move |(_, o, _, u)| {
-            o.0 == me && u.garrisoned_in == 0 && unit_def(u.kind).carry > 0
+            o.0 == me && u.garrisoned_in == 0 && unit_def(u.kind).hands()
         })
     };
     let picked: Vec<u64> =

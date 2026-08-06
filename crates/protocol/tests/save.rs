@@ -369,3 +369,131 @@ fn a_stale_save_is_refused_not_misread() {
         );
     }
 }
+
+/// Cargo aboard a hull is `garrisoned_in` pointed at a UNIT, which nothing in
+/// the save layer had ever seen. Nothing about the row changed — that is the
+/// claim — so the trajectory after a restore has to hold with a laden barge
+/// under way, exactly as it does with a garrison in a tower.
+#[test]
+fn troops_aboard_a_sailing_hull_survive_the_disk() {
+    use saladin_sim::{Fx, UnitKind, fx, is_passable, is_sailable};
+
+    let seed = saladin_sim::compose_seed(7, 3);
+    let sea = saladin_sim::sailable_grid(seed);
+    let ocean = saladin_sim::main_water_body(seed);
+    let bodies = saladin_sim::water_region_grid(seed);
+    let w = saladin_sim::WORLD_SIZE;
+    let centre = |tx: i32, ty: i32| V2::new(Fx::from_num(tx) + fx!("0.5"), Fx::from_num(ty) + fx!("0.5"));
+    // a berth on the open ocean with dry land right beside it, so the party is
+    // aboard on the first command and the VOYAGE is the thing under test
+    let mut anchorage = None;
+    'scan: for ty in 20..w - 20 {
+        for tx in 20..w - 20 {
+            let i = (ty * w + tx) as usize;
+            if !sea[i] || bodies[i] != ocean {
+                continue;
+            }
+            for (dx, dy) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
+                if is_passable(seed, tx + dx, ty + dy) {
+                    anchorage = Some((centre(tx, ty), centre(tx + dx, ty + dy)));
+                    break 'scan;
+                }
+            }
+        }
+    }
+    let (hull, beach) = anchorage.expect("a berth beside dry land");
+    let far = {
+        let mut best = (Fx::ZERO, hull);
+        for ty in (20..w - 20).step_by(7) {
+            for tx in (20..w - 20).step_by(7) {
+                let i = (ty * w + tx) as usize;
+                if sea[i] && bodies[i] == ocean {
+                    let d = saladin_sim::dist2(hull, centre(tx, ty));
+                    if d > best.0 {
+                        best = (d, centre(tx, ty));
+                    }
+                }
+            }
+        }
+        best.1
+    };
+
+    let mut a = build();
+    a.world_mut().insert_resource(WorldConfig { seed });
+    a.world_mut().spawn((
+        GameId(500),
+        MatchId(1),
+        Player {
+            player_id: 1,
+            name: "P".into(),
+            faction: Faction::Ayyubid,
+            stock: Stockpile { wood: 400, stone: 400, food: 400, gold: 400 },
+            color: 0,
+            online: true,
+            keep: 0,
+            defeated: false,
+            slot: 0,
+            tech_mask: 0,
+            hunger: 0,
+        },
+    ));
+    let put = |app: &mut App, id: u64, kind: UnitKind, pos: V2| {
+        app.world_mut().spawn((
+            GameId(id),
+            Owner(1),
+            MatchId(1),
+            Pos { pos, facing: ZERO },
+            Unit::new(kind, pos),
+        ));
+    };
+    put(&mut a, 1, UnitKind::Barge, hull);
+    for i in 0..5u64 {
+        put(&mut a, 10 + i, UnitKind::Spearman, beach);
+    }
+    a.world_mut()
+        .resource_mut::<CommandQueue>()
+        .0
+        .push(PlayerCommand::Embark { player_id: 1, units: (10..15).collect(), boat: 1 });
+    step(a.world_mut());
+    a.world_mut()
+        .resource_mut::<CommandQueue>()
+        .0
+        .push(PlayerCommand::Move { player_id: 1, unit: 1, target: far });
+    for _ in 0..60 {
+        step(a.world_mut());
+    }
+
+    let aboard = {
+        let world = a.world_mut();
+        let mut q = world.query::<&Unit>();
+        q.iter(world).filter(|u| u.garrisoned_in == 1).count()
+    };
+    assert_eq!(aboard, 5, "nobody was aboard, so the round trip proves nothing");
+
+    let bytes = save::to_bytes(&save::snapshot(a.world_mut()));
+    let snap = save::from_bytes(&bytes).expect("a save with a laden hull parses");
+    let mut b = build();
+    b.world_mut().insert_resource(WorldConfig { seed });
+    save::restore(b.world_mut(), snap);
+
+    for i in 0..300 {
+        step(a.world_mut());
+        step(b.world_mut());
+        assert_eq!(
+            a.world().resource::<StateHash>().0,
+            b.world().resource::<StateHash>().0,
+            "the restored voyage diverged at step {i}"
+        );
+    }
+    let world = b.world_mut();
+    let mut q = world.query::<(&Unit, &Pos)>();
+    let (still, afloat) = q.iter(world).filter(|(u, _)| u.garrisoned_in == 1).fold(
+        (0, 0),
+        |(n, wet), (_, p)| {
+            let sailing = is_sailable(seed, p.pos.x.to_num::<i32>(), p.pos.y.to_num::<i32>()) as i32;
+            (n + 1, wet + sailing)
+        },
+    );
+    assert_eq!(still, 5, "the restored world lost the cargo");
+    assert_eq!(afloat, 5, "the restored passengers are not where their hull is");
+}

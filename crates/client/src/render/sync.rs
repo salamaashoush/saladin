@@ -4,6 +4,7 @@
 //! zoom; selection rings; rout markers; wall yaw; node scaling; HP bars.
 
 use crate::camera::CameraState;
+use crate::render::models::hull_dims;
 use crate::selection::Selection;
 use crate::terrain::{HeightField, height_at};
 use bevy::mesh::{MeshBuilder, Meshable};
@@ -22,6 +23,31 @@ use std::collections::HashSet;
 
 /// Far-zoom threshold above which unit bodies switch to impostor meshes.
 const IMPOSTOR_VIEW_SIZE: f32 = 34.0;
+
+/// The waterline: the HIGHEST value `surface_height` returns for a wet tile
+/// (`h == SEA` exactly, giving `-0.2 * 0 - 0.015`). Every hull and every fish
+/// school is pinned at or below it.
+///
+/// It is a CEILING and not a fixed plane because the drawn water is not one
+/// plane. Measured over base 11, render height at wet tile centres: deep water
+/// is exactly -0.215 on all four presets, but the shallows ramp up to -0.015,
+/// rivers floor between -0.063 and -0.192 and lakes between -0.063 and -0.215,
+/// all of them varying by preset with `sea_shift`. Pinning hulls to one
+/// constant would bury a lake skiff by up to 0.15 and float a beached barge by
+/// the same. Following the surface is right; what is wrong is `height_at`
+/// bilinear-blending a LAND corner in as a hull closes the last half tile,
+/// which walks the boat up the sand exactly where a player is watching it
+/// unload. The clamp stops it at the water's edge and costs nothing elsewhere.
+pub const WATERLINE_Y: f32 = -0.015;
+
+/// Render height for anything that floats. Off water (a dev harness lineup, a
+/// hull mid-despawn) it falls through to the ground, so a beached boat draws
+/// where it is instead of vanishing under the map.
+pub fn float_y(field: &HeightField, seed: u32, x: f32, z: f32) -> f32 {
+    let g = height_at(field, x, z);
+    if saladin_sim::is_sailable(seed, x as i32, z as i32) { g.min(WATERLINE_Y) } else { g }
+}
+
 /// Zoom past which chaff off a sickle is not drawn — see `field_work_fx`.
 const CHAFF_VIEW_SIZE: f32 = 20.0;
 pub const BAR_W: f32 = 0.9;
@@ -55,7 +81,12 @@ pub struct RenderAssets {
     /// Farm crop by lifecycle stage, indexed by the `CROP_*` constants. A
     /// field is never drawn from `nodes[&Food]` — that table is wild game.
     pub crop_stages: Vec<Handle<Mesh>>,
+    /// Inshore school and the bigger deep-water shoal — same node type, and the
+    /// only thing that tells a player which prize is which is the mesh.
     pub fish_node: Handle<Mesh>,
+    pub fish_shoal: Handle<Mesh>,
+    /// One shared trapezoid dragged behind every hull afloat.
+    pub wake: Handle<Mesh>,
     pub carry_sack: Handle<Mesh>,
     /// [axe, pick, sickle] — peasant hand tools (empty if not baked)
     pub tools: Vec<Handle<Mesh>>,
@@ -94,6 +125,8 @@ pub struct RenderMaterials {
     pub demolish: Handle<StandardMaterial>,
     pub arrow: Handle<StandardMaterial>,
     pub foam: Handle<StandardMaterial>,
+    /// Hull wake only — see the note where it is built.
+    pub wake: Handle<StandardMaterial>,
     pub aura: Handle<StandardMaterial>,
     pub smoke_light: Handle<StandardMaterial>,
     pub smoke_dark: Handle<StandardMaterial>,
@@ -176,6 +209,10 @@ pub fn build_materials(
         demolish: overlay(mats, Color::srgb_u8(0xff, 0x40, 0x30), 0.4),
         arrow: overlay(mats, Color::srgb_u8(0x2e, 0x21, 0x14), 1.0),
         foam: overlay(mats, Color::srgb_u8(0xe8, 0xf6, 0xf8), 0.4),
+        // Its own material, not `foam`: that one is the shoreline ripple, and a
+        // wake bright enough to read behind a hull turns every beach on the map
+        // into a ring of scum.
+        wake: overlay(mats, Color::srgb_u8(0xf2, 0xfb, 0xfd), 0.75),
         aura: overlay(mats, Color::srgb_u8(0x5f, 0xd6, 0xe8), 0.55),
         smoke_light: overlay(mats, Color::srgb_u8(0xb8, 0xb4, 0xac), 0.5),
         smoke_dark: overlay(mats, Color::srgb_u8(0x45, 0x41, 0x3c), 0.55),
@@ -335,6 +372,16 @@ pub struct NodeBaseScale(pub Vec3);
 pub struct FishNode {
     pub base_y: f32,
     pub phase: f32,
+}
+
+/// The wake quad astern of a hull. Carries its own length so `animate_units`
+/// can ease it out from nothing as the boat gets under way; `grown` is the
+/// eased 0..1 the transform is rebuilt from each frame.
+#[derive(Component)]
+pub struct Wake {
+    pub beam: f32,
+    pub len: f32,
+    pub grown: f32,
 }
 
 /// A farm's standing crop. Mirrors the sim numbers that decide which of the
@@ -861,7 +908,12 @@ pub fn sync_render(
                 .and_then(|o| owner_faction.get(&o.0).copied())
                 .unwrap_or(saladin_sim::Faction::Ayyubid);
             let yaw = heading_yaw(u.heading);
-            let world = Vec3::new(x, ground, z);
+            let afloat = unit_def(u.kind).afloat();
+            let world = if afloat {
+                Vec3::new(x, float_y(&field, world_cfg.seed, x, z), z)
+            } else {
+                Vec3::new(x, ground, z)
+            };
             let root = *map.0.entry(gid.0).or_insert_with(|| {
                 spawn_unit_tree(
                     &mut commands,
@@ -878,7 +930,9 @@ pub fn sync_render(
             });
             if let Ok((mut lerp, mut vis, _, anim, _)) = q_roots.get_mut(root) {
                 lerp.target = world;
-                lerp.hop = u.has_target;
+                // a hull has no step to bounce on — its heave is the sea's, and
+                // the animator owns it
+                lerp.hop = u.has_target && !afloat;
                 lerp.yaw = yaw;
                 *vis = if u.garrisoned_in != 0 { Visibility::Hidden } else { Visibility::Inherited };
                 if let Some(mut anim) = anim {
@@ -1042,10 +1096,16 @@ pub fn sync_render(
             }
         } else if let Some(n) = node {
             seen.insert(gid.0);
-            let world = Vec3::new(x, ground, z);
+            // A fishery is whatever the SIM calls water, not whatever the render
+            // heightfield happens to dip below zero. Those two disagree — the
+            // mesh keyed off render height drew schools with ripple rings on
+            // walkable ground, and the sim's own predicate is the one the
+            // gather rules, the hut aura and `node_reachable` already use.
+            let fishy = n.res_type == ResourceType::Food
+                && saladin_sim::is_sailable(world_cfg.seed, x as i32, z as i32);
+            let world =
+                if fishy { Vec3::new(x, ground.min(WATERLINE_Y), z) } else { Vec3::new(x, ground, z) };
             let root = *map.0.entry(gid.0).or_insert_with(|| {
-                // Coastal food sits on water tiles — draw a fish school there,
-                // never a deer standing on the sea.
                 use crate::render::models::props::*;
                 // GameIds are handed out sequentially, so anything derived from
                 // one makes a whole patch share a variant and a facing. Species,
@@ -1056,8 +1116,21 @@ pub fn sync_render(
                 let variants = &assets.nodes[&n.res_type];
                 let roll = (stream(0x3b17) * 997.0) as usize;
                 let idx = node_variant(n.res_type, world_cfg.seed, x, z, roll, variants.len());
-                let fishy = n.res_type == ResourceType::Food && ground < -0.005;
-                let mesh = if fishy { assets.fish_node.clone() } else { variants[idx].clone() };
+                // Deep water carries the offshore rule's fishery: 2.5x the stock
+                // of a shelf school and drawn as the bigger boil.
+                let deep = fishy
+                    && saladin_sim::sample_terrain(
+                        world_cfg.seed,
+                        saladin_sim::Fx::from_num(x),
+                        saladin_sim::Fx::from_num(z),
+                    )
+                    .biome
+                        == saladin_sim::Biome::DeepWater;
+                let mesh = match (fishy, deep) {
+                    (true, true) => assets.fish_shoal.clone(),
+                    (true, false) => assets.fish_node.clone(),
+                    _ => variants[idx].clone(),
+                };
                 let yaw = stream(0x7071) * std::f32::consts::TAU;
                 // mineral outcrops settle INTO the slope: slightly embedded,
                 // tilted most of the way onto the surface normal — never
@@ -1094,11 +1167,11 @@ pub fn sync_render(
                     Lerp { target: pos, yaw, bob_phase: 0.0, turn: false, hop: false },
                 ));
                 if fishy {
-                    e.insert(FishNode { base_y: ground, phase: (gid.0 % 628) as f32 * 0.01 });
+                    e.insert(FishNode { base_y: pos.y, phase: (gid.0 % 628) as f32 * 0.01 });
                 }
                 // Land game animals get a wander/graze/carcass brain.
                 if n.res_type == ResourceType::Food
-                    && ground >= -0.005
+                    && !fishy
                     && matches!(idx, FOOD_DEER | FOOD_BOAR | FOOD_DEER_GRAZING)
                 {
                     let deerish = idx != FOOD_BOAR;
@@ -1546,13 +1619,28 @@ fn spawn_unit_tree(
                 MeshMaterial3d(mat),
                 Visibility::Hidden,
             ));
+            // A hull's `radius` is a SEPARATION number (the barge shares the
+            // ram's on purpose), not a footprint: ringing a 2.5-long ferry at
+            // 1.4 across draws a circle inside the boat.
+            let ring_r =
+                if def.afloat() { hull_dims(kind).0 * 1.15 } else { r.max(0.2) * 3.2 };
             p.spawn((
                 SelRing,
                 Mesh3d(assets.ring.clone()),
                 MeshMaterial3d(rmats.ring.clone()),
-                Transform::from_xyz(0.0, 0.05, 0.0).with_scale(Vec3::splat(r.max(0.2) * 3.2)),
+                Transform::from_xyz(0.0, 0.05, 0.0).with_scale(Vec3::splat(ring_r)),
                 Visibility::Hidden,
             ));
+            if def.afloat() {
+                let (len, beam) = hull_dims(kind);
+                p.spawn((
+                    Wake { beam: beam * 0.85, len: len * 0.55, grown: 0.0 },
+                    Mesh3d(assets.wake.clone()),
+                    MeshMaterial3d(rmats.wake.clone()),
+                    Transform::from_xyz(0.0, 0.06, -len * 0.42).with_scale(Vec3::ZERO),
+                    Visibility::Hidden,
+                ));
+            }
             p.spawn((
                 RoutFlag,
                 Mesh3d(assets.rout_quad.clone()),
@@ -1597,6 +1685,25 @@ pub fn animate_units(
     let ease = (16.0 * time.delta_secs()).min(1.0);
     for (anim, children) in &q_roots {
         let tp = t + anim.phase;
+        // A HULL. Everything it owns is one `Body` part pivoted at the origin,
+        // which is the waterline: the whole boat heaves and rolls about the
+        // water it floats in, and the root's Y is pinned there by `float_y`.
+        if unit_def(anim.kind).afloat() {
+            let heave = (tp * 0.9).sin() * 0.028 + (tp * 1.9).sin() * 0.009;
+            let roll = (tp * 0.72).sin() * 0.055 + (tp * 1.6 + 0.6).sin() * 0.02;
+            // under way she squats by the stern and holds a little lee list
+            let pitch = (tp * 1.15 + 1.0).sin() * 0.028 + if anim.moving { 0.05 } else { 0.0 };
+            let pose = Quat::from_rotation_z(roll) * Quat::from_rotation_x(-pitch);
+            for child in children.iter() {
+                let Ok((body, mut tf, _)) = q_parts.get_mut(child) else { continue };
+                if body.impostor_part {
+                    continue;
+                }
+                tf.translation = body.pivot + Vec3::Y * heave;
+                tf.rotation = tf.rotation.slerp(pose, ease);
+            }
+            continue;
+        }
         let mounted = matches!(anim.kind, UnitKind::Knight | UnitKind::HorseArcher | UnitKind::Mamluk);
         // read the def, not a hand-kept list: the Mangonel became `ranged` and
         // three kinds were appended, and a stale list poses them wrong
@@ -1869,6 +1976,37 @@ pub fn animate_crops(
         let rise = crop_rise(stage, c.remaining, c.cap);
         if tf.scale.y != rise {
             tf.scale.y = rise;
+        }
+    }
+}
+
+/// The wake astern of every hull under way: one shared quad per boat, eased
+/// out from nothing so a boat that stops does not leave a rectangle of foam
+/// standing on the sea. Scale-only — the mesh and the material are shared, so
+/// a hundred hulls are still one batch.
+pub fn animate_wakes(
+    time: Res<Time>,
+    q_roots: Query<(&AnimState, &Transform)>,
+    mut q: Query<(&mut Wake, &ChildOf, &mut Transform, &mut Visibility), Without<AnimState>>,
+) {
+    let k = (2.6 * time.delta_secs()).min(1.0);
+    for (mut w, child_of, mut tf, mut vis) in &mut q {
+        // afloat is a RENDER fact here: the root is pinned to the waterline by
+        // `float_y` exactly when the sim calls this tile water. A hull conjured
+        // onto grass by a harness must not plough a wake through the sand.
+        let want = q_roots
+            .get(child_of.parent())
+            .map(|(a, tf)| a.moving && tf.translation.y <= WATERLINE_Y)
+            .unwrap_or(false);
+        w.grown += ((if want { 1.0 } else { 0.0 }) - w.grown) * k;
+        let on = w.grown > 0.02;
+        let want_vis = if on { Visibility::Inherited } else { Visibility::Hidden };
+        if *vis != want_vis {
+            *vis = want_vis;
+        }
+        if on {
+            // widens as she gathers way; the length is what actually reads
+            tf.scale = Vec3::new(w.beam * (0.45 + w.grown * 0.55), 1.0, w.len * w.grown);
         }
     }
 }
@@ -2201,7 +2339,7 @@ pub fn update_building_highlight(
 
 /// Build the shared mesh handles at match start.
 pub fn build_assets(meshes: &mut Assets<Mesh>) -> RenderAssets {
-    use crate::render::models::baked::{fish_node_mesh, resource_node_meshes};
+    use crate::render::models::baked::{fish_node_mesh, fish_shoal_mesh, resource_node_meshes};
     let mut nodes = HashMap::new();
     for r in [ResourceType::Wood, ResourceType::Stone, ResourceType::Food, ResourceType::Gold] {
         nodes.insert(r, resource_node_meshes(r).into_iter().map(|m| meshes.add(m)).collect());
@@ -2241,6 +2379,8 @@ pub fn build_assets(meshes: &mut Assets<Mesh>) -> RenderAssets {
         nodes,
         crop_stages,
         fish_node,
+        fish_shoal: meshes.add(fish_shoal_mesh()),
+        wake: meshes.add(crate::render::models::props::wake_mesh()),
         carry_sack: meshes.add(crate::render::models::units::carry_sack_mesh()),
         tools: crate::render::models::baked::tool_meshes().into_iter().map(|m| meshes.add(m)).collect(),
         puff: meshes.add(Sphere::new(1.0).mesh().uv(6, 5)),
@@ -2268,6 +2408,110 @@ pub fn build_assets(meshes: &mut Assets<Mesh>) -> RenderAssets {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use saladin_sim::{WORLD_SIZE, compose_seed, is_sailable};
+
+    /// Which food node draws as a fish school USED to be a render-height test
+    /// (`ground < -0.005`). That is not the same question the sim answers:
+    /// `surface_height` compares against a fixed `SEA`, while the worldgrid
+    /// classifies against `SEA + sea_shift`, so the two disagree over a whole
+    /// band of tiles — which is how schools with ripple rings came to be drawn
+    /// on walkable ground. The mesh now asks the sim, so the disagreement can
+    /// no longer reach the screen.
+    ///
+    /// Measured over base 11, tiles the old rule labelled wrongly: Continental
+    /// 221, River Valley 6793, Highlands 8919, Archipelago 0 — and every one of
+    /// them runs the SAME way. Not one water tile on any of the four presets
+    /// renders above the waterline; the error is dry ground drawn low, which is
+    /// why the symptom was a HERD wearing ripple rings.
+    #[test]
+    fn the_fish_school_asks_the_sim_what_water_is_not_the_heightfield() {
+        let mut wrong = [0u32; 4];
+        for preset in 0..4u8 {
+            let seed = compose_seed(11, preset);
+            let field = crate::terrain::build_height_field(seed);
+            for ty in 0..WORLD_SIZE {
+                for tx in 0..WORLD_SIZE {
+                    let (x, z) = (tx as f32 + 0.5, ty as f32 + 0.5);
+                    let wet = is_sailable(seed, tx, ty);
+                    if (height_at(&field, x, z) < -0.005) != wet {
+                        wrong[preset as usize] += 1;
+                    }
+                    // the shipped rule is the sim's own answer, by construction
+                    assert_eq!(is_sailable(seed, x as i32, z as i32), wet);
+                }
+            }
+        }
+        assert!(
+            wrong[1] > 2000 && wrong[2] > 2000,
+            "the render/sim waterline split has closed on its own ({wrong:?}) — if that \
+             is a real terrain fix, say so out loud and retire this test"
+        );
+    }
+
+    /// A hull is pinned at or below the waterline instead of sampling the ground
+    /// under it. Two things would go wrong otherwise, and both happen exactly
+    /// where a player is watching a boat unload: `height_at` bilinear-blends the
+    /// beach in as a hull closes the last half tile, and the sim calls tiles
+    /// water that the height field puts ABOVE the waterline (the same split the
+    /// test above measures) — either walks the boat up the sand.
+    #[test]
+    fn a_hull_rides_the_waterline_instead_of_climbing_the_beach() {
+        let seed = compose_seed(1000, 3);
+        let field = crate::terrain::build_height_field(seed);
+        let (mut raw_climb, mut checked) = (f32::MIN, 0);
+        for ty in 0..WORLD_SIZE {
+            for tx in 0..WORLD_SIZE {
+                if !is_sailable(seed, tx, ty) {
+                    continue;
+                }
+                // the whole tile, not just its centre — a hull stands anywhere
+                for (ox, oz) in [(0.08f32, 0.08f32), (0.92, 0.08), (0.08, 0.92), (0.92, 0.92), (0.5, 0.5)] {
+                    let (x, z) = (tx as f32 + ox, ty as f32 + oz);
+                    let y = float_y(&field, seed, x, z);
+                    assert!(y <= WATERLINE_Y, "hull at ({x}, {z}) floats at {y}");
+                    raw_climb = raw_climb.max(height_at(&field, x, z) - WATERLINE_Y);
+                    checked += 1;
+                }
+            }
+        }
+        assert!(checked > 10_000, "no water on this map to test with");
+        assert!(
+            raw_climb > 0.1,
+            "the ground never rises over the waterline on water here ({raw_climb}) — \
+             this map cannot prove the clamp does anything"
+        );
+    }
+
+    /// The wake is one shared mesh scaled per hull, so it has to be authored
+    /// pointing ASTERN (models face +Z) and fade to nothing at the tail, or
+    /// every boat on the map drags a solid slab.
+    #[test]
+    fn the_wake_trails_astern_and_fades_out() {
+        let mesh = crate::render::models::props::wake_mesh();
+        let pos = mesh.attribute(Mesh::ATTRIBUTE_POSITION).unwrap().as_float3().unwrap();
+        let col = match mesh.attribute(Mesh::ATTRIBUTE_COLOR).unwrap() {
+            bevy::mesh::VertexAttributeValues::Float32x4(v) => v.clone(),
+            _ => panic!("the wake needs per-vertex alpha"),
+        };
+        assert_eq!(pos.len(), col.len());
+        let (mut head, mut tail) = (0.0f32, 0.0f32);
+        let (mut widest_z, mut widest) = (f32::MAX, 0.0f32);
+        for (p, c) in pos.iter().zip(&col) {
+            assert!(p[2] <= 0.06, "the wake reaches ahead of the stern: {}", p[2]);
+            if p[2] > -0.5 {
+                head = head.max(c[3]);
+            }
+            if p[2] < -2.0 {
+                tail = tail.max(c[3]);
+                widest = widest.max(p[0].abs());
+                widest_z = widest_z.min(p[2]);
+            }
+        }
+        assert!(head > 0.5, "the wake is not bright at the transom: {head}");
+        assert_eq!(tail, 0.0, "the wake never fades out: {tail}");
+        // and it SPREADS: a wake that stays the width of the transom is a plank
+        assert!(widest > 1.0, "the wake does not splay ({widest} at z {widest_z})");
+    }
 
     /// The work-radius ring is the ONLY thing that tells a player how far a farm
     /// hub reaches, and no player had ever seen one: it was a shared FLAT torus

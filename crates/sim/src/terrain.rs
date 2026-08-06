@@ -1,5 +1,5 @@
 use crate::biomes::{Biome, biome_passable};
-use crate::constants::WORLD_SIZE;
+use crate::constants::{START_REGION_MIN, WORLD_SIZE};
 use crate::enums::ResourceType;
 use crate::math::{Fx, V2, spline};
 use crate::noise::fbm;
@@ -223,18 +223,49 @@ pub fn is_land(seed: u32, x: Fx, y: Fx) -> bool {
 
 const ADJ4: [(i32, i32); 4] = [(1, 0), (-1, 0), (0, 1), (0, -1)];
 
-/// Buildable land with open water on at least one orthogonal neighbour.
+/// Walkable land with the OPEN SEA on at least one orthogonal neighbour — the
+/// seacoast, not any waterside (a lakeshore is not a coast).
 pub fn is_coastal(seed: u32, x: Fx, y: Fx) -> bool {
     if !is_land(seed, x, y) {
         return false;
     }
-    for (dx, dy) in ADJ4 {
-        let b = sample_terrain(seed, x + Fx::from_num(dx), y + Fx::from_num(dy)).biome;
-        if b == Biome::DeepWater || b == Biome::ShallowWater {
-            return true;
+    ADJ4.iter().any(|(dx, dy)| {
+        crate::biomes::biome_sailable(
+            sample_terrain(seed, x + Fx::from_num(*dx), y + Fx::from_num(*dy)).biome,
+        )
+    })
+}
+
+/// The two movement domains. A hull and a walker read the SAME A* over
+/// different passability grids; nothing else about them differs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Domain {
+    Land,
+    Sea,
+}
+
+impl Domain {
+    /// How tight a smoothed path leg has to be for a mover here. Land is
+    /// SAMPLED, exactly as every march in the game has always been measured — a
+    /// man shaving a tenth of a tile off a wall corner is invisible. The sea is
+    /// EXACT: `movement` walks whatever waypoints it is handed with no terrain
+    /// test at all, so the same tenth of a tile is a hull standing on a headland
+    /// and nothing downstream ever puts it back.
+    pub fn smoothing(self) -> crate::pathfinding::Smoothing {
+        match self {
+            Domain::Land => crate::pathfinding::Smoothing::Sampled,
+            Domain::Sea => crate::pathfinding::Smoothing::Exact,
         }
     }
-    false
+}
+
+/// Tile-space passability for one domain — the single place a closure-building
+/// call site should go to decide what its mover may enter.
+pub fn domain_passable(seed: u32, domain: Domain, tx: i32, ty: i32) -> bool {
+    match domain {
+        Domain::Land => is_passable(seed, tx, ty),
+        Domain::Sea => is_sailable(seed, tx, ty),
+    }
 }
 
 /// Tile-space passability for the pathfinder: in-bounds land at the tile centre.
@@ -387,17 +418,194 @@ pub fn is_buildable_tile(seed: u32, tx: i32, ty: i32) -> bool {
     buildable_grid(seed)[(ty * WORLD_SIZE + tx) as usize]
 }
 
-/// True open water (sea or river) — the Fishing Hut's shoreline test. NOT the
-/// same as "impassable" (cliffs/mountains are impassable but dry).
-pub fn is_water_tile(seed: u32, tx: i32, ty: i32) -> bool {
+/// Per-seed water bitmap: every tile a hull floats on — sea, shelf, river and
+/// lake alike. A lake is included on purpose and its own water region traps a
+/// skiff inside it, which is the correct answer for free; fords are LAND, so a
+/// ford severs a river for a hull exactly as a river severs a road for a walker.
+/// Cached and leaked like `passable_grid`, with its OWN last-seed cell — one
+/// cell shared between domains would thrash on every A* expansion.
+pub fn sailable_grid(seed: u32) -> &'static [bool] {
+    use std::cell::Cell;
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+
+    const EMPTY: &[bool] = &[];
+    thread_local! {
+        static LAST: Cell<(u32, &'static [bool])> = const { Cell::new((u32::MAX, EMPTY)) };
+    }
+    let (last_seed, last_grid) = LAST.with(|c| c.get());
+    if last_seed == seed && !last_grid.is_empty() {
+        return last_grid;
+    }
+
+    static GRIDS: OnceLock<Mutex<HashMap<u32, &'static [bool]>>> = OnceLock::new();
+    let grids = GRIDS.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut g = grids.lock().unwrap();
+    let grid: &'static [bool] = match g.get(&seed) {
+        Some(&grid) => grid,
+        None => {
+            let world = crate::worldgrid::world_grid(seed);
+            let v: Vec<bool> =
+                world.biome.iter().map(|&b| crate::biomes::biome_is_water(b)).collect();
+            let leaked: &'static [bool] = Box::leak(v.into_boxed_slice());
+            g.insert(seed, leaked);
+            leaked
+        }
+    };
+    LAST.with(|c| c.set((seed, grid)));
+    grid
+}
+
+/// Tile-space passability for a hull: in-bounds water of any kind.
+pub fn is_sailable(seed: u32, tx: i32, ty: i32) -> bool {
     if tx < 0 || ty < 0 || tx >= WORLD_SIZE || ty >= WORLD_SIZE {
         return false;
     }
-    let half = crate::fx!("0.5");
-    matches!(
-        sample_terrain(seed, Fx::from_num(tx) + half, Fx::from_num(ty) + half).biome,
-        Biome::DeepWater | Biome::ShallowWater | Biome::River
-    )
+    sailable_grid(seed)[(ty * WORLD_SIZE + tx) as usize]
+}
+
+/// True open water — the Fishing Hut's shoreline test. NOT the same as
+/// "impassable" (cliffs and mountains are impassable but dry).
+pub fn is_water_tile(seed: u32, tx: i32, ty: i32) -> bool {
+    is_sailable(seed, tx, ty)
+}
+
+/// Connected-water-body id per tile (flood over `sailable_grid`), the naval twin
+/// of `region_grid`. `u16::MAX` = dry. A lake gets its own id, so a lake skiff is
+/// trapped in its lake with no special case anywhere.
+pub fn water_region_grid(seed: u32) -> &'static [u16] {
+    use std::cell::Cell;
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+
+    const EMPTY: &[u16] = &[];
+    thread_local! {
+        static LAST: Cell<(u32, &'static [u16])> = const { Cell::new((u32::MAX, EMPTY)) };
+    }
+    let (last_seed, last_grid) = LAST.with(|c| c.get());
+    if last_seed == seed && !last_grid.is_empty() {
+        return last_grid;
+    }
+
+    static GRIDS: OnceLock<Mutex<HashMap<u32, &'static [u16]>>> = OnceLock::new();
+    let grids = GRIDS.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut g = grids.lock().unwrap();
+    let grid: &'static [u16] = match g.get(&seed) {
+        Some(&grid) => grid,
+        None => {
+            let leaked: &'static [u16] = Box::leak(flood_regions(sailable_grid(seed)).into_boxed_slice());
+            g.insert(seed, leaked);
+            leaked
+        }
+    };
+    LAST.with(|c| c.set((seed, grid)));
+    grid
+}
+
+/// Water-body id at a world position (`u16::MAX` = dry tile).
+pub fn water_region_at(seed: u32, x: Fx, y: Fx) -> u16 {
+    let tx = x.to_num::<i32>().clamp(0, WORLD_SIZE - 1);
+    let ty = y.to_num::<i32>().clamp(0, WORLD_SIZE - 1);
+    water_region_grid(seed)[(ty * WORLD_SIZE + tx) as usize]
+}
+
+/// The map's biggest connected body of water — the ocean every coast shares.
+/// Measured to hold 97-100% of all salt water on every preset, so "the sea" is
+/// one place and a harbour on it can reach every other harbour on it.
+pub fn main_water_body(seed: u32) -> u16 {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+    static BODIES: OnceLock<Mutex<HashMap<u32, u16>>> = OnceLock::new();
+    let m = BODIES.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut m = m.lock().unwrap();
+    *m.entry(seed).or_insert_with(|| largest_region(water_region_grid(seed)))
+}
+
+/// Can a hull floating at `from` ever work at `to`? The naval twin of
+/// `node_reachable`, and MANDATORY rather than nice-to-have: without it an
+/// unreachable naval order floods the whole ocean looking for a route.
+pub fn sea_reachable(seed: u32, from: V2, to: V2) -> bool {
+    let body = water_region_at(seed, from.x, from.y);
+    if body == u16::MAX {
+        return true; // hull on a weird tile: do not over-filter
+    }
+    let grid = water_region_grid(seed);
+    let tx = to.x.to_num::<i32>().clamp(0, WORLD_SIZE - 1);
+    let ty = to.y.to_num::<i32>().clamp(0, WORLD_SIZE - 1);
+    for dy in -1..=1 {
+        for dx in -1..=1 {
+            let (nx, ny) = (tx + dx, ty + dy);
+            if nx < 0 || ny < 0 || nx >= WORLD_SIZE || ny >= WORLD_SIZE {
+                continue;
+            }
+            if grid[(ny * WORLD_SIZE + nx) as usize] == body {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// 4-connected component labelling over a tile mask. `u16::MAX` = not in the
+/// mask. Ids are assigned in raster order of each component's first tile, so
+/// the labelling is a pure function of the mask.
+fn flood_regions(mask: &[bool]) -> Vec<u16> {
+    let n = (WORLD_SIZE * WORLD_SIZE) as usize;
+    let mut v = vec![u16::MAX; n];
+    let mut next_region: u16 = 0;
+    let mut stack: Vec<i32> = Vec::new();
+    for start in 0..n {
+        if !mask[start] || v[start] != u16::MAX {
+            continue;
+        }
+        let region = next_region;
+        next_region += 1;
+        v[start] = region;
+        stack.push(start as i32);
+        while let Some(idx) = stack.pop() {
+            let (tx, ty) = (idx % WORLD_SIZE, idx / WORLD_SIZE);
+            for (dx, dy) in ADJ4 {
+                let (nx, ny) = (tx + dx, ty + dy);
+                if nx < 0 || ny < 0 || nx >= WORLD_SIZE || ny >= WORLD_SIZE {
+                    continue;
+                }
+                let ni = (ny * WORLD_SIZE + nx) as usize;
+                if mask[ni] && v[ni] == u16::MAX {
+                    v[ni] = region;
+                    stack.push(ni as i32);
+                }
+            }
+        }
+    }
+    v
+}
+
+/// Per-region tile counts, indexed by region id.
+fn region_sizes(grid: &[u16]) -> Vec<u32> {
+    let mut counts: Vec<u32> = Vec::new();
+    for &r in grid {
+        if r == u16::MAX {
+            continue;
+        }
+        let i = r as usize;
+        if i >= counts.len() {
+            counts.resize(i + 1, 0);
+        }
+        counts[i] += 1;
+    }
+    counts
+}
+
+/// Biggest region in a labelling; ties break to the lowest id.
+fn largest_region(grid: &[u16]) -> u16 {
+    let counts = region_sizes(grid);
+    let mut best = (0u16, 0u32);
+    for (r, &c) in counts.iter().enumerate() {
+        if c > best.1 {
+            best = (r as u16, c);
+        }
+    }
+    best.0
 }
 
 /// Connected-region id per tile (flood fill over `passable_grid`), cached per
@@ -424,35 +632,8 @@ pub fn region_grid(seed: u32) -> &'static [u16] {
     let grid: &'static [u16] = match g.get(&seed) {
         Some(&grid) => grid,
         None => {
-            let pass = passable_grid(seed);
-            let n = (WORLD_SIZE * WORLD_SIZE) as usize;
-            let mut v = vec![u16::MAX; n];
-            let mut next_region: u16 = 0;
-            let mut stack: Vec<i32> = Vec::new();
-            for start in 0..n {
-                if !pass[start] || v[start] != u16::MAX {
-                    continue;
-                }
-                let region = next_region;
-                next_region += 1;
-                v[start] = region;
-                stack.push(start as i32);
-                while let Some(idx) = stack.pop() {
-                    let (tx, ty) = (idx % WORLD_SIZE, idx / WORLD_SIZE);
-                    for (dx, dy) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
-                        let (nx, ny) = (tx + dx, ty + dy);
-                        if nx < 0 || ny < 0 || nx >= WORLD_SIZE || ny >= WORLD_SIZE {
-                            continue;
-                        }
-                        let ni = (ny * WORLD_SIZE + nx) as usize;
-                        if pass[ni] && v[ni] == u16::MAX {
-                            v[ni] = region;
-                            stack.push(ni as i32);
-                        }
-                    }
-                }
-            }
-            let leaked: &'static [u16] = Box::leak(v.into_boxed_slice());
+            let leaked: &'static [u16] =
+                Box::leak(flood_regions(passable_grid(seed)).into_boxed_slice());
             g.insert(seed, leaked);
             leaked
         }
@@ -523,6 +704,10 @@ pub struct ScatteredNode {
     pub pos: V2,
     pub res_type: ResourceType,
     pub yield_: i32,
+    /// Stock regained per economy tick. Zero is a finite deposit — a felled
+    /// wood, a mined-out seam, a hunted herd. A fishery is not: a school swims
+    /// back, which is what makes fishing a flow rather than a stock.
+    pub regen: i32,
 }
 
 /// Soil fertility (0..1) at a world position — what a farm yields there.
@@ -607,7 +792,17 @@ pub fn node_site(seed: u32, x: Fx, y: Fx) -> NodeSite {
     }
 }
 
-/// One scatter rule: count, yield, per-biome accept-probability, coastal-only.
+/// Which surface a rule places on. `Water` was `coastal_only`, which resolved
+/// through `is_coastal` to the LAND beside the sea: every "fishery" the
+/// generator has ever placed stood on a beach, so the fishing hut's aura, the
+/// water-node harvest branch and the fish-school mesh were all unreachable code.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ScatterDomain {
+    Land,
+    Water,
+}
+
+/// One scatter rule: count, yield, per-biome accept-probability, which surface.
 /// `clustered` modulates acceptance with a grove-mask noise so the kind lands
 /// in clumps (forests as woods, not uniform confetti). `patch` places each
 /// accepted site as a tight cluster of min..=max nodes (AoE-style mines —
@@ -618,7 +813,9 @@ pub struct ScatterRule {
     pub count: i32,
     pub yield_: i32,
     pub density: fn(&NodeSite) -> Fx,
-    pub coastal_only: bool,
+    pub domain: ScatterDomain,
+    /// Per economy tick, for a stock that grows back. 0 on every land rule.
+    pub regen: i32,
     pub clustered: bool,
     pub patch: (i32, i32),
 }
@@ -643,13 +840,17 @@ pub fn scatter_nodes(seed: u32, rules: &[ScatterRule]) -> Vec<ScatteredNode> {
         let mut attempts = 0;
         let budget = rule.count.max(60) * 80;
         let roll_seed = mix_seed(seed, ri + 1);
+        let on_surface = |x: Fx, y: Fx| match rule.domain {
+            ScatterDomain::Land => is_land(seed, x, y),
+            ScatterDomain::Water => {
+                is_sailable(seed, x.floor().to_num::<i32>(), y.floor().to_num::<i32>())
+            }
+        };
         while placed < rule.count && attempts < budget {
             attempts += 1;
             let x = three + rand.next_fx() * span;
             let y = three + rand.next_fx() * span;
-            let reachable =
-                if rule.coastal_only { is_coastal(seed, x, y) } else { is_land(seed, x, y) };
-            if !reachable {
+            if !on_surface(x, y) {
                 continue;
             }
             let roll = hash2(x.floor().to_num::<i32>(), y.floor().to_num::<i32>(), roll_seed);
@@ -669,7 +870,12 @@ pub fn scatter_nodes(seed: u32, rules: &[ScatterRule]) -> Vec<ScatteredNode> {
                     pmin
                 };
                 // first node on the accepted tile, the rest packed around it
-                out.push(ScatteredNode { pos: V2::new(x, y), res_type: rule.res_type, yield_: rule.yield_ });
+                out.push(ScatteredNode {
+                    pos: V2::new(x, y),
+                    res_type: rule.res_type,
+                    yield_: rule.yield_,
+                    regen: rule.regen,
+                });
                 placed += 1;
                 let mut added = 1;
                 let mut tries = 0;
@@ -678,7 +884,7 @@ pub fn scatter_nodes(seed: u32, rules: &[ScatterRule]) -> Vec<ScatteredNode> {
                     let ox = (rand.next_fx() - crate::fx!("0.5")) * crate::fx!("2.4");
                     let oy = (rand.next_fx() - crate::fx!("0.5")) * crate::fx!("2.4");
                     let (px, py) = (x + ox, y + oy);
-                    if !is_land(seed, px, py) {
+                    if !on_surface(px, py) {
                         continue;
                     }
                     // one node per tile inside the patch
@@ -693,6 +899,7 @@ pub fn scatter_nodes(seed: u32, rules: &[ScatterRule]) -> Vec<ScatteredNode> {
                         pos: V2::new(px, py),
                         res_type: rule.res_type,
                         yield_: rule.yield_,
+                        regen: rule.regen,
                     });
                     placed += 1;
                     added += 1;
@@ -710,44 +917,99 @@ pub const FAIR_MIN_WOOD: usize = 4;
 pub const FAIR_MIN_STONE: usize = 2;
 pub const FAIR_MIN_FOOD: usize = 2;
 
-/// The map's biggest connected region — the "mainland" every player starts on.
+/// The map's biggest connected region — the "mainland".
 pub fn dominant_region(seed: u32) -> u16 {
-    let grid = region_grid(seed);
-    let mut counts: [u32; 256] = [0; 256];
-    let mut overflow: std::collections::HashMap<u16, u32> = std::collections::HashMap::new();
-    for &r in grid {
-        if r == u16::MAX {
-            continue;
-        }
-        if (r as usize) < counts.len() {
-            counts[r as usize] += 1;
-        } else {
-            *overflow.entry(r).or_insert(0) += 1;
-        }
-    }
-    let mut best = (0u16, 0u32);
-    for (r, &c) in counts.iter().enumerate() {
-        if c > best.1 {
-            best = (r as u16, c);
-        }
-    }
-    for (r, c) in overflow {
-        if c > best.1 {
-            best = (r, c);
-        }
-    }
-    best.0
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+    static DOM: OnceLock<Mutex<HashMap<u32, u16>>> = OnceLock::new();
+    let m = DOM.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut m = m.lock().unwrap();
+    *m.entry(seed).or_insert_with(|| largest_region(region_grid(seed)))
 }
 
-/// Where slot `i` actually starts on this map: the spawn anchor snapped to the
-/// nearest tile of the DOMINANT region, so every player shares one landmass
-/// (rivers stay crossable via fords; nobody founds on a sliver island).
-pub fn start_point(seed: u32, slot: usize) -> V2 {
-    let c = crate::content::spawn_corner(slot);
+/// Every landmass a player may be seated on, biggest first (ties by region id).
+///
+/// On a mainland preset this is exactly `[dominant_region(seed)]` — the rule
+/// that has always applied, expressed through the new one, which is why those
+/// maps do not move a tile. Where the generator makes islands on purpose
+/// (`MapBias::sea_starts`) it is every land region of at least
+/// `START_REGION_MIN` tiles that touches the main water body: big enough to hold
+/// a start's guaranteed resources, and connected to every other start by sea, so
+/// a match on it can still be won.
+pub fn start_regions(seed: u32) -> &'static [u16] {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+
+    static SETS: OnceLock<Mutex<HashMap<u32, &'static [u16]>>> = OnceLock::new();
+    let sets = SETS.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut s = sets.lock().unwrap();
+    if let Some(&v) = s.get(&seed) {
+        return v;
+    }
     let main = dominant_region(seed);
+    let list: Vec<u16> = if !seed_bias(seed).sea_starts {
+        vec![main]
+    } else {
+        let regions = region_grid(seed);
+        let sizes = region_sizes(regions);
+        let bodies = water_region_grid(seed);
+        let ocean = main_water_body(seed);
+        let mut on_the_sea = vec![false; sizes.len()];
+        for ty in 0..WORLD_SIZE {
+            for tx in 0..WORLD_SIZE {
+                let r = regions[(ty * WORLD_SIZE + tx) as usize];
+                if r == u16::MAX || on_the_sea[r as usize] {
+                    continue;
+                }
+                on_the_sea[r as usize] = ADJ4.iter().any(|(dx, dy)| {
+                    let (nx, ny) = (tx + dx, ty + dy);
+                    nx >= 0
+                        && ny >= 0
+                        && nx < WORLD_SIZE
+                        && ny < WORLD_SIZE
+                        && bodies[(ny * WORLD_SIZE + nx) as usize] == ocean
+                });
+            }
+        }
+        let mut v: Vec<u16> = (0..sizes.len() as u16)
+            .filter(|&r| {
+                r == main || (sizes[r as usize] >= START_REGION_MIN && on_the_sea[r as usize])
+            })
+            .collect();
+        v.sort_by_key(|&r| (std::cmp::Reverse(sizes[r as usize]), r));
+        v
+    };
+    let leaked: &'static [u16] = Box::leak(list.into_boxed_slice());
+    s.insert(seed, leaked);
+    leaked
+}
+
+/// How many of the eight slots each qualifying island may take, proportional to
+/// its area. Rounded UP, so the caps always cover all eight and a two-island map
+/// never leaves a slot homeless.
+fn start_quota(seed: u32) -> Vec<u32> {
+    let regions = start_regions(seed);
+    if regions.len() < 2 {
+        return vec![crate::constants::MAX_PLAYERS as u32];
+    }
+    let sizes = region_sizes(region_grid(seed));
+    let total: u64 = regions.iter().map(|&r| sizes[r as usize] as u64).sum();
+    let slots = crate::constants::MAX_PLAYERS as u64;
+    regions
+        .iter()
+        .map(|&r| {
+            let t = sizes[r as usize] as u64;
+            (slots * t).div_ceil(total.max(1)).max(1) as u32
+        })
+        .collect()
+}
+
+/// Nearest tile to `from` belonging to any region in `want`, by the same
+/// deterministic ring scan the dominant-region snap has always used.
+fn nearest_region_tile(seed: u32, from: V2, want: &dyn Fn(u16) -> bool) -> Option<V2> {
     let grid = region_grid(seed);
-    let sx = c.x.to_num::<i32>().clamp(0, WORLD_SIZE - 1);
-    let sy = c.y.to_num::<i32>().clamp(0, WORLD_SIZE - 1);
+    let sx = from.x.to_num::<i32>().clamp(0, WORLD_SIZE - 1);
+    let sy = from.y.to_num::<i32>().clamp(0, WORLD_SIZE - 1);
     let half = crate::fx!("0.5");
     for r in 0..WORLD_SIZE {
         for dy in -r..=r {
@@ -759,27 +1021,79 @@ pub fn start_point(seed: u32, slot: usize) -> V2 {
                 if tx < 3 || ty < 3 || tx >= WORLD_SIZE - 3 || ty >= WORLD_SIZE - 3 {
                     continue;
                 }
-                if grid[(ty * WORLD_SIZE + tx) as usize] == main {
-                    return V2::new(Fx::from_num(tx) + half, Fx::from_num(ty) + half);
+                if want(grid[(ty * WORLD_SIZE + tx) as usize]) {
+                    return Some(V2::new(Fx::from_num(tx) + half, Fx::from_num(ty) + half));
                 }
             }
         }
     }
-    find_land_near(seed, c.x, c.y)
+    None
+}
+
+/// All eight seats at once. Slots are filled in order, each taking the nearest
+/// tile of any island that still has room, so the seating is a pure function of
+/// the seed and reads the same on every client. Cached because `start_point` is
+/// called per slot by the fair-start top-up and the keep siting.
+fn start_seats(seed: u32) -> &'static [V2] {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+
+    static SEATS: OnceLock<Mutex<HashMap<u32, &'static [V2]>>> = OnceLock::new();
+    let seats = SEATS.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut s = seats.lock().unwrap();
+    if let Some(&v) = s.get(&seed) {
+        return v;
+    }
+    let regions = start_regions(seed);
+    let quota = start_quota(seed);
+    let main = dominant_region(seed);
+    let mut used = vec![0u32; regions.len()];
+    let mut out: Vec<V2> = Vec::with_capacity(crate::constants::MAX_PLAYERS);
+    for slot in 0..crate::constants::MAX_PLAYERS {
+        let c = crate::content::spawn_corner(slot);
+        let open = |r: u16| {
+            regions
+                .iter()
+                .position(|&q| q == r)
+                .is_some_and(|i| used[i] < quota[i])
+        };
+        let p = nearest_region_tile(seed, c, &open)
+            // every island full: fall back to the mainland, i.e. exactly the
+            // rule this replaced, so the change adds no way to fail
+            .or_else(|| nearest_region_tile(seed, c, &|r| r == main))
+            .unwrap_or_else(|| find_land_near(seed, c.x, c.y));
+        if let Some(i) = regions.iter().position(|&q| q == region_at(seed, p.x, p.y)) {
+            used[i] += 1;
+        }
+        out.push(p);
+    }
+    let leaked: &'static [V2] = Box::leak(out.into_boxed_slice());
+    s.insert(seed, leaked);
+    leaked
+}
+
+/// Where slot `i` actually starts on this map: the spawn anchor snapped to the
+/// nearest tile of a legal start island (`start_regions`). On a mainland preset
+/// that is the dominant region and nothing else, so every player shares one
+/// landmass; on an archipelago the eight seats spread over the islands the sea
+/// connects, in proportion to how much land each one has.
+pub fn start_point(seed: u32, slot: usize) -> V2 {
+    start_seats(seed)[slot % crate::constants::MAX_PLAYERS]
 }
 
 /// How far the keep scan looks before it loosens the flatness cap.
 const KEEP_SCAN_R: i32 = 70;
 
 /// A safe keep site near the slot's start: every footprint tile passable,
-/// buildable, FLAT, on the DOMINANT region, with open ground around it
+/// buildable, FLAT, on the START'S OWN island, with open ground around it
 /// (peasants must reach the deposit edge from all sides — a keep wedged
 /// against cliffs/water strands its economy). Of the candidates on the
 /// nearest ring that qualifies, the FLATTEST wins, so a keep never ends up
 /// perched on a crest just because the scan reached it first.
 pub fn find_keep_site(seed: u32, slot: usize, footprint: i32) -> V2 {
     let start = start_point(seed, slot);
-    let main = dominant_region(seed);
+    // the start's OWN landmass, which on a mainland preset IS the dominant one
+    let main = region_at(seed, start.x, start.y);
     let grid = region_grid(seed);
     let half = crate::fx!("0.5");
     let fp_lo = -(footprint / 2);
@@ -1014,7 +1328,7 @@ pub fn fair_start_nodes(
                             if occupied {
                                 continue;
                             }
-                            extra.push(ScatteredNode { pos: p, res_type, yield_ });
+                            extra.push(ScatteredNode { pos: p, res_type, yield_, regen: 0 });
                             left -= 1;
                             if left == 0 {
                                 break 'ring;
@@ -1088,7 +1402,8 @@ mod tests {
             count: 50,
             yield_: 120,
             density: |s| crate::biomes::tree_density(s.biome),
-            coastal_only: false,
+            domain: ScatterDomain::Land,
+            regen: 0,
             clustered: true,
             patch: (1, 1),
         }];

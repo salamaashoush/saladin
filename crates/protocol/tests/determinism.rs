@@ -470,3 +470,126 @@ fn spawn_kind(app: &mut App, id: u64, owner: u64, kind: UnitKind, pos: V2) {
         Unit::new(kind, pos),
     ));
 }
+
+/// The shortest open-water hop between the first two seatable islands of an
+/// Archipelago seed. Pure function of the seed, so both worlds get the same one.
+fn strait(seed: u32) -> (V2, V2) {
+    let starts = saladin_sim::start_regions(seed);
+    let land = saladin_sim::region_grid(seed);
+    let sea = saladin_sim::water_region_grid(seed);
+    let ocean = saladin_sim::main_water_body(seed);
+    let coast = |region: u16| -> Vec<V2> {
+        let mut out = Vec::new();
+        for ty in 1..WORLD_SIZE - 1 {
+            for tx in 1..WORLD_SIZE - 1 {
+                if sea[(ty * WORLD_SIZE + tx) as usize] != ocean {
+                    continue;
+                }
+                let touches = [(1, 0), (-1, 0), (0, 1), (0, -1)]
+                    .iter()
+                    .any(|(dx, dy)| land[((ty + dy) * WORLD_SIZE + tx + dx) as usize] == region);
+                if touches {
+                    out.push(V2::new(Fx::from_num(tx) + Fx::lit("0.5"), Fx::from_num(ty) + Fx::lit("0.5")));
+                }
+            }
+        }
+        out
+    };
+    let (ca, cb) = (coast(starts[0]), coast(starts[1]));
+    let mut best: Option<(Fx, V2, V2)> = None;
+    for (i, pa) in ca.iter().enumerate() {
+        if !i.is_multiple_of(3) {
+            continue;
+        }
+        for (j, pb) in cb.iter().enumerate() {
+            if !j.is_multiple_of(3) {
+                continue;
+            }
+            let d = saladin_sim::dist2(*pa, *pb);
+            if best.is_none_or(|(bd, _, _)| d < bd) {
+                best = Some((d, *pa, *pb));
+            }
+        }
+    }
+    let (_, pa, pb) = best.expect("two coasts on an archipelago");
+    (pa, pb)
+}
+
+/// Cargo is `garrisoned_in` pointed at a host that MOVES, which nothing in this
+/// sim had before. Every field the ferry touches — the passengers' `Pos`, the
+/// hull's path, the drowning pass — is hashed, so two worlds handed the same
+/// crossing have to agree on every tick of it.
+#[test]
+fn a_crossing_hashes_the_same_on_two_worlds() {
+    let seed = saladin_sim::compose_seed(7, 3);
+    let (from, to) = strait(seed);
+    let beach =
+        saladin_sim::nearest_passable_grid(&|tx, ty| is_passable(seed, tx, ty), from.x, from.y);
+    let shore = saladin_sim::nearest_passable_grid(&|tx, ty| is_passable(seed, tx, ty), to.x, to.y);
+
+    let mut a = build();
+    let mut b = build();
+    for app in [&mut a, &mut b] {
+        app.world_mut().insert_resource(WorldConfig { seed });
+        app.world_mut().spawn((
+            GameId(500),
+            MatchId(1),
+            Player {
+                player_id: 1,
+                name: "P".into(),
+                faction: Faction::Ayyubid,
+                stock: Stockpile { wood: 500, stone: 500, food: 500, gold: 500 },
+                color: 0,
+                online: true,
+                keep: 0,
+                defeated: false,
+                slot: 0,
+                tech_mask: 0,
+                hunger: 0,
+            },
+        ));
+        spawn_kind(app, 1, 1, UnitKind::Barge, from);
+        for i in 0..6u64 {
+            spawn_kind(app, 10 + i, 1, UnitKind::Spearman, beach);
+        }
+        app.world_mut()
+            .resource_mut::<CommandQueue>()
+            .0
+            .push(PlayerCommand::Embark { player_id: 1, units: (10..16).collect(), boat: 1 });
+    }
+
+    let mut sailed = false;
+    for t in 0..900 {
+        if !sailed && t == 4 {
+            for app in [&mut a, &mut b] {
+                app.world_mut()
+                    .resource_mut::<CommandQueue>()
+                    .0
+                    .push(PlayerCommand::Move { player_id: 1, unit: 1, target: to });
+            }
+            sailed = true;
+        }
+        if t == 860 {
+            for app in [&mut a, &mut b] {
+                app.world_mut()
+                    .resource_mut::<CommandQueue>()
+                    .0
+                    .push(PlayerCommand::Disembark { player_id: 1, boat: 1, target: shore });
+            }
+        }
+        step(a.world_mut());
+        step(b.world_mut());
+        assert_eq!(
+            a.world().resource::<StateHash>().0,
+            b.world().resource::<StateHash>().0,
+            "the crossing diverged at tick {t}"
+        );
+    }
+    let world = a.world_mut();
+    let mut q = world.query::<&Unit>();
+    assert_eq!(
+        q.iter(world).filter(|u| u.garrisoned_in == 0).count(),
+        7,
+        "the party never got off the boat"
+    );
+}

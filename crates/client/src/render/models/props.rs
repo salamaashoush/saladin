@@ -351,45 +351,130 @@ fn crop_lodged() -> Mesh {
     merge(parts)
 }
 
-/// Coastal food nodes sit on water tiles — render them as a fish school with
-/// a ripple ring instead of a land animal standing on the sea.
+/// One fish arcing out of the water at (dx, dz), yawed and scaled.
+fn fish(parts: &mut Vec<Mesh>, c: [f32; 4], dx: f32, dz: f32, yaw: f32, s: f32) {
+    let body = Transform::from_xyz(dx, 0.1 * s, dz)
+        * Transform::from_rotation(Quat::from_rotation_y(yaw))
+        * Transform::from_scale(Vec3::new(0.32 * s, 0.5 * s, 1.05 * s));
+    parts.push(part(octahedron(0.22), c, body));
+    let tail = Transform::from_xyz(dx, 0.08 * s, dz)
+        * Transform::from_rotation(Quat::from_rotation_y(yaw))
+        * Transform::from_xyz(0.0, 0.06, -0.26 * s)
+        * Transform::from_rotation(Quat::from_rotation_x(0.9))
+        * Transform::from_scale(Vec3::new(0.5, 1.0, 0.35));
+    parts.push(part(cone(0.12 * s, 0.18 * s, 4), c, tail));
+}
+
+/// The inshore fishery: a small school breaking the surface inside two ripple
+/// rings. Backs are near-black against turquoise water — at gameplay zoom the
+/// silver-on-blue version read as a smudge you could not name.
 pub fn fish_node_mesh() -> Mesh {
-    let silver = lin(0xa8c4cc);
-    let dark = lin(0x5e7e8c);
-    let ripple = lin(0xc8e8ee);
+    let silver = lin(0x93b3bd);
+    let dark = lin(0x2f4956);
+    let ripple = lin(0xdff4f8);
     let mut parts = vec![
-        // Two faint concentric ripple rings lying on the water.
-        part(
-            torus_ring(0.42, 0.025),
-            ripple,
-            Transform::from_xyz(0.0, 0.05, 0.0),
-        ),
-        part(
-            torus_ring(0.65, 0.02),
-            ripple,
-            Transform::from_xyz(0.0, 0.04, 0.0),
-        ),
+        part(torus_ring(0.42, 0.03), ripple, Transform::from_xyz(0.0, 0.05, 0.0)),
+        part(torus_ring(0.65, 0.024), ripple, Transform::from_xyz(0.0, 0.04, 0.0)),
     ];
-    // A few fish backs arcing out of the water around the center.
-    for (i, &(dx, dz, yaw, s)) in
-        [(0.0f32, 0.0f32, 0.4f32, 1.0f32), (0.35, 0.2, 2.6, 0.8), (-0.3, 0.25, 4.4, 0.85), (-0.1, -0.35, 1.6, 0.7)]
-            .iter()
-            .enumerate()
+    for (i, &(dx, dz, yaw, s)) in [
+        (0.0f32, 0.0f32, 0.4f32, 1.0f32),
+        (0.35, 0.2, 2.6, 0.8),
+        (-0.3, 0.25, 4.4, 0.85),
+        (-0.1, -0.35, 1.6, 0.7),
+    ]
+    .iter()
+    .enumerate()
     {
-        let c = if i % 2 == 0 { silver } else { dark };
-        let body = Transform::from_xyz(dx, 0.1 * s, dz)
-            * Transform::from_rotation(Quat::from_rotation_y(yaw))
-            * Transform::from_scale(Vec3::new(0.32 * s, 0.5 * s, 1.05 * s));
-        parts.push(part(octahedron(0.22), c, body));
-        // tail fin
-        let tail = Transform::from_xyz(dx, 0.08 * s, dz)
-            * Transform::from_rotation(Quat::from_rotation_y(yaw))
-            * Transform::from_xyz(0.0, 0.06, -0.26 * s)
-            * Transform::from_rotation(Quat::from_rotation_x(0.9))
-            * Transform::from_scale(Vec3::new(0.5, 1.0, 0.35));
-        parts.push(part(cone(0.12 * s, 0.18 * s, 4), c, tail));
+        fish(&mut parts, if i % 2 == 0 { silver } else { dark }, dx, dz, yaw, s);
     }
     merge(parts)
+}
+
+/// The offshore shoal: the deep-water fishery, worth two and a half times the
+/// inshore one and drawn like it — a wider boil of fish under three rings, with
+/// gulls working over it. A player has to be able to tell the deep prize from
+/// the shelf school at a glance, from the same camera height.
+pub fn fish_shoal_mesh() -> Mesh {
+    let silver = lin(0x93b3bd);
+    let dark = lin(0x2f4956);
+    let pale = lin(0x8fb0ba);
+    let ripple = lin(0xdff4f8);
+    let gull = lin(0xf2f4ee);
+    let mut parts = vec![
+        part(torus_ring(0.62, 0.034), ripple, Transform::from_xyz(0.0, 0.05, 0.0)),
+        part(torus_ring(0.95, 0.028), ripple, Transform::from_xyz(0.0, 0.04, 0.0)),
+        part(torus_ring(1.3, 0.022), ripple, Transform::from_xyz(0.0, 0.03, 0.0)),
+    ];
+    for (i, &(dx, dz, yaw, s)) in [
+        (0.0f32, 0.1f32, 0.4f32, 1.25f32),
+        (0.52, 0.34, 2.6, 1.0),
+        (-0.46, 0.4, 4.4, 1.05),
+        (-0.16, -0.52, 1.6, 0.95),
+        (0.62, -0.36, 3.5, 0.85),
+        (-0.72, -0.12, 5.5, 0.8),
+        (0.18, 0.72, 0.9, 0.75),
+        (-0.34, -0.78, 2.1, 0.7),
+    ]
+    .iter()
+    .enumerate()
+    {
+        let c = match i % 3 {
+            0 => dark,
+            1 => silver,
+            _ => pale,
+        };
+        fish(&mut parts, c, dx, dz, yaw, s);
+    }
+    // Gulls working the boil — the thing that shows you a shoal from a mile off.
+    for &(gx, gz, gy, yaw) in &[(0.55f32, 0.6f32, 0.62f32, 0.7f32), (-0.6, -0.5, 0.78, 3.6)] {
+        for wing in [-1.0f32, 1.0] {
+            parts.push(part(
+                boxy(0.26, 0.02, 0.07),
+                gull,
+                Transform::from_xyz(gx, gy, gz)
+                    * Transform::from_rotation(Quat::from_rotation_y(yaw))
+                    * Transform::from_xyz(wing * 0.12, 0.0, 0.0)
+                    * Transform::from_rotation(Quat::from_rotation_z(wing * 0.5)),
+            ));
+        }
+    }
+    merge(parts)
+}
+
+/// The churn a hull drags behind it: one flat trapezoid astern, brightest at
+/// the transom and fading to nothing at the tail, with a lighter centre lane.
+/// Authored for a unit hull (beam 1, four lengths of wake) and scaled per kind
+/// by the child transform, so BOTH hulls share this one mesh and one material —
+/// a per-entity wake would cost a draw call per boat.
+pub fn wake_mesh() -> Mesh {
+    // (x, z, alpha) — three columns so the centre lane can be brighter than
+    // the shoulders without a texture.
+    let rows: [(f32, f32, f32); 3] = [(0.5, 0.05, 0.85), (0.85, -1.1, 0.32), (1.15, -2.4, 0.0)];
+    let mut pos: Vec<[f32; 3]> = Vec::new();
+    let mut col: Vec<[f32; 4]> = Vec::new();
+    for &(half, z, a) in &rows {
+        for (i, sx) in [-1.0f32, 0.0, 1.0].into_iter().enumerate() {
+            pos.push([sx * half, 0.0, z]);
+            // shoulders are the breaking crest, the lane between them is flatter
+            let edge = if i == 1 { 0.72 } else { 1.0 };
+            col.push([1.0, 1.0, 1.0, a * edge]);
+        }
+    }
+    let mut idx: Vec<u32> = Vec::new();
+    for r in 0..2u32 {
+        for c in 0..2u32 {
+            let a = r * 3 + c;
+            idx.extend_from_slice(&[a, a + 3, a + 1, a + 1, a + 3, a + 4]);
+        }
+    }
+    let n = pos.len();
+    let mut m = Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::RENDER_WORLD);
+    m.insert_attribute(Mesh::ATTRIBUTE_POSITION, pos);
+    m.insert_attribute(Mesh::ATTRIBUTE_NORMAL, vec![[0.0f32, 1.0, 0.0]; n]);
+    m.insert_attribute(Mesh::ATTRIBUTE_UV_0, vec![[0.0f32, 0.0]; n]);
+    m.insert_attribute(Mesh::ATTRIBUTE_COLOR, col);
+    m.insert_indices(Indices::U32(idx));
+    m
 }
 
 fn torus_ring(major: f32, minor: f32) -> Mesh {

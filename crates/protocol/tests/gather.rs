@@ -6,8 +6,107 @@ use bevy_app::prelude::*;
 use saladin_protocol::*;
 use saladin_sim::{
     BuildingKind, Faction, Fx, GatherState, ResourceType, Stockpile,
-    UnitKind, V2, ZERO, building_def, dist2, is_passable, node_reachable, region_at, unit_def,
+    UnitKind, V2, WORLD_SIZE, ZERO, building_def, dist2, is_passable, is_sailable,
+    node_reachable, region_at, unit_def,
 };
+
+fn centre(t: i32) -> Fx {
+    Fx::from_num(t) + saladin_sim::fx!("0.5")
+}
+
+/// A shore a hut can stand on and a school three tiles out in the SAME water,
+/// so a skiff berthed at the hut can actually sail to it. Straight out from the
+/// beach: the run is contiguous water by construction.
+fn find_fishing_ground(seed: u32) -> (V2, V2) {
+    for ty in 8..WORLD_SIZE - 8 {
+        for tx in 8..WORLD_SIZE - 8 {
+            if !is_passable(seed, tx, ty) {
+                continue;
+            }
+            for (dx, dy) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
+                if !(1..=3).all(|k| is_sailable(seed, tx + dx * k, ty + dy * k)) {
+                    continue;
+                }
+                let shore = V2::new(centre(tx), centre(ty));
+                let school = V2::new(centre(tx + dx * 3), centre(ty + dy * 3));
+                let Some(berth) = saladin_sim::berth_of(seed, 1, shore) else { continue };
+                if saladin_sim::water_region_at(seed, berth.x, berth.y)
+                    == saladin_sim::water_region_at(seed, school.x, school.y)
+                {
+                    return (shore, school);
+                }
+            }
+        }
+    }
+    panic!("seed {seed} has no fishing ground");
+}
+
+fn spawn_fishery(app: &mut App, id: u64, pos: V2, remaining: i32) {
+    app.world_mut().spawn((
+        GameId(id),
+        MatchId(1),
+        Pos { pos, facing: ZERO },
+        ResourceNode::renewable(
+            ResourceType::Food,
+            remaining,
+            saladin_sim::FISH_INSHORE_CAP,
+            saladin_sim::FISH_INSHORE_REGEN,
+        ),
+    ));
+}
+
+fn spawn_skiff(app: &mut App, id: u64, owner: u64, pos: V2, state: GatherState, node: u64) {
+    let def = unit_def(UnitKind::FishingSkiff);
+    app.world_mut().spawn((
+        GameId(id),
+        Owner(owner),
+        MatchId(1),
+        Pos { pos, facing: ZERO },
+        Unit {
+            speed: def.speed,
+            gather_state: state,
+            target_node: node,
+            hp: def.max_hp,
+            ..Unit::new(UnitKind::FishingSkiff, pos)
+        },
+    ));
+}
+
+fn spawn_hut(app: &mut App, id: u64, owner: u64, pos: V2) {
+    let def = building_def(BuildingKind::FishingHut);
+    app.world_mut().spawn((
+        GameId(id),
+        Owner(owner),
+        MatchId(1),
+        Pos { pos, facing: ZERO },
+        Building::new(BuildingKind::FishingHut, def.max_hp, pos),
+    ));
+}
+
+/// A 7x7 block of walkable ground with open water against one edge: a place a
+/// shore camp can stand AND a crew can work around without treading water.
+fn find_shore_block(seed: u32) -> (i32, i32, V2) {
+    for cy in 8..WORLD_SIZE - 16 {
+        for cx in 8..WORLD_SIZE - 16 {
+            if !(0..7).all(|dx| (0..7).all(|dy| is_passable(seed, cx + dx, cy + dy))) {
+                continue;
+            }
+            for d in -1..8 {
+                for (wx, wy) in [
+                    (cx + d, cy - 1),
+                    (cx + d, cy + 7),
+                    (cx - 1, cy + d),
+                    (cx + 7, cy + d),
+                ] {
+                    if is_sailable(seed, wx, wy) {
+                        return (cx, cy, V2::new(centre(wx), centre(wy)));
+                    }
+                }
+            }
+        }
+    }
+    panic!("seed {seed} has no workable shore");
+}
 
 fn build(seed: u32) -> App {
     let mut app = App::new();
@@ -299,58 +398,25 @@ fn gather_cycle_keeps_producing() {
     }
 }
 
-/// A fishing hut doubles the harvest rate of fish (water food nodes) in its
-/// reach: after the same ticks, the hut-side peasant has already filled its
-/// carry while the lone one is still hauling the net.
+/// A fishing hut doubles the catch its nets cover. Both boats are ALREADY on
+/// station, so this measures the aura and not the sail.
 #[test]
 fn fishing_hut_speeds_nearby_fish() {
-    // find a land tile orthogonally adjacent to water
     let seed = 1u32;
-    let mut spot = None;
-    'scan: for ty in 8..280 {
-        for tx in 8..280 {
-            if !is_passable(seed, tx, ty) {
-                continue;
-            }
-            for (dx, dy) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
-                if !is_passable(seed, tx + dx, ty + dy) {
-                    spot = Some((tx, ty, tx + dx, ty + dy));
-                    break 'scan;
-                }
-            }
+    let (shore, school) = find_fishing_ground(seed);
+
+    let one = |hut: bool| -> App {
+        let mut app = build(seed);
+        spawn_player(&mut app, 1);
+        spawn_fishery(&mut app, 20, school, 200);
+        spawn_skiff(&mut app, 30, 1, school, GatherState::Harvesting, 20);
+        if hut {
+            spawn_hut(&mut app, 40, 1, shore);
         }
-    }
-    let (lx, ly, wx, wy) = spot.expect("seed 1 has a coastline");
-    let c = |t: i32| Fx::from_num(t) + Fx::lit("0.5");
-    let land = V2::new(c(lx), c(ly));
-    let water = V2::new(c(wx), c(wy));
-
-    let fish = |app: &mut App, id: u64| {
-        app.world_mut().spawn((
-            GameId(id),
-            MatchId(1),
-            Pos { pos: water, facing: ZERO },
-            ResourceNode::deposit(ResourceType::Food, 200),
-        ));
+        app
     };
-
-    let mut plain = build(seed);
-    spawn_player(&mut plain, 1);
-    fish(&mut plain, 20);
-    spawn_peasant(&mut plain, 30, 1, land, GatherState::Harvesting, 20, 0, ZERO);
-
-    let mut hutted = build(seed);
-    spawn_player(&mut hutted, 1);
-    fish(&mut hutted, 20);
-    spawn_peasant(&mut hutted, 30, 1, land, GatherState::Harvesting, 20, 0, ZERO);
-    let hdef = building_def(BuildingKind::FishingHut);
-    hutted.world_mut().spawn((
-        GameId(40),
-        Owner(1),
-        MatchId(1),
-        Pos { pos: land, facing: ZERO },
-        Building::new(BuildingKind::FishingHut, hdef.max_hp, land),
-    ));
+    let mut plain = one(false);
+    let mut hutted = one(true);
 
     // 16 sim steps = 4 gather ticks: 4 * 0.2 = 0.8 < 1.2 unboosted,
     // 4 * 0.4 = 1.6 >= 1.2 boosted
@@ -362,57 +428,106 @@ fn fishing_hut_speeds_nearby_fish() {
     assert!(unit(&mut hutted, 30).carrying > 0, "hut-boosted net must have landed the catch");
 }
 
-/// Fishing huts tend their waters: schools inside the aura regrow each
-/// economy tick; waters without a hut stay fished-out.
+/// A hut MULTIPLIES its fishery's own regrowth. It does not supply it: a school
+/// with nothing to swim back stays empty however many nets are over it, and a
+/// school that does swim back comes back FASTER under a hut than beside one.
+///
+/// The flat top-up this replaces was measurably negative — the same aura doubles
+/// the DRAW, so a tended school emptied faster than an untended one — and it
+/// filled every school to `FOOD_YIELD` rather than to the node's own cap.
 #[test]
 fn fishing_hut_regenerates_fish() {
     let seed = 1u32;
-    let mut spot = None;
-    'scan: for ty in 8..280 {
-        for tx in 8..280 {
-            if !is_passable(seed, tx, ty) {
-                continue;
-            }
-            for (dx, dy) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
-                if !is_passable(seed, tx + dx, ty + dy) {
-                    spot = Some((tx, ty, tx + dx, ty + dy));
-                    break 'scan;
-                }
-            }
-        }
-    }
-    let (lx, ly, wx, wy) = spot.expect("seed 1 has a coastline");
-    let c = |t: i32| Fx::from_num(t) + Fx::lit("0.5");
-    let land = V2::new(c(lx), c(ly));
-    let water = V2::new(c(wx), c(wy));
+    let (shore, school) = find_fishing_ground(seed);
+    let cap = saladin_sim::FISH_INSHORE_CAP;
+    let regen = saladin_sim::FISH_INSHORE_REGEN;
 
+    let after = |hut: bool| -> i32 {
+        let mut app = build(seed);
+        spawn_player(&mut app, 1);
+        app.world_mut().spawn((
+            GameId(20),
+            MatchId(1),
+            Pos { pos: school, facing: ZERO },
+            ResourceNode::renewable(ResourceType::Food, 50, cap, regen),
+        ));
+        if hut {
+            spawn_hut(&mut app, 40, 1, shore);
+        }
+        for _ in 0..200 {
+            step(app.world_mut());
+        }
+        let world = app.world_mut();
+        let mut q = world.query::<(&GameId, &ResourceNode)>();
+        q.iter(world).find(|(g, _)| g.0 == 20).expect("school alive").1.remaining
+    };
+
+    let wild = after(false);
+    let tended = after(true);
+    assert!(wild > 50, "an untended school still swims back (got {wild})");
+    assert!(tended > wild, "nets must restock faster than open water ({wild} -> {tended})");
+    assert!(tended <= cap, "a school cannot exceed its own water ({tended} > {cap})");
+
+    // and a dead pond stays dead: multiply, not supply
     let mut app = build(seed);
     spawn_player(&mut app, 1);
-    let hdef = building_def(BuildingKind::FishingHut);
+    spawn_hut(&mut app, 40, 1, shore);
     app.world_mut().spawn((
-        GameId(40),
-        Owner(1),
+        GameId(21),
         MatchId(1),
-        Pos { pos: land, facing: ZERO },
-        Building::new(BuildingKind::FishingHut, hdef.max_hp, land),
-    ));
-    // half-fished school in reach; a far-away one as control (also on water)
-    app.world_mut().spawn((
-        GameId(20),
-        MatchId(1),
-        Pos { pos: water, facing: ZERO },
+        Pos { pos: school, facing: ZERO },
         ResourceNode::deposit(ResourceType::Food, 50),
     ));
-    let far = V2::new(water.x, water.y); // control compares against its own start
-    let _ = far;
-
     for _ in 0..200 {
         step(app.world_mut());
     }
     let world = app.world_mut();
     let mut q = world.query::<(&GameId, &ResourceNode)>();
-    let school = q.iter(world).find(|(g, _)| g.0 == 20).expect("school alive").1.remaining;
-    assert!(school > 50, "school in hut reach must regrow (got {school})");
+    let dead = q.iter(world).find(|(g, _)| g.0 == 21).expect("node alive").1.remaining;
+    assert_eq!(dead, 50, "a hut cannot conjure fish into water that has none");
+}
+
+/// A hut's nets are over the WATER. They are not a preservation order on every
+/// rock and tree within six tiles of the shore.
+///
+/// The retire gate used to ask "is some fishing hut near this" instead of "does
+/// this grow back", and it asked it of the NODE'S OWN RESOURCE not at all: a
+/// wood or stone node drawn to zero anywhere in a hut's radius became a
+/// permanent zero-remaining row that never regrew, never despawned, and rode in
+/// the ECS and the StateHash for the rest of the match.
+#[test]
+fn a_wood_node_beside_a_hut_still_retires() {
+    let seed = 1u32;
+    let (cx, cy, _) = find_shore_block(seed);
+    let hut = V2::new(centre(cx), centre(cy));
+    let node = V2::new(centre(cx + 2), centre(cy));
+
+    let run = |with_hut: bool| -> bool {
+        let mut app = build(seed);
+        spawn_player(&mut app, 1);
+        spawn_keep(&mut app, 10, 1, V2::new(centre(cx + 5), centre(cy + 4)));
+        spawn_node(&mut app, 20, node, 8); // exactly one peasant load
+        spawn_peasant(&mut app, 30, 1, V2::new(centre(cx + 2), centre(cy + 1)), GatherState::ToResource, 20, 0, ZERO);
+        if with_hut {
+            let def = building_def(BuildingKind::FishingHut);
+            app.world_mut().spawn((
+                GameId(40),
+                Owner(1),
+                MatchId(1),
+                Pos { pos: hut, facing: ZERO },
+                Building::new(BuildingKind::FishingHut, def.max_hp, hut),
+            ));
+        }
+        for _ in 0..400 {
+            step(app.world_mut());
+        }
+        let world = app.world_mut();
+        let mut q = world.query::<(&GameId, &ResourceNode)>();
+        q.iter(world).any(|(g, _)| g.0 == 20)
+    };
+
+    assert!(!run(false), "control: a felled wood node must retire");
+    assert!(!run(true), "a wood node emptied beside a fishing hut is still a hole in the ground");
 }
 
 /// Spawn a finished structure of any kind for a drop-off test.
@@ -508,50 +623,165 @@ fn a_site_is_not_a_dropoff() {
     assert_eq!(unit(&mut app, 20).gather_state, GatherState::Idle);
 }
 
-/// A fishery is a node on WATER: the closest a peasant can stand is the
-/// neighbouring land tile, one whole tile from the school's centre. Every
-/// fishing test above starts the peasant ALREADY harvesting, so none of them
-/// ever asked whether a walker can reach the net.
+/// A fishery is a node on WATER, and a peasant is a pair of feet. He refuses it
+/// — and, refusing it, takes other work rather than standing down.
+///
+/// This is the beach-stander, and it was not a near miss: `harvest_reach` on a
+/// water node is 1.7 tiles, so a man on the sand was inside a school's working
+/// range and netted it exactly as he would a rock.
 #[test]
-fn a_peasant_can_actually_walk_to_a_fishery() {
+fn a_peasant_refuses_a_fishery_and_takes_other_work() {
     let seed = 1u32;
-    let mut spot = None;
-    'scan: for ty in 8..280 {
-        for tx in 8..280 {
-            if !is_passable(seed, tx, ty) {
-                continue;
-            }
-            for (dx, dy) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
-                if !is_passable(seed, tx + dx, ty + dy) {
-                    spot = Some((tx, ty, tx + dx, ty + dy));
-                    break 'scan;
-                }
-            }
-        }
-    }
-    let (lx, ly, wx, wy) = spot.expect("seed 1 has a coastline");
-    let c = |t: i32| Fx::from_num(t) + saladin_sim::fx!("0.5");
-    let land = V2::new(c(lx), c(ly));
-    let water = V2::new(c(wx), c(wy));
+    let (cx, cy, school) = find_shore_block(seed);
+    let beach = saladin_sim::nearest_passable_grid(
+        &|tx, ty| is_passable(seed, tx, ty),
+        school.x,
+        school.y,
+    );
 
     let mut app = build(seed);
     spawn_player(&mut app, 1);
-    spawn_keep(&mut app, 10, 1, land);
-    app.world_mut().spawn((
-        GameId(20),
-        MatchId(1),
-        Pos { pos: water, facing: ZERO },
-        ResourceNode::deposit(ResourceType::Food, 200),
-    ));
-    spawn_peasant(&mut app, 30, 1, land, GatherState::ToResource, 20, 0, ZERO);
-    for _ in 0..400 {
+    spawn_keep(&mut app, 10, 1, V2::new(centre(cx + 5), centre(cy + 5)));
+    spawn_fishery(&mut app, 20, school, 200);
+    // an honest day's work, in reach and on dry ground
+    spawn_node(&mut app, 21, V2::new(centre(cx + 2), centre(cy + 2)), 500);
+    spawn_peasant(&mut app, 30, 1, beach, GatherState::ToResource, 20, 0, ZERO);
+
+    for _ in 0..600 {
         step(app.world_mut());
     }
     let u = unit(&mut app, 30);
-    assert!(
-        u.gather_state != GatherState::ToResource || u.carrying > 0,
-        "400 ticks walking to a school one tile away and the net never went in"
-    );
+    assert_ne!(u.target_node, 20, "a peasant is netting fish from the beach");
+    assert_ne!(u.gather_state, GatherState::Idle, "refusing the water stood the man down");
+    assert!(wood(&mut app) > 0, "he refused the sea and then did nothing");
+}
+
+/// The loop, end to end and across the boundary: a skiff sails to a school,
+/// fills, sails back to the hut's BERTH — ground it can never stand on — banks
+/// there, and keeps doing it. `node_reachable` says the store is in another
+/// region, which for a hull it always is.
+#[test]
+fn a_skiff_lands_its_catch_at_a_hut_berth() {
+    let seed = 1u32;
+    let (shore, school) = find_fishing_ground(seed);
+    let berth = saladin_sim::berth_of(seed, 1, shore).expect("a shore hut has a berth");
+
+    let mut app = build(seed);
+    spawn_player(&mut app, 1);
+    spawn_hut(&mut app, 40, 1, shore);
+    spawn_fishery(&mut app, 20, school, 200);
+    spawn_skiff(&mut app, 30, 1, berth, GatherState::ToResource, 20);
+
+    let mut last = 0;
+    for round in 1..=3 {
+        for _ in 0..400 {
+            step(app.world_mut());
+        }
+        let f = stock_of(&mut app, ResourceType::Food);
+        assert!(f > last, "round {round}: the catch must keep landing ({last} -> {f})");
+        last = f;
+    }
+}
+
+/// A boat that fishes a school out HOLDS OVER IT. `gather` never looks at an
+/// idle hand with no job site, and a hull has none — so standing it down at the
+/// last fish loses it for the rest of the match. There is no new state here: the
+/// node leaves and re-enters the candidate list on its own, and a boat on
+/// station has always just banked, so it is always carrying nothing.
+#[test]
+fn a_skiff_holds_station_over_a_school_it_has_emptied() {
+    let seed = 1u32;
+    let (shore, school) = find_fishing_ground(seed);
+    let berth = saladin_sim::berth_of(seed, 1, shore).expect("a shore hut has a berth");
+
+    let mut app = build(seed);
+    spawn_player(&mut app, 1);
+    spawn_hut(&mut app, 40, 1, shore);
+    // one load and no more: the school is empty by the first haul
+    spawn_fishery(&mut app, 20, school, unit_def(UnitKind::FishingSkiff).carry);
+    spawn_skiff(&mut app, 30, 1, berth, GatherState::ToResource, 20);
+
+    for _ in 0..300 {
+        step(app.world_mut());
+    }
+    let u = unit(&mut app, 30);
+    assert_ne!(u.gather_state, GatherState::Idle, "the boat gave up on a school that grows back");
+    assert_eq!(u.target_node, 20, "the boat left its own fishing ground");
+    let first = stock_of(&mut app, ResourceType::Food);
+    assert!(first > 0, "the first haul never landed");
+
+    // and it is still there when the fish are: the flow keeps arriving
+    for _ in 0..900 {
+        step(app.world_mut());
+    }
+    let later = stock_of(&mut app, ResourceType::Food);
+    assert!(later > first, "the school regrew and nobody was working it ({first} -> {later})");
+}
+
+/// No hull ever stands on dry ground. A second movement domain surfaces as boats
+/// driving inland, not as failed pathfinds — `movement` walks whatever path it
+/// is handed with no terrain test at all — so this is the only net under every
+/// closure-construction site the fishing loop owns.
+#[test]
+fn no_boat_ever_stands_on_land() {
+    let seed = 1u32;
+    let (shore, school) = find_fishing_ground(seed);
+    let berth = saladin_sim::berth_of(seed, 1, shore).expect("a shore hut has a berth");
+
+    let mut app = build(seed);
+    spawn_player(&mut app, 1);
+    spawn_hut(&mut app, 40, 1, shore);
+    spawn_fishery(&mut app, 20, school, 200);
+    spawn_skiff(&mut app, 30, 1, berth, GatherState::ToResource, 20);
+    spawn_skiff(&mut app, 31, 1, berth, GatherState::ToResource, 20);
+
+    for t in 0..1200 {
+        step(app.world_mut());
+        let world = app.world_mut();
+        let mut q = world.query::<(&Pos, &Unit)>();
+        for (p, u) in q.iter(world) {
+            if !unit_def(u.kind).afloat() {
+                continue;
+            }
+            assert!(
+                is_sailable(seed, p.pos.x.to_num::<i32>(), p.pos.y.to_num::<i32>()),
+                "tick {t}: a hull is aground at {:?}",
+                p.pos
+            );
+        }
+    }
+}
+
+/// Two worlds, the whole fishing loop, hashes compared EVERY tick. The loop
+/// crosses a domain boundary and holds a state open across an economy tick, and
+/// either is a place a peer can disagree.
+#[test]
+fn the_fishing_loop_is_deterministic() {
+    let seed = 1u32;
+    let (shore, school) = find_fishing_ground(seed);
+    let berth = saladin_sim::berth_of(seed, 1, shore).expect("a shore hut has a berth");
+
+    let one = || {
+        let mut app = build(seed);
+        spawn_player(&mut app, 1);
+        spawn_hut(&mut app, 40, 1, shore);
+        spawn_fishery(&mut app, 20, school, 60);
+        spawn_skiff(&mut app, 30, 1, berth, GatherState::ToResource, 20);
+        spawn_skiff(&mut app, 31, 1, berth, GatherState::Idle, 0);
+        spawn_peasant(&mut app, 32, 1, shore, GatherState::Idle, 0, 0, ZERO);
+        app
+    };
+    let (mut a, mut b) = (one(), one());
+    for t in 0..600 {
+        step(a.world_mut());
+        step(b.world_mut());
+        assert_eq!(
+            a.world().resource::<StateHash>().0,
+            b.world().resource::<StateHash>().0,
+            "two worlds diverged on tick {t}"
+        );
+    }
+    assert!(stock_of(&mut a, ResourceType::Food) > 0, "nothing happened to be deterministic about");
 }
 
 /// A node walled in on every side is on the same landmass, so the region filter

@@ -107,8 +107,8 @@ pub fn setup(app: &mut App) {
             app.insert_resource(ui::pause::PauseScreen::Menu);
             app.add_systems(Update, auto_screenshot);
         }
-        Ok("research") | Ok("market") | Ok("keep") | Ok("hut") | Ok("granary") | Ok("store")
-        | Ok("mosque") | Ok("tower") | Ok("house") | Ok("site") | Ok("barracks")
+        Ok("research") | Ok("market") | Ok("keep") | Ok("hut") | Ok("harbour") | Ok("granary")
+        | Ok("store") | Ok("mosque") | Ok("tower") | Ok("house") | Ok("site") | Ok("barracks")
         | Ok("stable") => {
             // conjure + select a building so the screenshot shows its panel
             // (research on the blacksmith / trade on the market)
@@ -136,6 +136,12 @@ pub fn setup(app: &mut App) {
             // conjure one of every unit kind beside the keep (model verification)
             app.insert_state(GameState::Playing);
             app.add_systems(Update, (auto_screenshot, auto_spawn_units));
+        }
+        Ok("ferry") => {
+            // the whole naval loop in one frame: a laden barge at the beach, a
+            // skiff over a school, and the party that is about to cross
+            app.insert_state(GameState::Playing);
+            app.add_systems(Update, (auto_screenshot, auto_ferry));
         }
         Ok("battle") => {
             // conjure two armies facing each other and let them fight — what an
@@ -619,21 +625,19 @@ pub fn auto_spawn_units(world: &mut World, mut stage: Local<u8>) {
         {
             spawn_node(world, res, -3, 2 + i as i32 * 2);
         }
-        // hunt outward for a water tile (render height below sea)
+        // One fishery on the shelf and one in the deep: they are two different
+        // rules with two different meshes, and a shot that only ever finds the
+        // shallow one verifies half the fishing.
         let seed = world.resource::<saladin_protocol::WorldConfig>().seed;
-        'water: for ring in 2..60 {
-            for (dx, dz) in [(ring, 0), (-ring, 0), (0, ring), (0, -ring)] {
-                let x = kp.x + saladin_sim::Fx::from_num(dx);
-                let z = kp.y + saladin_sim::Fx::from_num(dz);
-                let s = saladin_sim::sample_terrain(seed, x, z);
-                if !saladin_sim::biome_def(s.biome).passable
-                    && matches!(
-                        s.biome,
-                        saladin_sim::Biome::ShallowWater | saladin_sim::Biome::DeepWater
-                    )
-                {
-                    spawn_node(world, ResourceType::Food, dx, dz);
-                    break 'water;
+        for want in [saladin_sim::Biome::ShallowWater, saladin_sim::Biome::DeepWater] {
+            'water: for ring in 2..90 {
+                for (dx, dz) in [(ring, 0), (-ring, 0), (0, ring), (0, -ring)] {
+                    let x = kp.x + saladin_sim::Fx::from_num(dx);
+                    let z = kp.y + saladin_sim::Fx::from_num(dz);
+                    if saladin_sim::sample_terrain(seed, x, z).biome == want {
+                        spawn_node(world, ResourceType::Food, dx, dz);
+                        break 'water;
+                    }
                 }
             }
         }
@@ -1314,6 +1318,7 @@ pub fn auto_select_building(world: &mut World) {
         Ok("market") => BuildingKind::Market,
         Ok("keep") => BuildingKind::Keep,
         Ok("hut") => BuildingKind::FishingHut,
+        Ok("harbour") => BuildingKind::Harbour,
         Ok("granary") => BuildingKind::Granary,
         Ok("store") => BuildingKind::Storehouse,
         Ok("mosque") => BuildingKind::Mosque,
@@ -1424,4 +1429,203 @@ pub fn auto_screenshot(time: Res<Time>, mut done: Local<bool>, mut commands: Com
     }
     *done = true;
     commands.spawn(Screenshot::primary_window()).observe(save_to_disk("/tmp/saladin_shot.png"));
+}
+
+/// Naval harness: put a hull at the nearest berth to the keep, a party on the
+/// sand beside it, a skiff over the nearest school, and frame the anchorage.
+/// A crossing is a thing you watch happen; this is the still that shows what is
+/// crossing.
+pub fn auto_ferry(world: &mut World, mut done: Local<bool>) {
+    use saladin_protocol::{MatchId, NextEntityId, Owner, Pos, Unit};
+    use saladin_sim::{Fx, UnitKind, V2, WORLD_SIZE, is_passable, is_sailable};
+    if *done || world.resource::<Time>().elapsed_secs() < 3.0 {
+        return;
+    }
+    let Some(kp) = keep_pos(world, 1) else { return };
+    *done = true;
+    let seed = world.resource::<saladin_protocol::WorldConfig>().seed;
+    let centre = |tx: i32, ty: i32| {
+        V2::new(Fx::from_num(tx) + saladin_sim::fx!("0.5"), Fx::from_num(ty) + saladin_sim::fx!("0.5"))
+    };
+    // the berth nearest the keep that has dry land right beside it
+    let (kx, ky) = (kp.x.to_num::<i32>(), kp.y.to_num::<i32>());
+    let mut anchorage = None;
+    'ring: for r in 1..60i32 {
+        for dy in -r..=r {
+            for dx in -r..=r {
+                if dx.abs().max(dy.abs()) != r {
+                    continue;
+                }
+                let (tx, ty) = (kx + dx, ky + dy);
+                if tx < 1 || ty < 1 || tx >= WORLD_SIZE - 1 || ty >= WORLD_SIZE - 1 {
+                    continue;
+                }
+                if !is_sailable(seed, tx, ty) {
+                    continue;
+                }
+                for (ax, ay) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
+                    if is_passable(seed, tx + ax, ty + ay) {
+                        anchorage = Some((centre(tx, ty), centre(tx + ax, ty + ay)));
+                        break 'ring;
+                    }
+                }
+            }
+        }
+    }
+    let Some((berth, beach)) = anchorage else { return };
+
+    let put = |world: &mut World, kind: UnitKind, pos: V2, aboard: u64| -> u64 {
+        let id = world.resource_mut::<NextEntityId>().alloc();
+        let mut u = Unit::new(kind, pos);
+        u.garrisoned_in = aboard;
+        world.spawn((GameId(id), Owner(1), MatchId(1), Pos { pos, facing: Fx::ZERO }, u));
+        id
+    };
+    // The barge stands OFF the beach and is coming in — a hull tied up under a
+    // keep is hidden by the keep from an iso camera, and a landing is the shot.
+    // Open water near the landing: of every sailable tile within 9 of the
+    // berth, the one with the most sea around it (ties to the farthest out).
+    // Stepping "away from the beach" along one axis strands the hull behind the
+    // keep the moment the coast does not run square to the grid.
+    let offing = {
+        let (bx, by) = (berth.x.to_num::<i32>(), berth.y.to_num::<i32>());
+        let mut best = (-1i32, 0i32, berth);
+        for dy in -9..=9i32 {
+            for dx in -9..=9i32 {
+                let (tx, ty) = (bx + dx, by + dy);
+                if !is_sailable(seed, tx, ty) {
+                    continue;
+                }
+                let mut open = 0;
+                for oy in -2..=2i32 {
+                    for ox in -2..=2i32 {
+                        open += is_sailable(seed, tx + ox, ty + oy) as i32;
+                    }
+                }
+                let far = dx * dx + dy * dy;
+                if (open, far) > (best.0, best.1) {
+                    best = (open, far, centre(tx, ty));
+                }
+            }
+        }
+        best.2
+    };
+    let barge = put(world, UnitKind::Barge, offing, 0);
+    {
+        let mut q = world.query::<(&GameId, &mut Unit)>();
+        for (g, mut u) in q.iter_mut(world) {
+            if g.0 == barge {
+                u.target = berth;
+                u.has_target = true;
+            }
+        }
+    }
+    for i in 0..3 {
+        let at = V2::new(beach.x + Fx::from_num(i), beach.y);
+        put(world, UnitKind::Spearman, at, 0);
+    }
+    for _ in 0..2 {
+        put(world, UnitKind::Spearman, offing, barge);
+    }
+    // a skiff over the nearest school, which is what the sea is FOR most of the
+    // time
+    let school = {
+        let mut q = world.query::<(&Pos, &saladin_protocol::ResourceNode)>();
+        q.iter(world)
+            .filter(|(p, n)| {
+                n.res_type == saladin_sim::ResourceType::Food
+                    && is_sailable(seed, p.pos.x.to_num::<i32>(), p.pos.y.to_num::<i32>())
+            })
+            .map(|(p, _)| p.pos)
+            .min_by_key(|p| saladin_sim::dist2(*p, kp).to_bits())
+    };
+    let skiff = put(world, UnitKind::FishingSkiff, school.unwrap_or(berth), 0);
+    // put the skiff under way down the coast: a wake is only a wake on a boat
+    // that is going somewhere, and it is the one thing a still cannot fake
+    {
+        // the longest UNBROKEN sailable run off one of the four axes — the
+        // harness walks a straight line, so a destination it cannot swim to in
+        // a straight line beaches the boat
+        let at = school.unwrap_or(berth);
+        let (ax, ay) = (at.x.to_num::<i32>(), at.y.to_num::<i32>());
+        let mut best: Option<(i32, V2)> = None;
+        for (dx, dy) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
+            let mut r = 1;
+            while r < 26 && is_sailable(seed, ax + dx * r, ay + dy * r) {
+                r += 1;
+            }
+            let run = r - 1;
+            if run >= 3 && best.is_none_or(|(b, _)| run > b) {
+                best = Some((run, centre(ax + dx * run, ay + dy * run)));
+            }
+        }
+        if let Some((_, dest)) = best {
+            let mut q = world.query::<(&GameId, &mut Unit)>();
+            for (g, mut u) in q.iter_mut(world) {
+                if g.0 == skiff {
+                    u.target = dest;
+                    u.has_target = true;
+                }
+            }
+        }
+    }
+
+    // A quay on the sand beside the anchorage. The Harbour is the one structure
+    // this harness had no way to show — `auto_select_building` plants its subject
+    // four tiles off the keep, which is grass, and a dock inland is not a dock.
+    {
+        use saladin_sim::{BuildingKind, building_def, check_place, is_buildable_tile};
+        let (bx, by) = (beach.x.to_num::<i32>(), beach.y.to_num::<i32>());
+        let free = |_: i32, _: i32| false;
+        let mut quay = None;
+        'q: for r in 0..8i32 {
+            for dy in -r..=r {
+                for dx in -r..=r {
+                    if dx.abs().max(dy.abs()) != r {
+                        continue;
+                    }
+                    let c = saladin_sim::footprint_center(
+                        2,
+                        Fx::from_num(bx + dx),
+                        Fx::from_num(by + dy),
+                    );
+                    if is_buildable_tile(seed, bx + dx, by + dy)
+                        && check_place(seed, BuildingKind::Harbour, c.x, c.y, free, &[]) == Ok(())
+                    {
+                        quay = Some(c);
+                        break 'q;
+                    }
+                }
+            }
+        }
+        if let Some(at) = quay {
+            let def = building_def(BuildingKind::Harbour);
+            let id = world.resource_mut::<NextEntityId>().alloc();
+            world.spawn((
+                GameId(id),
+                Owner(1),
+                MatchId(1),
+                Pos { pos: at, facing: Fx::ZERO },
+                saladin_protocol::Building::new(BuildingKind::Harbour, def.max_hp, at),
+            ));
+        }
+    }
+    // Select the laden hull so the shot also carries its command card.
+    world.resource_mut::<selection::Selection>().set(vec![barge]);
+
+    // Frame the whole landing: half way between where she stands off and the
+    // sand she is running for.
+    let (cx, cz) = (
+        (offing.x + beach.x).to_num::<f32>() * 0.5,
+        (offing.y + beach.y).to_num::<f32>() * 0.5,
+    );
+    let y = world
+        .get_resource::<crate::terrain::HeightField>()
+        .map(|f| crate::terrain::height_at(f, cx, cz))
+        .unwrap_or(0.0);
+    let mut cam = world.resource_mut::<crate::camera::CameraState>();
+    // target only: the glide system re-aims the transform when center differs,
+    // and `framed` beats `frame_keep` to the punch
+    cam.target_center = bevy::prelude::Vec3::new(cx, y, cz);
+    cam.framed = true;
 }

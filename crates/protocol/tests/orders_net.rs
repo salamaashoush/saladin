@@ -63,7 +63,10 @@ fn a_peer_one_version_behind_is_refused() {
         },
         other => panic!("a v{} peer was not refused: {other:?}", PROTOCOL_VERSION - 1),
     }
-    assert_eq!(PROTOCOL_VERSION, 8, "the group verbs shipped in v7, the crop season in v8");
+    assert_eq!(
+        PROTOCOL_VERSION, 9,
+        "the group verbs shipped in v7, the crop season in v8, the sea in v9"
+    );
 }
 
 /// The lockstep guarantee for the new verbs: nothing crosses the wire but the

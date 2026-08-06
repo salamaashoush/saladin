@@ -31,7 +31,7 @@ use saladin_sim::{
     dist2, effective_building_def, effective_damage_vs, effective_unit_def, elevation_at,
     elevation_range_bonus, facing_multiplier, fx_sqrt, garrison_volley, gate_blocks,
     has_line_of_fire, is_frontal, is_routing, morale_after_hit_resolve, morale_recover,
-    move_cost_at, nearest_passable_grid, operational, passable_grid, unit_def,
+    move_cost_at, nearest_passable_grid, operational, passable_grid, Smoothing, unit_def,
 };
 
 use super::movement::heading16;
@@ -192,6 +192,10 @@ pub struct CombatScratch {
     /// discipline lookup costs nothing.
     rally_auras: Vec<(V2, Fx, u64)>,
     bgarr: Vec<Vec<u32>>,
+    /// (hull, passenger) snapshot indices. A unit can host a garrison too now —
+    /// `bgarr` is keyed by BUILDING index, so cargo aboard a hull lands in no
+    /// bucket at all and the dying-host pass below would never walk it.
+    cargo: Vec<(u32, u32)>,
     shooters: Vec<GarrisonShooter>,
     gtargets: Vec<GarrisonTarget>,
     gt_idx: Vec<u32>,
@@ -226,6 +230,7 @@ impl Default for CombatScratch {
             aura_blds: Vec::new(),
             rally_auras: Vec::new(),
             bgarr: Vec::new(),
+            cargo: Vec::new(),
             shooters: Vec::new(),
             gtargets: Vec::new(),
             gt_idx: Vec::new(),
@@ -473,7 +478,29 @@ fn pursuit_patch(
 ) -> (Option<(u32, u32, V2)>, Option<u32>) {
     let passable = |tx: i32, ty: i32| f.walkable(tx, ty, owner);
     let cost = |tx: i32, ty: i32| move_cost_at(f.seed, tx, ty);
-    let path = astar.find_path_costed(&passable, &cost, from.x, from.y, to.x, to.y, PURSUIT_EXPANSIONS);
+    // A quarry standing where the hunter cannot go — a hull at sea, now that
+    // there is such a thing — is the one case where the raw target must not be
+    // the last waypoint. `find_path_costed` snaps only the SEARCH, so a shore
+    // archer chasing a barge was handed the barge's own position and WALKED INTO
+    // THE OCEAN to reach it: measured, three crossbowmen standing in open water
+    // off their own beach. `Exact` ends the path at the water's edge instead.
+    // One bitset read per pursuit, and every pursuit over ground the hunter can
+    // actually stand on is unchanged.
+    let smoothing = if passable(floor_i(to.x), floor_i(to.y)) {
+        Smoothing::Sampled
+    } else {
+        Smoothing::Exact
+    };
+    let path = astar.find_path_costed_in(
+        &passable,
+        &cost,
+        from.x,
+        from.y,
+        to.x,
+        to.y,
+        PURSUIT_EXPANSIONS,
+        smoothing,
+    );
     if path.is_empty() {
         let (step, blocker) = ray_step(f, owner, from, to, RAY_STEP);
         let mv = step.map(|p| {
@@ -527,6 +554,7 @@ pub fn combat(
         aura_blds,
         rally_auras,
         bgarr,
+        cargo,
         shooters,
         gtargets,
         gt_idx,
@@ -716,11 +744,14 @@ pub fn combat(
         g.clear();
     }
     rally_auras.clear();
+    cargo.clear();
     let mut any_aura = false;
     for (i, u) in units.iter().enumerate() {
         if u.garrisoned_in != 0 {
             if let Some(bi) = bid_of(buildings, u.garrisoned_in) {
                 bgarr[bi].push(i as u32);
+            } else if let Some(hi) = uid_of(units, u.garrisoned_in) {
+                cargo.push((hi as u32, i as u32));
             }
             continue;
         }
@@ -1379,6 +1410,18 @@ pub fn combat(
             } else {
                 udead[ui] = true;
             }
+        }
+    }
+
+    // ── a sunk hull takes its cargo down with it ─────────────────────────────
+    // Not a flourish: cargo that outlived its host would point at a dead GameId
+    // forever — invisible, unkillable, permanently off the field and still on
+    // the population and supply rolls. It is also the whole counter-play, since
+    // a laden barge crossing a defended coast is killable with no new combat
+    // code at all.
+    for &(hi, ci) in cargo.iter() {
+        if udead[hi as usize] {
+            udead[ci as usize] = true;
         }
     }
 

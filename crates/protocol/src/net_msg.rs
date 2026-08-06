@@ -9,9 +9,11 @@ use serde::{Deserialize, Serialize};
 /// Bumped on every wire-incompatible change AND on every change to the SIM
 /// RULES: lockstep ships inputs, so two peers that agree on the wire and
 /// disagree about what a tick does desync silently, and this handshake is the
-/// only thing standing between them. v8 is the crop season (fields grow, ripen,
-/// lodge and re-sow) — not one byte of `Msg` moved.
-pub const PROTOCOL_VERSION: u32 = 8;
+/// only thing standing between them. v9 is the sea: two hull kinds and a
+/// Harbour appended to the rosters, fisheries that regrow, and a berth spawn —
+/// not one byte of `Msg` moved, but a v8 peer decodes UnitKind 13 as nothing
+/// and would simulate a different tick.
+pub const PROTOCOL_VERSION: u32 = 9;
 
 /// Room codes: 6 chars from an unambiguous alphabet (no 0/O, 1/I/L).
 pub const ROOM_CODE_LEN: usize = 6;

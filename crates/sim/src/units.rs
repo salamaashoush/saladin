@@ -2,6 +2,7 @@ use crate::economy::ResourceCost;
 use crate::enums::{ArmorClass, BuildingKind, DamageType, UnitKind, UnitRole};
 use crate::math::{Fx, ONE};
 use crate::roster::{FACTION_AYYUBID, FACTION_BOTH, FACTION_CRUSADER};
+use crate::terrain::Domain;
 
 /// Stats + presentation for one trainable unit. The generic combat/gather/move
 /// systems dispatch on `UnitKind`, so a new roster entry never touches systems.
@@ -15,8 +16,16 @@ pub struct UnitDef {
     /// Which factions may train this kind (`roster.rs` bitmask). Exclusivity is
     /// a filter over one shared table, never a deletion.
     pub factions: u8,
+    /// Which passability grid this kind walks. Every closure-building call site
+    /// asks this rather than assuming land.
+    pub domain: Domain,
     pub speed: Fx,
     pub carry: i32,
+    /// Units this kind can FERRY (0 = none). Distinct from `carry`, which is a
+    /// load of resources: a barge hauls men, a skiff hauls fish.
+    pub cargo_cap: i32,
+    /// Housing this kind occupies. A hull is a crew and a vessel, not a man.
+    pub pop_cost: i32,
     pub radius: Fx,
     pub height: Fx,
     pub max_hp: i32,
@@ -80,8 +89,11 @@ const DEFAULT: UnitDef = UnitDef {
     icon: "",
     role: UnitRole::Foot,
     factions: FACTION_BOTH,
+    domain: Domain::Land,
     speed: crate::fx!("2.2"),
     carry: 0,
+    cargo_cap: 0,
+    pop_cost: 1,
     radius: crate::fx!("0.26"),
     height: crate::fx!("0.85"),
     max_hp: 60,
@@ -112,7 +124,7 @@ const DEFAULT: UnitDef = UnitDef {
     train_time: crate::fx!("12"),
 };
 
-const UNIT_DEFS: [UnitDef; 13] = [
+const UNIT_DEFS: [UnitDef; 15] = [
     // 0 Peasant — the whole economy, and never a soldier.
     UnitDef {
         label: "Peasant",
@@ -427,6 +439,56 @@ const UNIT_DEFS: [UnitDef; 13] = [
         train_time: crate::fx!("16"),
         ..DEFAULT
     },
+    // 13 Fishing Skiff — the only hand that can work a fishery, and the whole
+    // on-ramp to the sea: 30 wood over a 40-wood hut. Carries two and a half
+    // times a peasant's load because a haul is a round trip out and back.
+    UnitDef {
+        label: "Fishing Skiff",
+        icon: "⛵",
+        role: UnitRole::Boat,
+        domain: Domain::Sea,
+        speed: crate::fx!("2.6"),
+        carry: 20,
+        radius: crate::fx!("0.28"),
+        height: crate::fx!("0.5"),
+        max_hp: 90,
+        armor_class: ArmorClass::Leather,
+        range: crate::fx!("0.8"),
+        attack_rate: crate::fx!("0"),
+        attack_ticks: 0,
+        aggro_range: crate::fx!("0"),
+        cost: ResourceCost::new(30, 0, 0, 0),
+        tint: Some(0x8a6a3a),
+        morale_resolve: crate::fx!("0.7"),
+        train_time: crate::fx!("10"),
+        ..DEFAULT
+    },
+    // 14 Barge — the ferry, and the only thing that reaches the other island.
+    // `radius` is EXACTLY the Ram's: the widest body already in the roster, so
+    // the separation cell scan does not widen for every unit on the map.
+    UnitDef {
+        label: "Barge",
+        icon: "🚢",
+        role: UnitRole::Boat,
+        domain: Domain::Sea,
+        speed: crate::fx!("3.0"),
+        carry: 0,
+        cargo_cap: 6,
+        pop_cost: 2,
+        radius: crate::fx!("0.45"),
+        height: crate::fx!("0.62"),
+        max_hp: 220,
+        armor_class: ArmorClass::Leather,
+        range: crate::fx!("0.8"),
+        attack_rate: crate::fx!("0"),
+        attack_ticks: 0,
+        aggro_range: crate::fx!("0"),
+        cost: ResourceCost::new(60, 0, 0, 20),
+        tint: Some(0x6b4a2b),
+        morale_resolve: crate::fx!("1"),
+        train_time: crate::fx!("20"),
+        ..DEFAULT
+    },
 ];
 
 pub fn unit_def(kind: UnitKind) -> &'static UnitDef {
@@ -445,9 +507,30 @@ impl UnitDef {
     }
 
     /// Draws rations. ROLE, not `attack > 0`: arming a peasant for self-defence
-    /// must never silently put it on the muster roll.
+    /// must never silently put it on the muster roll. A hull is off the roll
+    /// too — there is no supply model at sea, and a crew that deserts
+    /// mid-crossing is not a feature.
     pub fn draws_rations(&self) -> bool {
-        !matches!(self.role, UnitRole::Worker | UnitRole::Support)
+        !matches!(self.role, UnitRole::Worker | UnitRole::Support | UnitRole::Boat)
+    }
+
+    /// Raises and mends structures. ROLE, not `carry > 0`: a fishing skiff
+    /// carries more than a peasant and cannot reach a building site at all.
+    pub fn builds(&self) -> bool {
+        self.role == UnitRole::Worker
+    }
+
+    /// Moves in `Domain::Sea`.
+    pub fn afloat(&self) -> bool {
+        self.domain == Domain::Sea
+    }
+
+    /// A pair of HANDS — what a land work order (gather that seam, mend that
+    /// wall) may be handed to. `carry > 0` alone is no longer that question: a
+    /// skiff carries two and a half times a peasant's load and cannot stand on
+    /// any of the ground those orders point at.
+    pub fn hands(&self) -> bool {
+        self.carry > 0 && !self.afloat()
     }
 }
 
@@ -472,6 +555,7 @@ mod tests {
         }
         assert_eq!(UNIT_DEFS.len(), UnitKind::ALL.len());
         assert_eq!(unit_def(UnitKind::Naffatun).label, "Naffatun");
+        assert_eq!(unit_def(UnitKind::Barge).label, "Barge");
     }
 
     /// The declared swing has to be a swing the 200 ms combat cadence can
@@ -533,6 +617,10 @@ mod tests {
             sustain: bool,
             discipline: bool,
             min_range: bool,
+            /// The two hulls are identical on every combat axis (they have
+            /// none). What they haul IS the distinction: fish, or men.
+            hauls: bool,
+            ferries: bool,
         }
         let sig = |k: UnitKind| {
             let d = unit_def(k);
@@ -551,6 +639,8 @@ mod tests {
                 sustain: d.morale_aura > Fx::ZERO,
                 discipline: d.rally_aura > Fx::ZERO,
                 min_range: d.min_range > Fx::ZERO,
+                hauls: d.carry > 0,
+                ferries: d.cargo_cap > 0,
             }
         };
         for (i, a) in UnitKind::ALL.iter().enumerate() {
@@ -589,7 +679,16 @@ mod tests {
                     assert!(d.attack > 0 && !d.ranged && d.range <= crate::fx!("2"), "{k:?}")
                 }
                 UnitRole::Siege => assert!(d.prefers_buildings && d.attack > 0, "{k:?}"),
+                UnitRole::Boat => {
+                    assert!(d.domain == Domain::Sea, "{k:?} is a boat on dry land");
+                    assert!(d.attack == 0 && !d.draws_rations() && !d.builds(), "{k:?}");
+                    assert!(!d.garrisonable, "{k:?} cannot be stuffed into a tower");
+                    // a hull hauls fish OR men, never both and never neither
+                    assert!((d.carry > 0) != (d.cargo_cap > 0), "{k:?} carries nothing at all");
+                }
             }
+            assert_eq!(d.domain == Domain::Sea, d.role == UnitRole::Boat, "{k:?} domain/role");
+            assert!(d.pop_cost >= 1, "{k:?} is housed for free");
             assert!(d.morale_resolve > Fx::ZERO, "{k:?} has no resolve at all");
             assert!(d.charge_mult >= ONE, "{k:?} charge would REDUCE damage");
             assert_eq!(d.factions & !crate::roster::FACTION_BOTH, 0, "{k:?} stray faction bit");
@@ -830,6 +929,9 @@ mod tests {
                 mine.iter().any(|d| d.bonus_vs_armor[ArmorClass::Mail as usize] > ONE),
                 "{f:?} has no answer to armour"
             );
+            // crossing the sea is not an asymmetry; WHAT you land is
+            assert!(mine.iter().any(|d| d.carry > 0 && d.afloat()), "{f:?} cannot fish");
+            assert!(mine.iter().any(|d| d.cargo_cap > 0), "{f:?} cannot cross water");
         }
     }
 }

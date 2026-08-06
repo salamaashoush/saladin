@@ -216,5 +216,8 @@ mod tests {
         assert!(!draws_rations(UnitKind::Peasant));
         assert!(!draws_rations(UnitKind::Imam));
         assert!(!draws_rations(UnitKind::Chaplain));
+        // there is no supply line at sea, so there is no famine on a hull
+        assert!(!draws_rations(UnitKind::FishingSkiff));
+        assert!(!draws_rations(UnitKind::Barge));
     }
 }

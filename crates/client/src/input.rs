@@ -10,8 +10,8 @@ use crate::{LocalInput, LocalPlayer};
 use bevy::prelude::*;
 use saladin_protocol::{Building, GameId, Owner, Player, PlayerCommand, Pos, ResourceNode, Unit};
 use saladin_sim::{
-    BuildingKind, Fx, GatherState, PlaceError, Stance, Stockpile, V2, building_def, can_garrison,
-    can_host_garrison,
+    BuildingKind, Fx, GatherState, LANDING_REACH, PlaceError, Stance, Stockpile, V2, building_def,
+    can_garrison, can_host_garrison,
     check_build, footprint_center, garrison_free_slots, occupancy_set, operational, tile_key,
     unit_def,
 };
@@ -237,7 +237,7 @@ pub struct BuildProbe {
     occ: HashSet<i32>,
     own: Vec<V2>,
     owned_kinds: HashSet<BuildingKind>,
-    counts: [i32; 16],
+    counts: [i32; BuildingKind::ALL.len()],
     pub stock: Stockpile,
     seed: u32,
 }
@@ -274,7 +274,7 @@ pub fn build_probe(
     let mut occ_list = Vec::new();
     let mut own = Vec::new();
     let mut owned_kinds = HashSet::new();
-    let mut counts = [0i32; 16];
+    let mut counts = [0i32; BuildingKind::ALL.len()];
     let mut own_walls = Vec::new();
     for (pos, k, owner, live) in buildings {
         occ_list.push(saladin_sim::Occupant { kind: k, pos });
@@ -499,10 +499,47 @@ pub fn pointer_input(
                     voice.0.push((k, crate::audio::Bark::Attack));
                 }
             }
+            // Boarding your own hull. Embark ships FIRST and only takes the men
+            // already at the gangplank; the march that follows walks the rest
+            // over and is refused by everyone now aboard, so one click both
+            // loads and fetches.
+            Some(Picked::Unit(target, owner))
+                if owner == me
+                    && q_units
+                        .iter()
+                        .any(|(g, _, _, u)| g.0 == target && unit_def(u.kind).cargo_cap > 0) =>
+            {
+                let party: Vec<u64> = selection
+                    .iter()
+                    .copied()
+                    .filter(|id| *id != target)
+                    .filter(|id| {
+                        q_units.iter().any(|(g, _, _, u)| {
+                            g.0 == *id
+                                && u.garrisoned_in == 0
+                                && unit_def(u.kind).domain == saladin_sim::Domain::Land
+                        })
+                    })
+                    .collect();
+                if !party.is_empty() {
+                    input.0.push(PlayerCommand::Embark { player_id: me, units: party.clone(), boat: target });
+                    if let Some((_, _, p, _)) = q_units.iter().find(|(g, ..)| g.0 == target) {
+                        let (gx, gz) = (p.pos.x.to_num(), p.pos.y.to_num());
+                        command_march(&selection, me, gx, gz, shape.0, false, &mut input);
+                    }
+                    if let Some(k) = selected_kind(&selection, &q_units) {
+                        voice.0.push((k, crate::audio::Bark::Ack));
+                    }
+                }
+            }
             Some(Picked::Node(node)) => {
                 let mut any = false;
                 for &id in selection.iter() {
                     if let Some((_, _, _, u)) = q_units.iter().find(|(g, ..)| g.0 == id) {
+                        // Anything that can carry a load may be OFFERED the node
+                        // — a skiff for a school, a peasant for a seam. The sim
+                        // holds the domain rule and refuses the mismatch, so a
+                        // mixed selection sorts itself out there and not here.
                         if unit_def(u.kind).carry > 0 {
                             input.0.push(PlayerCommand::Gather { player_id: me, unit: id, node });
                             any = true;
@@ -556,7 +593,7 @@ pub fn pointer_input(
                                 break;
                             }
                             if let Some((_, _, _, u)) = q_units.iter().find(|(g, ..)| g.0 == id)
-                                && unit_def(u.kind).carry > 0
+                                && unit_def(u.kind).hands()
                                 && u.garrisoned_in == 0
                             {
                                 input.0.push(PlayerCommand::Repair { player_id: me, unit: id, building: target });
@@ -615,6 +652,24 @@ pub fn pointer_input(
                 }
             }
             Some(Picked::Ground(g)) => {
+                // A laden hull told to go to dry land NEARBY is being told to
+                // LAND. Far ground is a sailing order and nothing else: the
+                // march ships either way, so a hull still out at sea noses in
+                // and the next click puts the party ashore.
+                //
+                // The reach test is the whole rule. Without it every ground
+                // click unloaded, and since a hull at its own berth is one tile
+                // off the sand, "sail to the far island" landed the party back
+                // on the beach it had just boarded from.
+                let shore = V2::new(Fx::from_num(g.x), Fx::from_num(g.z));
+                for &id in selection.iter() {
+                    let lands = q_units.iter().any(|(gg, _, p, u)| {
+                        gg.0 == id && puts_ashore(cfg.seed, u.kind, p.pos, shore)
+                    }) && q_units.iter().any(|(_, _, _, u)| u.garrisoned_in == id);
+                    if lands {
+                        input.0.push(PlayerCommand::Disembark { player_id: me, boat: id, target: shore });
+                    }
+                }
                 command_march(&selection, me, g.x, g.z, shape.0, false, &mut input);
                 if let Some(k) = selected_kind(&selection, &q_units) {
                     voice.0.push((k, crate::audio::Bark::Ack));
@@ -840,6 +895,18 @@ pub fn rotate_ghost(
     }
 }
 
+/// Whether a ground click on `target` means "put the party ashore here" rather
+/// than "sail there". Dry ground within a gangplank of the hull, and nothing
+/// else: `disembark` lands within `LANDING_REACH` of the HULL whatever it is
+/// aimed at, so an unguarded click emitted it every time — and a hull at its own
+/// berth is one tile off the sand, which made "sail to the far island" unload
+/// the party onto the beach it had just boarded from.
+fn puts_ashore(seed: u32, kind: saladin_sim::UnitKind, hull: V2, target: V2) -> bool {
+    unit_def(kind).cargo_cap > 0
+        && saladin_sim::is_passable(seed, target.x.to_num::<i32>(), target.y.to_num::<i32>())
+        && saladin_sim::dist(hull, target) <= Fx::from_num(LANDING_REACH)
+}
+
 /// The crew a build order ships with: the peasants the player has selected, or
 /// — when none are — the nearest hands not already on a job.
 ///
@@ -858,7 +925,7 @@ fn selected_builders(
 ) -> Vec<u64> {
     let hands = || {
         q_units.iter().filter(move |(_, o, _, u)| {
-            o.0 == me && u.garrisoned_in == 0 && unit_def(u.kind).carry > 0
+            o.0 == me && u.garrisoned_in == 0 && unit_def(u.kind).hands()
         })
     };
     let mut ids: Vec<u64> =
@@ -1050,6 +1117,55 @@ pub fn spawn_drag_box(mut commands: Commands) {
 mod tests {
     use super::*;
     use saladin_sim::Stockpile;
+
+    /// Ordering a laden ferry to the far island used to unload it where it
+    /// stood. `disembark` lands within `LANDING_REACH` of the HULL no matter
+    /// what it is aimed at, so the client emitting it on every ground click
+    /// meant a barge tied up at its own quay — one tile off the sand — put its
+    /// whole party back on the beach the instant it was told to sail.
+    #[test]
+    fn a_ground_click_only_unloads_a_ferry_that_is_already_at_the_shore() {
+        use saladin_sim::{UnitKind, WORLD_SIZE, is_passable, is_sailable};
+        let seed = saladin_sim::compose_seed(7, 3);
+        let centre =
+            |tx: i32, ty: i32| V2::new(Fx::from_num(tx) + fx("0.5"), Fx::from_num(ty) + fx("0.5"));
+        fn fx(s: &str) -> Fx {
+            Fx::from_str(s).unwrap()
+        }
+        // a berth on the water with dry land right beside it
+        let mut anchorage = None;
+        'scan: for ty in 20..WORLD_SIZE - 20 {
+            for tx in 20..WORLD_SIZE - 20 {
+                if !is_sailable(seed, tx, ty) {
+                    continue;
+                }
+                for (dx, dy) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
+                    if is_passable(seed, tx + dx, ty + dy) {
+                        anchorage = Some((centre(tx, ty), centre(tx + dx, ty + dy)));
+                        break 'scan;
+                    }
+                }
+            }
+        }
+        let (hull, beach) = anchorage.expect("a berth beside dry land");
+
+        assert!(puts_ashore(seed, UnitKind::Barge, hull, beach), "the sand alongside is a landing");
+        // the far side of the map is a sailing order and nothing else
+        let far = centre(WORLD_SIZE / 2, WORLD_SIZE - 25);
+        assert!(
+            saladin_sim::dist(hull, far) > Fx::from_num(LANDING_REACH),
+            "the probe picked a target that is not actually far"
+        );
+        assert!(!puts_ashore(seed, UnitKind::Barge, hull, far), "an order to sail away unloaded");
+        // open water is never a landing, however close
+        assert!(!puts_ashore(seed, UnitKind::Barge, hull, hull), "the party was put into the sea");
+        // and nothing that is not a ferry ever lands anybody
+        for &k in UnitKind::ALL {
+            if unit_def(k).cargo_cap == 0 {
+                assert!(!puts_ashore(seed, k, hull, beach), "{k:?} is not a ferry");
+            }
+        }
+    }
 
     /// You could not order a peasant onto your own farm. `pick` hands the click
     /// to the BUILDING (a farm's half-extent is 1.0, so the field's 0.8 pick disc

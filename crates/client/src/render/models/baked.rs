@@ -70,6 +70,7 @@ pub fn building_kind_name(kind: BuildingKind) -> &'static str {
         BuildingKind::Farm => "farm",
         BuildingKind::Storehouse => "storehouse",
         BuildingKind::Mosque => "mosque",
+        BuildingKind::Harbour => "harbour",
     }
 }
 
@@ -140,6 +141,11 @@ pub fn resource_node_meshes(res: saladin_sim::ResourceType) -> Vec<Mesh> {
 /// Baked fish school, or the procedural fallback.
 pub fn fish_node_mesh() -> Mesh {
     baked("props", "fish_school").unwrap_or_else(super::props::fish_node_mesh)
+}
+
+/// Baked deep-water shoal, or the procedural fallback.
+pub fn fish_shoal_mesh() -> Mesh {
+    baked("props", "fish_shoal").unwrap_or_else(super::props::fish_shoal_mesh)
 }
 
 /// Baked farm-crop stages, index-aligned with the `CROP_*` constants.
@@ -224,6 +230,8 @@ fn unit_kind_name(kind: saladin_sim::UnitKind) -> &'static str {
         UnitKind::Sergeant => "sergeant",
         UnitKind::Chaplain => "chaplain",
         UnitKind::Naffatun => "naffatun",
+        UnitKind::FishingSkiff => "fishing_skiff",
+        UnitKind::Barge => "barge",
     }
 }
 

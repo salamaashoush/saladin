@@ -78,6 +78,11 @@ pub struct SelectionInfo {
     /// Men in the selection on short rations, and the worst ration among them.
     pub short: u32,
     pub worst_ration: f32,
+    /// Passengers riding in the selected hulls, and the berths they have. A
+    /// laden ferry and an empty one are otherwise the same row on the card, and
+    /// unloading is a click on nearby ground with no other tell.
+    pub aboard: u32,
+    pub berths: u32,
 }
 
 /// Shape a group order marches in. Held on the client because it rides in the
@@ -283,6 +288,21 @@ pub fn publish_selection(
     info.routing = routing;
     info.short = short;
     info.worst_ration = if short > 0 { worst } else { 1.0 };
+    // Second pass, own units only: a host is named by GameId, so the count is
+    // not knowable until the live selection is settled above.
+    let (mut aboard, mut berths) = (0u32, 0u32);
+    for (g, o, u) in &q_units {
+        if o.0 != local.0 {
+            continue;
+        }
+        if u.garrisoned_in != 0 {
+            aboard += selection.contains(&u.garrisoned_in) as u32;
+        } else if selection.contains(&g.0) {
+            berths += unit_def(u.kind).cargo_cap.max(0) as u32;
+        }
+    }
+    info.aboard = aboard;
+    info.berths = berths;
 
     // selected building digest (occupants derived from garrisoned_in)
     let Some(id) = selection.building else {

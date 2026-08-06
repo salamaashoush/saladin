@@ -144,7 +144,63 @@ pub fn building_mesh(kind: BuildingKind) -> Mesh {
         BuildingKind::Farm => build_farm(),
         BuildingKind::Storehouse => build_storehouse(),
         BuildingKind::Mosque => build_mosque(),
+        BuildingKind::Harbour => build_harbour(),
     }
+}
+
+// Harbour: a battered stone mole carrying a warehouse, a planked quay over the
+// water with mooring bollards, a spar crane swung out over the berth and a
+// jetty running past it. It has to read as "hulls tie up HERE" at gameplay
+// zoom, which is what the crane and the jetty are for — a shed on a shore is
+// the Fishing Hut.
+fn build_harbour() -> Mesh {
+    let stone = srgb(STONE);
+    let stone_dk = srgb(STONE_DARK);
+    let wood = srgb(TIMBER);
+    let dark = srgb(TIMBER_DARK);
+    let plank = srgb(0xa07c46);
+    let wall = srgb(PLASTER);
+    let roof = srgb(0x7a4630);
+    let rope = srgb(0xb8ac8c);
+
+    // Battered stone mole under the landward half.
+    let mut parts = vec![
+        part(cuboid(2.0, 0.34, 1.15), stone, xyz(0.0, 0.17, -0.42)),
+        part(cuboid(1.88, 0.1, 1.02), stone_dk, xyz(0.0, 0.39, -0.42)),
+    ];
+    // Warehouse: doors wide, gable end facing the water.
+    parts.push(part(cuboid(1.1, 0.8, 0.86), wall, xyz(-0.4, 0.84, -0.5)));
+    parts.push(part(cuboid(0.4, 0.52, 0.05), dark, xyz(-0.4, 0.7, -0.06)));
+    for s in [-1.0_f32, 1.0] {
+        parts.push(part(cuboid(1.2, 0.09, 0.56), roof, rot_x(-0.4, 1.32, s * 0.24, s * 0.5)));
+    }
+    // Timber quay decking on the water side, on pilings.
+    parts.push(part(cuboid(1.94, 0.09, 0.62), plank, xyz(0.0, 0.48, 0.55)));
+    for sx in [-0.82_f32, -0.28, 0.28, 0.82] {
+        parts.push(part(cyl(0.055, 0.5, 5), dark, xyz(sx, 0.24, 0.78)));
+    }
+    // Jetty out past the quay, where a hull actually lies alongside.
+    parts.push(part(cuboid(0.46, 0.08, 0.95), plank, xyz(0.6, 0.5, 1.22)));
+    for dz in [1.0_f32, 1.58] {
+        parts.push(part(cyl(0.05, 0.5, 5), dark, xyz(0.8, 0.24, dz)));
+    }
+    // Spar crane: mast, raked jib, tackle and hook hanging over the berth.
+    parts.push(part(cyl(0.075, 1.35, 6), wood, xyz(-0.2, 1.16, 0.5)));
+    parts.push(part(cuboid(0.09, 1.0, 0.09), wood, rot_x(-0.2, 1.66, 0.88, -0.9)));
+    parts.push(part(cyl(0.016, 0.5, 4), rope, xyz(-0.2, 1.55, 1.26)));
+    parts.push(part(cuboid(0.17, 0.15, 0.13), dark, xyz(-0.2, 1.24, 1.26)));
+    // Bollards along the quay edge with a hawser between them.
+    for sx in [-0.62_f32, 0.24] {
+        parts.push(part(cyl(0.07, 0.22, 6), stone_dk, xyz(sx, 0.58, 0.82)));
+    }
+    parts.push(part(cuboid(0.86, 0.03, 0.03), rope, xyz(-0.19, 0.62, 0.82)));
+    // Cargo waiting to go aboard: barrels and a crate.
+    for (bx, bz) in [(-0.86_f32, 0.42_f32), (-0.68, 0.6)] {
+        parts.push(part(cyl(0.12, 0.26, 7), wood, xyz(bx, 0.66, bz)));
+    }
+    parts.push(part(cuboid(0.28, 0.24, 0.28), plank, xyz(0.62, 0.65, 0.5)));
+    pennant(&mut parts, -0.95, 1.5, -0.9, 0.7);
+    merge(parts)
 }
 
 // Storehouse: a stone-based warehouse under a covered dock — the outpost you

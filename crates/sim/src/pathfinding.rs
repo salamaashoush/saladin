@@ -232,11 +232,25 @@ pub fn approach_tile<P: Fn(i32, i32) -> bool>(
     to: V2,
     radius: i32,
 ) -> Option<V2> {
-    let region = crate::terrain::region_at(seed, from.x, from.y);
+    let regions = crate::terrain::region_grid(seed);
+    approach_tile_in(regions, crate::terrain::region_at(seed, from.x, from.y), passable, from, to, radius)
+}
+
+/// `approach_tile` over an explicit region labelling — the domain-agnostic form.
+/// The land wrapper above passes the walking regions; a hull passes the water
+/// bodies. Taking the labelling as a parameter is what keeps the pathfinder from
+/// knowing that a domain exists at all.
+pub fn approach_tile_in<P: Fn(i32, i32) -> bool>(
+    grid: &[u16],
+    region: u16,
+    passable: &P,
+    from: V2,
+    to: V2,
+    radius: i32,
+) -> Option<V2> {
     if region == u16::MAX {
         return None;
     }
-    let grid = crate::terrain::region_grid(seed);
     let (tx, ty) = (floor_i(to.x), floor_i(to.y));
     let half = crate::fx!("0.5");
     let mut best: Option<(Fx, Fx, V2)> = None;
@@ -281,7 +295,12 @@ pub fn line_of_sight<P: Fn(i32, i32) -> bool>(passable: &P, a: V2, b: V2) -> boo
 /// Corner-safe straight-line clearance via DDA grid traversal: the segment
 /// enters no blocked tile AND never slips diagonally between two blocked tiles
 /// (A*'s diagonal corner rule).
-fn clear_straight_line<P: Fn(i32, i32) -> bool>(passable: &P, a: V2, b: V2) -> bool {
+///
+/// This is what `line_of_sight` is NOT. That one samples the segment twice a
+/// tile, so a leg that clips the corner of a tile between two samples reads as
+/// clear — invisible when a man shaves a wall, a boat on a hillside when a hull
+/// shaves a headland.
+pub fn clear_straight_line<P: Fn(i32, i32) -> bool>(passable: &P, a: V2, b: V2) -> bool {
     let mut cx = floor_i(a.x);
     let mut cy = floor_i(a.y);
     let ex = floor_i(b.x);
@@ -342,6 +361,31 @@ fn clear_straight_line<P: Fn(i32, i32) -> bool>(passable: &P, a: V2, b: V2) -> b
         }
     }
     true
+}
+
+/// How a smoothed leg is cleared, and therefore how much of a tile a mover is
+/// allowed to shave. The pathfinder still knows nothing about domains: this is
+/// a property of the CALLER's tolerance, not of the ground.
+///
+/// `Sampled` is what every land march in the game has always used — two samples
+/// a tile, so clipping the corner of a wall for a tenth of a tile reads as clear.
+/// `Exact` is the DDA, and a hull needs it: `movement` walks whatever waypoints
+/// it is handed with no terrain test at all, so that same tenth of a tile is a
+/// boat standing on a headland.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum Smoothing {
+    #[default]
+    Sampled,
+    Exact,
+}
+
+impl Smoothing {
+    fn clears<P: Fn(i32, i32) -> bool>(self, passable: &P, a: V2, b: V2) -> bool {
+        match self {
+            Smoothing::Sampled => line_of_sight(passable, a, b),
+            Smoothing::Exact => clear_straight_line(passable, a, b),
+        }
+    }
 }
 
 /// Reusable A* working buffers with generation stamps for O(1) reset between
@@ -412,6 +456,26 @@ impl AStar {
         ty: Fx,
         max_expansions: usize,
     ) -> Vec<V2> {
+        self.find_path_costed_in(passable, step_cost, sx, sy, tx, ty, max_expansions, Smoothing::Sampled)
+    }
+
+    /// `find_path_costed` under an explicit clearance rule. Every waypoint leg,
+    /// INCLUDING the tail onto the caller's raw target, is measured the way the
+    /// caller asks — a mover that cannot survive standing on a blocked tile has
+    /// to get that guarantee from the path itself, because nothing downstream
+    /// re-tests it. `Domain::smoothing()` is the one place that decides which.
+    #[allow(clippy::too_many_arguments)]
+    pub fn find_path_costed_in<P: Fn(i32, i32) -> bool, C: Fn(i32, i32) -> Fx>(
+        &mut self,
+        passable: &P,
+        step_cost: &C,
+        sx: Fx,
+        sy: Fx,
+        tx: Fx,
+        ty: Fx,
+        max_expansions: usize,
+        smoothing: Smoothing,
+    ) -> Vec<V2> {
         let s = nearest_passable_grid(passable, sx, sy);
         let goal = nearest_passable_grid(passable, tx, ty);
         let sx_t = floor_i(s.x);
@@ -419,14 +483,30 @@ impl AStar {
         let gx_t = floor_i(goal.x);
         let gy_t = floor_i(goal.y);
 
+        // The raw target is what the caller asked for and it is not required to
+        // be passable — `nearest_passable_grid` is what makes the SEARCH legal.
+        // Under `Exact` the last hop onto it is measured like every other leg,
+        // and refused down to the snapped point when it does not clear.
+        // Sampled hands the raw target back unconditionally, exactly as it always
+        // has: a land march that ends a tenth of a tile inside a wall is the
+        // behaviour every existing path in the game is measured against.
+        let raw = V2::new(tx, ty);
+        let tail = |from: V2, snapped: V2| -> V2 {
+            match smoothing {
+                Smoothing::Sampled => raw,
+                Smoothing::Exact if clear_straight_line(passable, from, raw) => raw,
+                Smoothing::Exact => snapped,
+            }
+        };
+
         if sx_t == gx_t && sy_t == gy_t {
-            return vec![V2::new(tx, ty)];
+            return vec![tail(s, goal)];
         }
         if !passable(sx_t, sy_t) || !passable(gx_t, gy_t) {
             return Vec::new();
         }
         if clear_straight_line(passable, s, goal) {
-            return vec![V2::new(tx, ty)];
+            return vec![tail(s, goal)];
         }
 
         self.cur_gen = self.cur_gen.wrapping_add(1);
@@ -517,16 +597,20 @@ impl AStar {
         }
         tiles.reverse();
 
-        // string-pull
+        // string-pull. `a` always keeps a cleared line to `tiles[i]`, so after
+        // the loop it clears the goal tile's own centre — which is what the tail
+        // falls back to when the raw target itself cannot be reached straight.
         let mut out: Vec<V2> = Vec::new();
         let mut a = s;
         for i in 1..tiles.len() {
-            if !line_of_sight(passable, a, tiles[i]) {
+            if !smoothing.clears(passable, a, tiles[i]) {
                 out.push(tiles[i - 1]);
                 a = tiles[i - 1];
             }
         }
-        out.push(V2::new(tx, ty));
+        // `out` only ever holds `tiles[..len-1]`, so the goal centre is never
+        // already on it and this can never duplicate a waypoint.
+        out.push(tail(a, tiles[tiles.len() - 1]));
         out
     }
 }
@@ -640,6 +724,37 @@ mod tests {
         assert_eq!(floor_i(full.at.x), 120);
         // and the retained buffers survive back-to-back searches
         assert!(crate::math::dist2(short.at, full.at) > crate::math::dist2(full.at, full.at));
+    }
+
+    #[test]
+    fn approach_tile_serves_a_domain_it_has_never_heard_of() {
+        // Two "water bodies" split by a dry isthmus at x==20, and a hull in the
+        // left one asked to work a node on the far side of the isthmus. The
+        // pathfinder must answer out of the labelling it was HANDED — it used to
+        // look up the land regions behind the caller's back, which handed a hull
+        // u16::MAX and an instant None.
+        let sea = |x: i32, y: i32| (0..W).contains(&x) && (0..W).contains(&y) && x != 20;
+        let mut grid = vec![u16::MAX; N_CELLS];
+        for y in 0..W {
+            for x in 0..W {
+                if !sea(x, y) {
+                    continue;
+                }
+                grid[idx(x, y)] = if x < 20 { 0 } else { 1 };
+            }
+        }
+        let from = V2::new(crate::fx!("10.5"), crate::fx!("10.5"));
+        let near = V2::new(crate::fx!("15.5"), crate::fx!("10.5"));
+        let across = V2::new(crate::fx!("30.5"), crate::fx!("10.5"));
+
+        let hull = approach_tile_in(&grid, 0, &sea, from, near, 4).expect("own body");
+        assert_eq!((floor_i(hull.x), floor_i(hull.y)), (15, 10));
+        // the far body is legal water and still not this hull's water
+        let blocked = approach_tile_in(&grid, 0, &sea, from, across, 4);
+        assert!(blocked.is_none(), "a hull reached across an isthmus: {blocked:?}");
+        assert!(approach_tile_in(&grid, 1, &sea, across, across, 4).is_some());
+        // a hull sitting on dry land belongs to no body at all
+        assert!(approach_tile_in(&grid, u16::MAX, &sea, from, near, 4).is_none());
     }
 
     #[test]

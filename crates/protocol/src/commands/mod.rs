@@ -17,7 +17,7 @@ pub(crate) use build_cmds::{
     upgrade_building,
 };
 pub(crate) use economy_cmds::{market_buy_cmd, market_trade, start_research};
-pub(crate) use garrison_cmds::{garrison, ungarrison};
+pub(crate) use garrison_cmds::{disembark, embark, garrison, ungarrison};
 pub(crate) use unit_cmds::{assign_idle_gatherers, group_attack, group_move, move_unit};
 pub use unit_cmds::path_to;
 
@@ -66,6 +66,14 @@ pub enum PlayerCommand {
     AttackMove { player_id: u64, units: Vec<u64>, target: V2, formation: u8 },
     GroupAttack { player_id: u64, units: Vec<u64>, target: u64 },
     Stop { player_id: u64, units: Vec<u64> },
+    /// Load a landing party. Cargo is `Unit::garrisoned_in` pointed at a HULL
+    /// instead of a hall: already serialized, already hashed, already skipped by
+    /// movement and combat. Its own verb rather than `Garrison` because that one
+    /// demands a `Building` row and a kind the tower rules admit.
+    Embark { player_id: u64, units: Vec<u64>, boat: u64 },
+    /// Put the party ashore on the legal land nearest `target`. No harbour is
+    /// needed at the far end — that is the whole point of a beach landing.
+    Disembark { player_id: u64, boat: u64, target: V2 },
 }
 
 #[derive(Resource, Default)]
@@ -163,6 +171,12 @@ pub fn apply_commands(world: &mut World) {
             }
             PlayerCommand::Stop { player_id, units } => {
                 unit_cmds::stop(world, player_id, &units)
+            }
+            PlayerCommand::Embark { player_id, units, boat } => {
+                garrison_cmds::embark(world, player_id, &units, boat)
+            }
+            PlayerCommand::Disembark { player_id, boat, target } => {
+                garrison_cmds::disembark(world, player_id, boat, target)
             }
         }
     }
