@@ -17,6 +17,9 @@ struct Peer {
     app: App,
     driver: LockstepDriver,
     transport: MemTransport,
+    /// tick -> hash, so a reply can be checked against the world AS IT STOOD
+    /// when it was served rather than where the loop has since got to.
+    history: std::collections::HashMap<u64, u64>,
 }
 
 impl Peer {
@@ -32,6 +35,7 @@ impl Peer {
                 app,
                 driver: LockstepDriver::new(player, 2),
                 transport: MemTransport::new(relay),
+                history: std::collections::HashMap::new(),
             },
             port,
         )
@@ -50,6 +54,7 @@ impl Peer {
         }
         self.driver.advance(self.app.world_mut(), &mut self.transport);
         devctl::capture_feedback(self.app.world_mut());
+        self.history.insert(self.driver.tick, self.hash());
     }
 
     fn hash(&self) -> u64 {
@@ -291,6 +296,123 @@ fn a_refusal_says_why() {
     assert!(again["feedback"].as_array().expect("a list").is_empty(), "drained once: {again}");
 }
 
+#[test]
+fn the_state_capture_holds_the_whole_match() {
+    let seed = 1;
+    let (cx, cy) = land_block(seed);
+    let (mut peer, port) = Peer::new(1, shared_relay(vec![1]), seed, true);
+    let mut client = Client::new(port);
+    let keep = tile(cx + 2, cy + 2);
+    found_player(&mut peer, 1, keep);
+    peer.app.world_mut().spawn((
+        GameId(500),
+        MatchId(1),
+        Pos { pos: tile(cx + 6, cy + 6), facing: Fx::ZERO },
+        ResourceNode::deposit(saladin_sim::ResourceType::Wood, 120),
+    ));
+
+    let reply =
+        ask(&mut peer, &mut client, json!({"cmd": {"Train": {"player_id": 1, "kind": "Spearman"}}}));
+    assert_eq!(reply["ok"], json!(true), "{reply}");
+    for _ in 0..400 {
+        peer.tick();
+    }
+
+    let s = ask(&mut peer, &mut client, json!({"query": "state"}));
+    assert_eq!(s["ok"], json!(true), "{s}");
+    let at = s["tick"].as_u64().expect("the capture is stamped");
+    assert!(at >= 400, "the capture must be of the match that ran");
+    assert_eq!(
+        s["hash"].as_u64(),
+        peer.history.get(&at).copied(),
+        "every capture pins determinism: its hash must be the hash of its own tick"
+    );
+    assert_eq!(s["seed"], json!(seed));
+
+    let units = s["units"].as_array().expect("units");
+    let man = units.iter().find(|u| u["kind"] == json!("Spearman")).expect("the trained man");
+    assert_eq!(man["owner"], json!(1));
+    assert_eq!(man["role"], json!("Foot"));
+    assert_eq!(man["domain"], json!("Land"));
+    assert!(man["hp"].as_i64().expect("hp") > 0);
+    assert_eq!(man["max_hp"], json!(saladin_sim::unit_def(UnitKind::Spearman).max_hp));
+    assert_eq!(man["pos"].as_array().expect("pos").len(), 2);
+    assert!(man["stance"].is_string() && man["order"].is_string());
+
+    let bs = s["buildings"].as_array().expect("buildings");
+    let barracks = bs.iter().find(|b| b["id"] == json!(201)).expect("the barracks");
+    assert_eq!(barracks["kind"], json!("Barracks"));
+    assert_eq!(barracks["complete"], json!(true));
+    assert_eq!(barracks["state"], json!("Complete"));
+    assert!(barracks["queue"].is_array() && barracks["max_hp"].as_i64().expect("max_hp") > 0);
+
+    let node = s["nodes"].as_array().expect("nodes").iter().find(|n| n["id"] == json!(500));
+    let node = node.expect("the timber");
+    assert_eq!(node["res"], json!("Wood"));
+    assert_eq!(node["cap"], json!(120));
+    assert_eq!(node["reapable"], json!(true));
+    assert_eq!(node["field_of"], Value::Null);
+
+    let me = s["players"].as_array().expect("players")[0].clone();
+    assert_eq!(me["player_id"], json!(1));
+    assert_eq!(me["faction"], json!("Ayyubid"));
+    assert!(me["stock"]["food"].as_i64().expect("food") > 0);
+    assert!(me["pop"].as_i64().expect("pop") >= 1);
+    assert_eq!(me["pop_cap"], json!(saladin_sim::building_def(BuildingKind::Keep).pop));
+    assert_eq!(me["stats"]["trained"], json!(1));
+    assert_eq!(me["bot"], Value::Null);
+
+    // ids come out sorted, because an agent diffs two captures
+    let ids: Vec<u64> = bs.iter().map(|b| b["id"].as_u64().expect("id")).collect();
+    let mut sorted = ids.clone();
+    sorted.sort_unstable();
+    assert_eq!(ids, sorted);
+}
+
+#[test]
+fn a_scoped_capture_answers_only_what_was_asked() {
+    let seed = 1;
+    let (cx, cy) = land_block(seed);
+    let (mut peer, port) = Peer::new(1, shared_relay(vec![1]), seed, true);
+    let mut client = Client::new(port);
+    found_player(&mut peer, 1, tile(cx + 2, cy + 2));
+    found_player(&mut peer, 2, tile(cx + 2, cy + 6));
+
+    let only = ask(&mut peer, &mut client, json!({"query": "state", "kinds": ["buildings"]}));
+    assert!(only["buildings"].is_array(), "{only}");
+    for absent in ["units", "nodes", "players", "matches"] {
+        assert_eq!(only[absent], Value::Null, "{absent} was not asked for: {only}");
+    }
+    assert!(only["hash"].is_number(), "hash rides on every capture: {only}");
+
+    let mine = ask(
+        &mut peer,
+        &mut client,
+        json!({"query": "state", "kinds": ["buildings", "players"], "player": 2}),
+    );
+    let owners: Vec<Value> =
+        mine["buildings"].as_array().expect("buildings").iter().map(|b| b["owner"].clone()).collect();
+    assert_eq!(owners, vec![json!(2), json!(2)], "{mine}");
+    assert_eq!(mine["players"].as_array().expect("players").len(), 1);
+
+    let near = ask(
+        &mut peer,
+        &mut client,
+        json!({"query": "state", "kinds": ["buildings"],
+               "near": {"pos": [cx + 2, cy + 2], "radius": 3.5}}),
+    );
+    let ids: Vec<u64> = near["buildings"]
+        .as_array()
+        .expect("buildings")
+        .iter()
+        .map(|b| b["id"].as_u64().expect("id"))
+        .collect();
+    assert_eq!(ids, vec![101, 201], "only player 1's pair is within 3.5 tiles: {near}");
+
+    let bad = ask(&mut peer, &mut client, json!({"query": "state", "kinds": ["dragons"]}));
+    assert_eq!(bad["ok"], json!(false), "{bad}");
+}
+
 /// THE test. A devctl-driven peer and an untouched one, same match, 1200 ticks:
 /// if injection went anywhere but the lockstep stream, these hashes part.
 #[test]
@@ -308,20 +430,16 @@ fn a_devctl_driven_peer_stays_hash_identical_to_a_plain_one() {
     }
 
     // The two drivers run a tick apart (each stalls until the other has
-    // submitted), so the comparison is per TICK NUMBER, not per round.
-    let mut seen: std::collections::HashMap<u64, u64> = std::collections::HashMap::new();
+    // submitted), so the comparison is per TICK NUMBER, not per round — a
+    // per-round compare is vacuous, it never fires.
     let mut compared = 0u32;
-    let both = |driven: &mut Peer,
-                plain: &mut Peer,
-                seen: &mut std::collections::HashMap<u64, u64>,
-                compared: &mut u32| {
+    let both = |driven: &mut Peer, plain: &mut Peer, compared: &mut u32| {
         driven.tick();
-        if let Some(&h) = seen.get(&driven.driver.tick) {
+        if let Some(&h) = plain.history.get(&driven.driver.tick) {
             assert_eq!(driven.hash(), h, "peers parted at tick {}", driven.driver.tick);
             *compared += 1;
         }
         plain.tick();
-        seen.insert(plain.driver.tick, plain.hash());
     };
 
     let orders = [
@@ -344,7 +462,7 @@ fn a_devctl_driven_peer_stays_hash_identical_to_a_plain_one() {
         {
             sent = Some(client.send(order));
         }
-        both(&mut driven, &mut plain, &mut seen, &mut compared);
+        both(&mut driven, &mut plain, &mut compared);
         if let Some(reply) = client.try_recv() {
             assert_eq!(reply["id"], json!(sent.take().expect("a reply needs a request")));
             assert_eq!(reply["ok"], json!(true), "{reply}");
@@ -353,7 +471,7 @@ fn a_devctl_driven_peer_stays_hash_identical_to_a_plain_one() {
 
     assert!(driven.driver.tick >= 1200, "the match must actually have run");
     assert!(compared >= 1200, "only {compared} ticks were actually compared");
-    assert_eq!(driven.hash(), seen[&driven.driver.tick]);
+    assert_eq!(driven.hash(), plain.history[&driven.driver.tick]);
     // The two camps stand within reach of each other, so by tick 1200 the men
     // the socket raised have already fought and died — the running tally is
     // what proves the orders landed.
