@@ -337,8 +337,13 @@ fn buildings(world: &World, scope: &Scope) -> Vec<Value> {
                     "state": b.state,
                     "complete": b.complete(),
                     // `work` IS the fraction of the job done (`work_step`
-                    // returns a share of `build_time`), so it needs no scaling.
-                    "progress": fx_json(b.work),
+                    // returns a share of `build_time`), so it needs no
+                    // scaling — but a finished building banks no more of it,
+                    // and reporting a topped-out keep as 0.00 reads as broken.
+                    "progress": fx_json(match b.state {
+                        saladin_sim::BuildState::Complete => Fx::ONE,
+                        _ => b.work,
+                    }),
                     "builders": b.builders,
                     "target_kind": b.target_kind,
                     "queue": b.queued()
