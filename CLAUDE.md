@@ -59,7 +59,7 @@ crates/
 ## Commands
 
 ```bash
-cargo test --workspace                 # 475 tests, all must stay green
+cargo test --workspace                 # 492 tests, all must stay green
 cargo run -p saladin-client --bin saladin-client          # single player
 cargo run -p saladin-client --bin saladin-client connect <ip>   # dev shortcut (menus cover all MP flows)
 cargo run -p saladin-server                                # internet relay (rooms) — VPS docs: crates/server/README.md
@@ -143,6 +143,14 @@ uv run scripts/bake_voices.py          # Chatterbox TTS bark bake -> assets/voic
    # (view_size, min 4 = close-up model inspection), SALADIN_YAW,
    # SALADIN_PERF=1 (starts the F3 frame-time overlay on, so a shot can be
    # read as a benchmark).
+
+cargo run -p saladin-protocol --bin saladin-headless -- --port 7777 --seed 4
+                                       # THE SIM WITH NO WINDOW on a scripted
+                                       # clock: nothing moves until {"step": N}
+                                       # grants ticks. --free runs it flat out.
+python3 scripts/playtest.py --port 7777 [--record f] [--replay f] [--shot png]
+                                       # an agent playing a whole match over
+                                       # devctl: base, army, march, assert
 ```
 
 Multiplayer (all menu-driven; protocol v2 handshake rejects mismatched builds):
@@ -161,6 +169,53 @@ Lockstep = inputs only on the wire; client count barely affects cost. TCP is
 intentional (lockstep needs reliable+ordered; UDP buys nothing at 20 Hz).
 `net_ws.rs` (ewebsock) shares the same wire protocol for a future browser
 build but has a known client-side stall — unused.
+
+## devctl: driving the game from outside (protocol/src/devctl/)
+
+`SALADIN_DEVCTL=<port>` opens a line-delimited JSON socket so a script or an
+agent plays the game and reads it back. Unset: no listener, no systems, no
+cost. Full protocol table in the README; two rules govern every change here.
+
+1. **WRITES GO THROUGH `PlayerCommand`, NEVER THROUGH `World`.** A request
+   parses into a command and lands in `Devctl::outbox`, which the host drains
+   into its lockstep driver beside the local player's clicks. That is the only
+   reason this is multiplayer-safe, and
+   `tests/devctl.rs::a_devctl_driven_peer_stays_hash_identical_to_a_plain_one`
+   is the proof — two peers, one driven over the socket, hashes compared on
+   every one of 1200+ ticks. Compare PER TICK NUMBER: the two drivers run a
+   tick apart (each stalls until the other has submitted), so a per-round
+   compare never fires and passes vacuously.
+   A debug action with no command (spawn ten knights) needs a NEW variant
+   APPENDED (bincode encodes the index), `PROTOCOL_VERSION` bumped, and a gate
+   in SIM STATE — an env-var gate means the peer without it refuses what the
+   devctl peer applied, which is a desync. None exists today.
+2. **READS NEVER MUTATE.** `state.rs` goes through `World::try_query`, which
+   takes `&World`; the ordinary `world.query()` wants `&mut World` and a read
+   that can mutate is a read that can desync. A component nothing has spawned
+   reads as an empty list. Rows come out sorted by `GameId` — archetype order
+   is not stable enough to diff two captures against, and diffing is the point.
+
+The one thing devctl keeps of its own is a mirror of `CommandFeedback`:
+`apply_commands` clears it EVERY TICK, so a host that runs 600 ticks between
+polls must call `capture_feedback` after each one or a script only ever sees
+the last tick's refusals. Never part of the state hash (the `ShotEvents` rule).
+
+`Fx` crosses the wire as a plain decimal parsed digit by digit.
+`Fx::from_num(f64)` would do it in one line and put a float in the protocol
+crate. Output is f64 and read by nothing.
+
+`command_to_json`'s match is exhaustive: a new `PlayerCommand` variant breaks
+the build there, which is what keeps the parser and `COMMAND_NAMES` honest.
+
+Hosts wire it in three lines — publish `DevctlLink` (submit tick, may_step,
+renders), drain `take_outbox` into the driver, `capture_feedback` after each
+tick. `step` is HEADLESS ONLY (`may_step`); in a client, time belongs to the
+fixed-update clock and in a match to the lockstep group. Screenshots are the
+client's half (`client/src/devctl_client.rs`): the reply is completed INSIDE
+the capture observer, after the PNG is written, so a script never races a
+half-written file. `{"camera": ...}` uses `camera::snap_to_targets` —
+`smooth_camera` early-returns once live == target, so assigning both and
+shooting leaves the transform where it was.
 
 ## Worldgen (sim/plates.rs -> climate.rs -> worldgrid.rs)
 
