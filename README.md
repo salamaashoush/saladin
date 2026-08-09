@@ -67,6 +67,10 @@ echoed back so a client can multiplex.
 | `{"cmd": {"Train": {"player_id": 1, "kind": "Spearman"}}}` | `{"ok": true, "applied_tick": 4822}` |
 | `{"query": "tick"}` | tick, hash, seed, paused, and what this host allows |
 | `{"query": "state", "kinds": ["units"], "player": 1, "near": {"pos": [120, 80], "radius": 30}}` | the match as JSON |
+| `{"query": "probe", "player": 1, "kind": "Farm", "near": [120, 80], "radius": 6}` | would this placement be accepted, and if not why — a dry run, no tick and no cost |
+| `{"query": "path", "unit": 7, "to": [120, 80]}` | can this unit walk there, by the closure `movement` itself builds |
+| `{"query": "terrain", "near": [120, 80], "radius": 14, "player": 1}` | the ground as the sim sees it, drawn, with that player's builder reach overlaid |
+| `{"query": "invariants"}` | everything that must never be true, checked in one pass |
 | `{"step": 60}` | replies once the 60 ticks have run (headless only) |
 | `{"feedback": true}` | every refusal since the last call, with its `PlaceError` |
 | `{"screenshot": "/tmp/x.png", "camera": {"pos": [120, 80], "zoom": 6, "yaw": 2}}` | replies once the PNG is on disk |
@@ -99,6 +103,17 @@ script would otherwise never learn why its order was refused.
 fixed-update clock, and in a match to the lockstep group; `{"query": "tick"}`
 reports `may_step` so a script can tell. There is no `wait` verb — poll with
 `step` plus a query, which is what `Devctl.advance()` in the driver does.
+
+`scripts/soak.py` runs bot matches across seeds and presets and asks
+`invariants` after every chunk, plus the things only a watcher can see — a
+foundation with a crew that banks no work, a town standing idle. A finding must
+survive a second look twenty ticks later before it is printed: the sim is a
+state machine mid-stride, and a checker that cries wolf gets ignored.
+
+```bash
+python3 scripts/soak.py --seeds 10 --minutes 12            # Continental
+python3 scripts/soak.py --seeds 6 --minutes 12 --preset 3  # Archipelago
+```
 
 `scripts/devctl.py` is the driver: typed command builders, attribute access
 over the capture, reconnect on a dropped socket, and `record()`/`replay()` —

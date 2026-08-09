@@ -151,6 +151,15 @@ cargo run -p saladin-protocol --bin saladin-headless -- --port 7777 --seed 4
 python3 scripts/playtest.py --port 7777 [--record f] [--replay f] [--shot png]
                                        # an agent playing a whole match over
                                        # devctl: base, army, march, assert
+python3 scripts/soak.py --seeds 10 --minutes 12 [--preset n]
+                                       # THE BUG HUNT: bot matches across seeds,
+                                       # asking {"query":"invariants"} every 400
+                                       # ticks plus a watcher's checks (a site
+                                       # banking no work, a town standing idle).
+                                       # A finding must survive a second look 20
+                                       # ticks later or it is the sim mid-stride,
+                                       # not a bug. It found the river-walking,
+                                       # corpse-chasing and self-walling bugs.
 ```
 
 Multiplayer (all menu-driven; protocol v2 handshake rejects mismatched builds):
@@ -206,6 +215,15 @@ crate. Output is f64 and read by nothing.
 
 `command_to_json`'s match is exhaustive: a new `PlayerCommand` variant breaks
 the build there, which is what keeps the parser and `COMMAND_NAMES` honest.
+
+Beyond `state`, four read-only instruments, and they are how the last four bugs
+were found: `probe` dry-runs a placement through `BuildContext::check` (the
+command's OWN gathering, so a probe cannot answer differently from the order it
+stands in for), `path` answers reachability with the closure `movement` builds,
+`terrain` draws the ground with a player's builder reach overlaid, and
+`invariants` checks everything that must never be true. `path` allocates its own
+`AStar`/`Flood` rather than borrowing `PathScratch` — a query that writes a sim
+resource is a query that can desync.
 
 Hosts wire it in three lines — publish `DevctlLink` (submit tick, may_step,
 renders), drain `take_outbox` into the driver, `capture_feedback` after each
