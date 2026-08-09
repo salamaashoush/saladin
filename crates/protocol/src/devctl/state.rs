@@ -510,24 +510,33 @@ fn path(world: &World, req: &Map<String, Value>) -> Result<Value, String> {
         reach_budget(saladin_sim::dist(from, to)),
     );
     let truncated = reach.as_ref().map(|r| r.truncated);
-    let snap = approach_tile(seed, &passable, from, to, 3).or(reach.map(|r| r.at));
-    let route = match snap {
-        Some(s) => {
-            let cost = |tx: i32, ty: i32| move_cost_at(seed, tx, ty);
-            let mut astar = AStar::default();
-            astar.find_path_costed_in(
-                &passable,
-                &cost,
-                from.x,
-                from.y,
-                s.x,
-                s.y,
-                MAX_EXPANSIONS,
-                domain.smoothing(),
-            )
-        }
-        None => Vec::new(),
+    let mut astar = AStar::default();
+    let cost = |tx: i32, ty: i32| move_cost_at(seed, tx, ty);
+    let mut route_to = |s: V2| {
+        astar.find_path_costed_in(
+            &passable,
+            &cost,
+            from.x,
+            from.y,
+            s.x,
+            s.y,
+            MAX_EXPANSIONS,
+            domain.smoothing(),
+        )
     };
+    // `walk_to`'s two-step, and for the same reason: the tidy approach tile can
+    // be a dead end, and an instrument that reports the dead end as "no route"
+    // sends its reader hunting a bug the game does not have. This one did,
+    // for an hour.
+    let tidy = approach_tile(seed, &passable, from, to, 3);
+    let mut snap = tidy;
+    let mut route = tidy.map(&mut route_to).unwrap_or_default();
+    if route.is_empty()
+        && let Some(r) = reach
+    {
+        snap = Some(r.at);
+        route = route_to(r.at);
+    }
     Ok(json!({
         "unit": unit,
         "from": v2_json(from),

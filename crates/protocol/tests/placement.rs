@@ -600,7 +600,7 @@ fn founding_never_walls_your_own_people_in() {
     assert_eq!(why, vec![PlaceError::NoApproach]);
 
     // with nobody in the alcove the same placement is fine
-    let out = center(cx + 1, cy + 4);
+    let out = center(cx + 2, cy + 2);
     {
         let world = app.world_mut();
         let mut q = world.query::<(&GameId, &mut Pos)>();

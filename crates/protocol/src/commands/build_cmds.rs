@@ -383,10 +383,10 @@ impl BuildContext {
     }
 }
 
-/// Tiles a pocket may hold before it stops being a pocket. A courtyard your
-/// own town encloses is bigger than this; the traps the bots build are two and
-/// three tiles across.
-const POCKET_MAX: usize = 32;
+/// Ground the cut-off test may walk before it gives up and allows the
+/// placement. A man this far from his own hall is not sealed in by one
+/// footprint.
+const CUTOFF_FLOOD_MAX: usize = 4096;
 
 /// Would raising this footprint wall the owner's own people in?
 ///
@@ -395,6 +395,12 @@ const POCKET_MAX: usize = 32;
 /// standing in two-tile pockets for the rest of the match: nothing crushes
 /// them, nothing tells them, and an A* out of a sealed pocket simply returns
 /// nothing every time they are asked to work.
+///
+/// The question is CUT OFF FROM THE TOWN, not "in a small pocket". A size
+/// threshold was tried first and is wrong in both directions: at 96 tiles it
+/// refused ordinary farms, and at 32 it let Continental seed 22 seal nine
+/// peasants into a bay bigger than that. So the flood runs until it reaches an
+/// anchor the owner already holds.
 ///
 /// One bounded flood per FOUNDING — not per candidate. `place_near` probes a
 /// perimeter every decision window and a search per probe cost 28% of the sim
@@ -419,6 +425,40 @@ fn seals_own_units(
     };
     let centre = footprint_center(def.footprint, pos.x, pos.y);
     let near = Fx::from_num(def.footprint + 4);
+    // The KEEP is the town, and reaching it is what "still one of mine" means.
+    // Any owned building will not do: the walls that seal a man in are owned
+    // buildings too, and standing beside one of them is not connectivity.
+    let keep = {
+        let mut pq = match world.try_query::<&Player>() {
+            Some(q) => q,
+            None => return false,
+        };
+        let id = pq.iter(world).find(|p| p.player_id == owner).map(|p| p.keep).unwrap_or(0);
+        let mut bq = match world.try_query::<(&GameId, &Owner, &Pos, &Building)>() {
+            Some(q) => q,
+            None => return false,
+        };
+        let named = bq.iter(world).find(|(g, _, _, _)| g.0 == id && id != 0).map(|(_, _, p, _)| p.pos);
+        // a hand-built world (every test) leaves `Player.keep` at 0; the hall
+        // itself is still the town
+        match named.or_else(|| {
+            bq.iter(world)
+                .filter(|(_, o, _, b)| o.0 == owner && b.kind == BuildingKind::Keep)
+                .min_by_key(|(g, _, _, _)| g.0)
+                .map(|(_, _, p, _)| p.pos)
+        }) {
+            Some(p) => p,
+            None => return false,
+        }
+    };
+    let touch = saladin_sim::fx!("3.5");
+    let arrived = |tx: i32, ty: i32| {
+        let c = V2::new(
+            Fx::from_num(tx) + saladin_sim::fx!("0.5"),
+            Fx::from_num(ty) + saladin_sim::fx!("0.5"),
+        );
+        dist(c, keep) <= touch
+    };
 
     let Some(mut q) = world.try_query::<(&Owner, &Pos, &Unit)>() else { return false };
     for (o, p, u) in q.iter(world) {
@@ -439,9 +479,14 @@ fn seals_own_units(
         let mut queue = vec![(ux, uy)];
         seen.insert(tile_key(ux, uy));
         let mut head = 0;
-        while head < queue.len() && seen.len() < POCKET_MAX {
+        let mut home = false;
+        while head < queue.len() && seen.len() < CUTOFF_FLOOD_MAX {
             let (tx, ty) = queue[head];
             head += 1;
+            if arrived(tx, ty) {
+                home = true;
+                break;
+            }
             for (dx, dy) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
                 let (nx, ny) = (tx + dx, ty + dy);
                 if open(nx, ny) && seen.insert(tile_key(nx, ny)) {
@@ -449,7 +494,9 @@ fn seals_own_units(
                 }
             }
         }
-        if seen.len() < POCKET_MAX {
+        // ran out of ground to search: too far from anything to be sealed by one
+        // footprint, so let it stand
+        if !home && seen.len() < CUTOFF_FLOOD_MAX {
             return true;
         }
     }
@@ -752,6 +799,13 @@ pub(crate) fn place_wall(world: &mut World, owner: u64, tiles: &[(i32, i32)], bu
             continue;
         }
         let c = footprint_center(def.footprint, x, y);
+        // A WALL is the classic sealer, and a drag lays a whole line of them.
+        // Continental seed 22: the bot's own line closed on nine of its fifteen
+        // peasants at tick 10400 and they never worked again.
+        if seals_own_units(world, &ctx, owner, seed, BuildingKind::Wall, c) {
+            continue;
+        }
+        shove_clear(world, owner, seed, BuildingKind::Wall, c);
         let id = spawn::spawn_building(world, owner, BuildingKind::Wall, c, ctx.match_id, state);
         if first == 0 {
             first = id;

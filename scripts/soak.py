@@ -74,20 +74,34 @@ def confirmed(g: Devctl, settle: int = 20) -> list[dict]:
     return [v for k, v in first.items() if k in again]
 
 
-def idle_hands(g: Devctl, players: list[int]) -> list[tuple[str, str]]:
+def idle_hands(g: Devctl, players: list[int], memory: dict) -> list[tuple[str, str]]:
     """Half a town standing still with nothing to do is not a strategy — for a
     BOT. The scripted seat has no brain and nobody driving it, so its peasants
-    are idle by definition and flagging them is noise."""
+    are idle by definition and flagging them is noise.
+
+    It has to LAST. A bot re-rations its workforce on the brain beat and the
+    handoff leaves a trough; measured on Continental seed 22, nine of fifteen
+    hands stood idle and were all back at work within thirty seconds of game
+    time. A minute over the line is a stalled economy; one chunk is a shift
+    change.
+    """
     out = []
     for p in players:
         peasants = g.state(kinds=["units"], player=p).units_of(p, "Peasant")
         if len(peasants) < 4:
+            memory.pop(p, None)
             continue
         idle = [u for u in peasants if u.gather_state == "Idle" and not u.job_site]
-        if len(idle) * 2 > len(peasants):
+        if len(idle) * 2 <= len(peasants):
+            memory.pop(p, None)
+            continue
+        run = memory.get(p, 0) + 1
+        memory[p] = run
+        if run == 3:
             out.append((
                 "town standing idle",
-                f"player {p}: {len(idle)} of {len(peasants)} peasants idle, ids {[u.id for u in idle][:6]}",
+                f"player {p}: {len(idle)} of {len(peasants)} peasants idle for a minute, "
+                f"ids {[u.id for u in idle][:6]}",
             ))
     return out
 
@@ -103,6 +117,7 @@ def soak(seed: int, preset: int, ticks: int, port: int, verbose: bool) -> list[F
     try:
         g = wait_for(port, seconds=60)
         sites: dict = {}
+        idlers: dict = {}
         seen_rules: set[str] = set()
         while True:
             info = g.step(CHUNK)
@@ -114,7 +129,7 @@ def soak(seed: int, preset: int, ticks: int, port: int, verbose: bool) -> list[F
                 seen_rules.add(key)
                 found.append(Finding(seed, preset, tick, v["rule"], f"row {v['id']}: {v['detail']}"))
             players = [p.player_id for p in g.state(kinds=["players"]).players if p.bot]
-            for rule, detail in stalled_sites(g, sites) + idle_hands(g, players):
+            for rule, detail in stalled_sites(g, sites) + idle_hands(g, players, idlers):
                 if rule in seen_rules:
                     continue
                 seen_rules.add(rule)
