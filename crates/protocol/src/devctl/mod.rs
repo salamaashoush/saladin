@@ -360,8 +360,10 @@ fn inject(world: &mut World, v: &Value, reply: Reply) {
 fn step_req(world: &mut World, v: &Value, reply: Reply) {
     let link = *world.resource::<DevctlLink>();
     if !link.may_step {
-        return reply
-            .err("step is single-player/headless only: in a match, time belongs to the lockstep clock");
+        return reply.err(
+            "step is headless-only: a running client's time belongs to its own clock, and in a \
+             match to the lockstep group",
+        );
     }
     let Some(ticks) = v.as_u64() else {
         return reply.err("step takes a tick count");

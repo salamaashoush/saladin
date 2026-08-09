@@ -10,6 +10,7 @@ mod audio;
 mod camera;
 mod config;
 mod dev;
+mod devctl_client;
 mod environment;
 mod fx;
 mod input;
@@ -41,8 +42,8 @@ pub struct LocalInput(pub Vec<PlayerCommand>);
 /// not Sync; only the exclusive sim driver ever locks it.
 #[derive(Resource)]
 pub struct Net {
-    driver: LockstepDriver,
-    transport: std::sync::Mutex<Box<dyn Transport + Send>>,
+    pub driver: LockstepDriver,
+    pub transport: std::sync::Mutex<Box<dyn Transport + Send>>,
 }
 
 /// Bundled UI font — Bevy's embedded default font renders blank on wasm, so
@@ -422,6 +423,7 @@ fn main() {
     }
     let _ = multiplayer;
     audio::register(&mut app);
+    devctl_client::register(&mut app);
     dev::setup(&mut app);
     app.run();
 }

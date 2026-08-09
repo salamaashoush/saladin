@@ -119,6 +119,20 @@ pub fn smooth_camera(
     }
 }
 
+/// Jump the rig onto its targets in one frame. `smooth_camera` early-returns
+/// once live == target, so setting both without re-aiming leaves the transform
+/// exactly where it was — which is why devctl cannot simply assign and shoot.
+pub fn snap_to_targets(state: &mut CameraState, tf: &mut Transform, proj: &mut Projection) {
+    state.center = clamp_center(state.target_center);
+    state.target_center = state.center;
+    state.view_size = state.target_view;
+    state.yaw = state.target_yaw;
+    aim(state, tf);
+    if let Projection::Orthographic(o) = proj {
+        o.scaling_mode = ScalingMode::FixedVertical { viewport_height: state.view_size * 2.0 };
+    }
+}
+
 pub fn spawn_camera(world: &mut World) {
     let state = CameraState::default();
     let tf = Transform::from_translation(state.center + state.rig_offset()).looking_at(state.center, Vec3::Y);
