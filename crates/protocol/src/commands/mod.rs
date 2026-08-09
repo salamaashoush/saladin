@@ -199,7 +199,7 @@ pub(crate) fn owned_building_kinds(world: &mut World, owner: u64) -> HashSet<Bui
         .collect()
 }
 
-pub(crate) fn building_occupancy(world: &mut World, include_passable: bool) -> HashSet<i32> {
+pub(crate) fn building_occupancy(world: &World, include_passable: bool) -> HashSet<i32> {
     occupancy_and_gates(world, include_passable).0
 }
 
@@ -208,10 +208,12 @@ pub(crate) fn building_occupancy(world: &mut World, include_passable: bool) -> H
 /// the tile is walkable, but only for the owner. Unfinished gates are just a
 /// foundation — they gate nobody.
 pub(crate) fn occupancy_and_gates(
-    world: &mut World,
+    world: &World,
     include_passable: bool,
 ) -> (HashSet<i32>, Vec<(i32, u64)>) {
-    let mut q = world.query::<(&Pos, &Building, Option<&Owner>)>();
+    let Some(mut q) = world.try_query::<(&Pos, &Building, Option<&Owner>)>() else {
+        return (HashSet::new(), Vec::new());
+    };
     let mut occ = Vec::new();
     let mut gates = Vec::new();
     for (p, b, owner) in q.iter(world) {

@@ -901,7 +901,7 @@ pub fn auto_farm_demo(world: &mut World, mut stage: Local<u8>) {
                         continue;
                     }
                     let p = center(kx + dx, kz + dz);
-                    if saladin_sim::check_place(seed, BuildingKind::Farm, p.x, p.y, |_, _| false, &[])
+                    if saladin_sim::check_place(seed, BuildingKind::Farm, p.x, p.y, |_, _| false, |_, _| true, &[])
                         .is_ok()
                         && spots.iter().all(|q| saladin_sim::dist(*q, p) > saladin_sim::fx!("3"))
                     {
@@ -925,7 +925,7 @@ pub fn auto_farm_demo(world: &mut World, mut stage: Local<u8>) {
             }
             let n = Fx::from_num(spots.len() as i32);
             let at = V2::new(sum.x / n, sum.y / n);
-            let at = if saladin_sim::check_place(seed, BuildingKind::Granary, at.x, at.y, |_, _| false, &[])
+            let at = if saladin_sim::check_place(seed, BuildingKind::Granary, at.x, at.y, |_, _| false, |_, _| true, &[])
                 .is_ok()
             {
                 at
@@ -1115,6 +1115,7 @@ pub fn auto_farm_demo(world: &mut World, mut stage: Local<u8>) {
                         Fx::from_num(x),
                         Fx::from_num(z),
                         |_, _| false,
+                        |_, _| true,
                         &[],
                     )
                     .is_err()
@@ -1653,7 +1654,7 @@ pub fn auto_ferry(world: &mut World, mut done: Local<bool>) {
                         Fx::from_num(by + dy),
                     );
                     if is_buildable_tile(seed, bx + dx, by + dy)
-                        && check_place(seed, BuildingKind::Harbour, c.x, c.y, free, &[]) == Ok(())
+                        && check_place(seed, BuildingKind::Harbour, c.x, c.y, free, |_, _| true, &[]) == Ok(())
                     {
                         quay = Some(c);
                         break 'q;

@@ -33,8 +33,9 @@ pub fn update_ghost(
     rmats: Res<RenderMaterials>,
     q_buildings: Query<(&Pos, &Building, &Owner)>,
     q_nodes: Query<&Pos, With<ResourceNode>>,
-    local: Res<LocalPlayer>,
-    q_players: Query<&Player>,
+    q_units: Query<(&Owner, &Pos, &saladin_protocol::Unit)>,
+    // grouped: bevy caps a system at 16 parameters
+    (local, q_players): (Res<LocalPlayer>, Query<&Player>),
     q_cells: Query<Entity, With<GhostCell>>,
     ghost_rot: Res<GhostRot>,
     mut hint: ResMut<PlaceHint>,
@@ -63,6 +64,10 @@ pub fn update_ghost(
         stock,
         q_buildings.iter().map(|(p, b, o)| (p.pos, b.kind, o.0, operational(b.state))),
         q_nodes.iter().map(|p| p.pos),
+        crate::input::builder_positions(
+            local.0,
+            q_units.iter().map(|(o, p, u)| (o.0, p.pos, u.kind, u.garrisoned_in)),
+        ),
     );
 
     // wall pillars are rotationally symmetric; everything else uses R-rotation

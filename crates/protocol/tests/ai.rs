@@ -1128,7 +1128,7 @@ fn island_invasion_world(base: u32) -> (App, u32, V2) {
                     continue;
                 }
                 let p = V2::new(Fx::from_num(cx + dx) + half, Fx::from_num(cy + dy) + half);
-                if check_place(seed, BuildingKind::Harbour, p.x, p.y, |_, _| false, &[keep]).is_ok()
+                if check_place(seed, BuildingKind::Harbour, p.x, p.y, |_, _| false, |_, _| true, &[keep]).is_ok()
                 {
                     site = Some(p);
                     break 'find;

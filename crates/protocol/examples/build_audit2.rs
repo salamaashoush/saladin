@@ -114,7 +114,7 @@ fn main() {
             if dx.abs().max(dy.abs()) != r { continue; }
             let x = farthest.x.floor() + Fx::from_num(dx) + fx!("0.5");
             let y = farthest.y.floor() + Fx::from_num(dy) + fx!("0.5");
-            if check_place(seed, BuildingKind::Barracks, x, y, |tx, ty| occ.contains(&tile_key(tx, ty)), &own).is_ok() {
+            if check_place(seed, BuildingKind::Barracks, x, y, |tx, ty| occ.contains(&tile_key(tx, ty)), |_, _| true, &own).is_ok() {
                 found = Some(V2::new(x, y)); break 'scan;
             }
         }}
@@ -159,7 +159,7 @@ fn main() {
             if dx.abs().max(dy.abs()) != r { continue; }
             let x = k1.x.floor() + Fx::from_num(dx) + fx!("0.5");
             let y = k1.y.floor() + Fx::from_num(dy) + fx!("0.5");
-            if check_place(seed, BuildingKind::House, x, y, |tx, ty| occ.contains(&tile_key(tx, ty)), &own).is_ok() {
+            if check_place(seed, BuildingKind::House, x, y, |tx, ty| occ.contains(&tile_key(tx, ty)), |_, _| true, &own).is_ok() {
                 spot = Some(V2::new(x, y)); break 'hs;
             }
         }}

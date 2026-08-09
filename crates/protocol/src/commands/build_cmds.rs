@@ -6,6 +6,11 @@ use bevy_ecs::prelude::*;
 use saladin_sim::*;
 use std::collections::HashSet;
 
+/// Tiles the town flood may visit. TOWN_RADIUS is 28, so a town's open ground
+/// is a few thousand tiles; this is generous enough that the cap never decides
+/// a placement and small enough to stay a rounding error once per context.
+const TOWN_REACH_BUDGET: usize = 32768;
+
 /// Population headroom for one more of `kind`. Queued units are charged at
 /// ENQUEUE, and only OPERATIONAL structures grant housing — a hole in the
 /// ground shelters nobody.
@@ -246,8 +251,8 @@ fn find_by_id(world: &mut World, id: u64) -> Option<Entity> {
 }
 
 /// Tile keys occupied by resource nodes (no building on a tree/quarry/etc.).
-pub(crate) fn node_occupancy(world: &mut World) -> HashSet<i32> {
-    let mut q = world.query::<(&Pos, &ResourceNode)>();
+pub(crate) fn node_occupancy(world: &World) -> HashSet<i32> {
+    let Some(mut q) = world.try_query::<(&Pos, &ResourceNode)>() else { return HashSet::new() };
     q.iter(world)
         .map(|(p, _)| tile_key(p.pos.x.to_num::<i32>(), p.pos.y.to_num::<i32>()))
         .collect()
@@ -258,6 +263,14 @@ pub(crate) fn node_occupancy(world: &mut World) -> HashSet<i32> {
 /// node occupancy per probe walked every node on the map each time.
 pub(crate) struct BuildContext {
     occ: HashSet<i32>,
+    /// Open ground the owner's builders can actually reach, flooded ONCE from
+    /// where they stand. The approach rule reads this, never `occ`: what covers
+    /// ground and what stops a walker are different sets, and a plot your own
+    /// keep has sealed off is neither occupied nor reachable.
+    reach: HashSet<i32>,
+    /// Whether the owner has any hand that could raise anything at all. With
+    /// none, the rule is waived — there is nobody to be cut off.
+    has_hands: bool,
     wall_keys: HashSet<i32>,
     walls: Vec<(u64, i32)>,
     own: Vec<V2>,
@@ -267,19 +280,20 @@ pub(crate) struct BuildContext {
     match_id: u64,
 }
 
-pub(crate) fn build_context(world: &mut World, owner: u64) -> Option<BuildContext> {
+pub(crate) fn build_context(world: &World, owner: u64) -> Option<BuildContext> {
     let (stock, match_id) = {
-        let mut q = world.query::<(&Player, &MatchId)>();
+        let mut q = world.try_query::<(&Player, &MatchId)>()?;
         q.iter(world).find(|(p, _)| p.player_id == owner).map(|(p, m)| (p.stock, m.0))?
     };
     let mut occ = building_occupancy(world, true);
+    let walk_occ = building_occupancy(world, false);
+    let seed = world.resource::<WorldConfig>().seed;
     occ.extend(node_occupancy(world));
     let mut walls = Vec::new();
     let mut own = Vec::new();
     let mut owned_kinds = HashSet::new();
     let mut counts = [0i32; BuildingKind::ALL.len()];
-    {
-        let mut q = world.query::<(&GameId, &Pos, &Owner, &Building)>();
+    if let Some(mut q) = world.try_query::<(&GameId, &Pos, &Owner, &Building)>() {
         for (g, p, o, b) in q.iter(world) {
             if o.0 != owner {
                 continue;
@@ -295,7 +309,73 @@ pub(crate) fn build_context(world: &mut World, owner: u64) -> Option<BuildContex
         }
     }
     let wall_keys = walls.iter().map(|(_, k)| *k).collect();
-    Some(BuildContext { occ, wall_keys, walls, own, owned_kinds, counts, stock, match_id })
+    let hands: Vec<V2> = match world.try_query::<(&Owner, &Pos, &Unit)>() {
+        Some(mut q) => q
+            .iter(world)
+            .filter(|(o, _, u)| o.0 == owner && u.garrisoned_in == 0 && is_builder(u.kind))
+            .map(|(_, p, _)| p.pos)
+            .collect(),
+        None => Vec::new(),
+    };
+    let reach = town_reach(
+        |tx, ty| is_passable(seed, tx, ty) && !walk_occ.contains(&tile_key(tx, ty)),
+        &hands,
+        &own,
+        TOWN_REACH_BUDGET,
+    );
+    let has_hands = !hands.is_empty();
+    Some(BuildContext {
+        occ,
+        reach,
+        has_hands,
+        wall_keys,
+        walls,
+        own,
+        owned_kinds,
+        counts,
+        stock,
+        match_id,
+    })
+}
+
+impl BuildContext {
+    /// The reachability overlay, for devctl's terrain map. Read-only: the set
+    /// that decides placements is the set a debugger must be able to see.
+    pub(crate) fn reach_set(&self) -> &HashSet<i32> {
+        &self.reach
+    }
+
+    /// The full `check_build` rule set against this gathering. The command asks
+    /// through here and so does devctl's dry-run probe, so a probe can never
+    /// answer differently from the order it is standing in for.
+    pub(crate) fn check(
+        &self,
+        seed: u32,
+        kind: BuildingKind,
+        pos: V2,
+    ) -> Result<(), PlaceError> {
+        let composes = composes_with_walls(kind);
+        let occupied = |tx: i32, ty: i32| {
+            let k = tile_key(tx, ty);
+            self.occ.contains(&k) && !(composes && self.wall_keys.contains(&k))
+        };
+        // no hands, no rule: nobody can be cut off from a plot they were never
+        // going to reach
+        let reachable =
+            |tx: i32, ty: i32| !self.has_hands || self.reach.contains(&tile_key(tx, ty));
+        check_build(
+            seed,
+            kind,
+            pos.x,
+            pos.y,
+            occupied,
+            reachable,
+            &self.own,
+            &self.owned_kinds,
+            &self.counts,
+            &self.stock,
+        )
+    }
 }
 
 /// Found `kind` at `pos` against an already-gathered context — the full
@@ -323,23 +403,7 @@ pub(crate) fn build_with(
     let def = building_def(kind);
     let seed = world.resource::<WorldConfig>().seed;
     let composes = composes_with_walls(kind);
-    {
-        let occupied = |tx: i32, ty: i32| {
-            let k = tile_key(tx, ty);
-            ctx.occ.contains(&k) && !(composes && ctx.wall_keys.contains(&k))
-        };
-        check_build(
-            seed,
-            kind,
-            pos.x,
-            pos.y,
-            occupied,
-            &ctx.own,
-            &ctx.owned_kinds,
-            &ctx.counts,
-            &ctx.stock,
-        )?;
-    }
+    ctx.check(seed, kind, pos)?;
     {
         let mut q = world.query::<&mut Player>();
         let Some(mut p) = q.iter_mut(world).find(|p| p.player_id == owner) else {
@@ -546,12 +610,14 @@ pub(crate) fn place_wall(world: &mut World, owner: u64, tiles: &[(i32, i32)], bu
         let x = Fx::from_num(tx);
         let y = Fx::from_num(ty);
         let occupied = |px: i32, py: i32| ctx.occ.contains(&tile_key(px, py));
+        let reachable = |px: i32, py: i32| !ctx.has_hands || ctx.reach.contains(&tile_key(px, py));
         if check_build(
             seed,
             BuildingKind::Wall,
             x,
             y,
             occupied,
+            reachable,
             &anchors,
             &ctx.owned_kinds,
             &ctx.counts,

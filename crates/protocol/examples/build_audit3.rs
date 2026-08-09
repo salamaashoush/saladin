@@ -60,7 +60,7 @@ fn site(app: &mut App, seed: u32, id: u64, kind: BuildingKind) -> Option<V2> {
                 }
                 let x = kp.x.floor() + Fx::from_num(dx) + fx!("0.5");
                 let y = kp.y.floor() + Fx::from_num(dy) + fx!("0.5");
-                if check_place(seed, kind, x, y, |tx, ty| occ.contains(&tile_key(tx, ty)), &own).is_ok() {
+                if check_place(seed, kind, x, y, |tx, ty| occ.contains(&tile_key(tx, ty)), |_, _| true, &own).is_ok() {
                     return Some(V2::new(x, y));
                 }
             }

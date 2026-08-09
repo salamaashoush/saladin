@@ -226,6 +226,10 @@ fn selected_kind(
     q_units.iter().find(|(g, ..)| g.0 == *id).map(|(_, _, _, u)| u.kind)
 }
 
+/// Tiles the town flood may visit — the sim's `TOWN_REACH_BUDGET`. Generous
+/// enough that the cap never decides a placement.
+const TOWN_REACH_BUDGET: usize = 32768;
+
 /// Everything `check_build` needs, gathered once — the client's mirror of the
 /// sim's `BuildContext`. Built HERE and nowhere else so the ghost preview, the
 /// mode hint and the command that ships all answer from one gathering: a
@@ -235,6 +239,11 @@ fn selected_kind(
 /// unfinished barracks trains nothing.
 pub struct BuildProbe {
     occ: HashSet<i32>,
+    /// Open ground this player's builders can reach, flooded once from where
+    /// they stand. The approach rule reads this and never `occ` — the ghost
+    /// and the command must refuse the same sealed-off plot.
+    reach: HashSet<i32>,
+    has_hands: bool,
     own: Vec<V2>,
     owned_kinds: HashSet<BuildingKind>,
     counts: [i32; BuildingKind::ALL.len()],
@@ -245,12 +254,15 @@ pub struct BuildProbe {
 impl BuildProbe {
     pub fn check(&self, kind: BuildingKind, cx: f32, cy: f32) -> Result<(), PlaceError> {
         let occupied = |tx: i32, ty: i32| self.occ.contains(&tile_key(tx, ty));
+        let reachable =
+            |tx: i32, ty: i32| !self.has_hands || self.reach.contains(&tile_key(tx, ty));
         check_build(
             self.seed,
             kind,
             Fx::from_num(cx),
             Fx::from_num(cy),
             occupied,
+            reachable,
             &self.own,
             &self.owned_kinds,
             &self.counts,
@@ -269,6 +281,7 @@ pub fn build_probe(
     stock: Stockpile,
     buildings: impl Iterator<Item = (V2, BuildingKind, u64, bool)>,
     nodes: impl Iterator<Item = V2>,
+    hands: impl Iterator<Item = V2>,
 ) -> BuildProbe {
     let composes = saladin_sim::composes_with_walls(kind);
     let mut occ_list = Vec::new();
@@ -290,6 +303,15 @@ pub fn build_probe(
             own_walls.push(tile_key(pos.x.to_num::<i32>(), pos.y.to_num::<i32>()));
         }
     }
+    let walk_occ = occupancy_set(&occ_list, false);
+    let hands: Vec<V2> = hands.collect();
+    let reach = saladin_sim::town_reach(
+        |tx, ty| saladin_sim::is_passable(seed, tx, ty) && !walk_occ.contains(&tile_key(tx, ty)),
+        &hands,
+        &own,
+        TOWN_REACH_BUDGET,
+    );
+    let has_hands = !hands.is_empty();
     let mut occ = occupancy_set(&occ_list, true);
     for p in nodes {
         occ.insert(tile_key(p.x.to_num::<i32>(), p.y.to_num::<i32>()));
@@ -299,7 +321,7 @@ pub fn build_probe(
             occ.remove(&k);
         }
     }
-    BuildProbe { occ, own, owned_kinds, counts, stock, seed }
+    BuildProbe { occ, reach, has_hands, own, owned_kinds, counts, stock, seed }
 }
 
 /// Placement cells under the cursor: one footprint, or the dragged wall line.
@@ -325,6 +347,7 @@ fn probe_from_world(
     q_players: &Query<&Player>,
     q_buildings: &Query<(&GameId, &Owner, &Pos, &Building)>,
     q_nodes: &Query<(&GameId, &Pos, &ResourceNode)>,
+    q_units: &Query<(&GameId, &Owner, &Pos, &Unit)>,
 ) -> BuildProbe {
     let stock = q_players.iter().find(|p| p.player_id == me).map(|p| p.stock).unwrap_or_default();
     build_probe(
@@ -334,7 +357,22 @@ fn probe_from_world(
         stock,
         q_buildings.iter().map(|(_, o, p, b)| (p.pos, b.kind, o.0, operational(b.state))),
         q_nodes.iter().map(|(_, p, _)| p.pos),
+        builder_positions(me, q_units.iter().map(|(_, o, p, u)| (o.0, p.pos, u.kind, u.garrisoned_in))),
     )
+}
+
+/// The owner's free hands — who the reachability flood starts from.
+pub fn builder_positions(
+    me: u64,
+    units: impl Iterator<Item = (u64, V2, saladin_sim::UnitKind, u64)>,
+) -> std::vec::IntoIter<V2> {
+    units
+        .filter(|(owner, _, kind, aboard)| {
+            *owner == me && *aboard == 0 && saladin_sim::unit_def(*kind).builds()
+        })
+        .map(|(_, pos, _, _)| pos)
+        .collect::<Vec<_>>()
+        .into_iter()
 }
 
 // ── the main pointer system ──────────────────────────────────────────────────
@@ -413,7 +451,7 @@ pub fn pointer_input(
                 wall_drag.0 = Some((g.x.floor() as i32, g.z.floor() as i32));
             } else {
                 let crew = selected_builders(&selection, &q_units, me, Vec2::new(g.x, g.z));
-                let probe = probe_from_world(kind, me, cfg.seed, &q_players, &q_buildings, &q_nodes);
+                let probe = probe_from_world(kind, me, cfg.seed, &q_players, &q_buildings, &q_nodes, &q_units);
                 commit_build(kind, g.x, g.z, None, me, &probe, ghost_rot.0, &crew, &mut input);
             }
         }
@@ -427,7 +465,7 @@ pub fn pointer_input(
                 me,
                 Vec2::new(start.0 as f32 + 0.5, start.1 as f32 + 0.5),
             );
-            let probe = probe_from_world(kind, me, cfg.seed, &q_players, &q_buildings, &q_nodes);
+            let probe = probe_from_world(kind, me, cfg.seed, &q_players, &q_buildings, &q_nodes, &q_units);
             commit_build(kind, g.x, g.z, Some(start), me, &probe, ghost_rot.0, &crew, &mut input);
         }
         return;
@@ -1262,14 +1300,14 @@ mod tests {
         let rich = Stockpile { wood: 999, stone: 999, food: 999, gold: 999 };
         let at = V2::new(Fx::from_num(10), Fx::from_num(10));
         let unfinished =
-            build_probe(BuildingKind::Stable, 1, 1, rich, [(at, BuildingKind::Barracks, 1, false)].into_iter(), [].into_iter());
+            build_probe(BuildingKind::Stable, 1, 1, rich, [(at, BuildingKind::Barracks, 1, false)].into_iter(), [].into_iter(), [].into_iter());
         assert_eq!(
             unfinished.check(BuildingKind::Stable, 11.5, 10.5),
             Err(PlaceError::MissingPrereq(BuildingKind::Barracks)),
         );
         // and a finished one gets past the prereq gate (terrain may still say no)
         let finished =
-            build_probe(BuildingKind::Stable, 1, 1, rich, [(at, BuildingKind::Barracks, 1, true)].into_iter(), [].into_iter());
+            build_probe(BuildingKind::Stable, 1, 1, rich, [(at, BuildingKind::Barracks, 1, true)].into_iter(), [].into_iter(), [].into_iter());
         assert_ne!(
             finished.check(BuildingKind::Stable, 11.5, 10.5),
             Err(PlaceError::MissingPrereq(BuildingKind::Barracks)),
@@ -1281,7 +1319,7 @@ mod tests {
     #[test]
     fn the_watchtower_cannot_be_sited() {
         let rich = Stockpile { wood: 999, stone: 999, food: 999, gold: 999 };
-        let probe = build_probe(BuildingKind::Watchtower, 1, 1, rich, [].into_iter(), [].into_iter());
+        let probe = build_probe(BuildingKind::Watchtower, 1, 1, rich, [].into_iter(), [].into_iter(), [].into_iter());
         assert_eq!(probe.check(BuildingKind::Watchtower, 10.5, 10.5), Err(PlaceError::NotBuildable));
     }
 }

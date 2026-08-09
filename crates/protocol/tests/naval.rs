@@ -81,7 +81,7 @@ fn sea_shore_tile(seed: u32) -> (i32, i32) {
             if !seagoing {
                 continue;
             }
-            if check_place(seed, BuildingKind::FishingHut, c.x, c.y, free, &[]) != Ok(()) {
+            if check_place(seed, BuildingKind::FishingHut, c.x, c.y, free, |_, _| true, &[]) != Ok(()) {
                 continue;
             }
             // room behind for the keep that anchors the town radius
@@ -209,7 +209,7 @@ fn the_harbour_wants_a_hut_and_the_open_sea() {
                 let c = saladin_sim::footprint_center(2, x, y);
                 let seagoing =
                     berth_of(seed, 2, c).is_some_and(|b| water_region_at(seed, b.x, b.y) == ocean);
-                if seagoing && check_place(seed, BuildingKind::Harbour, x, y, free, &[]) == Ok(()) {
+                if seagoing && check_place(seed, BuildingKind::Harbour, x, y, free, |_, _| true, &[]) == Ok(()) {
                     site = Some((x, y));
                     break 'scan;
                 }
@@ -238,7 +238,7 @@ fn the_harbour_wants_a_hut_and_the_open_sea() {
             let c = saladin_sim::footprint_center(2, x, y);
             let off_ocean =
                 berth_of(seed, 2, c).is_some_and(|b| water_region_at(seed, b.x, b.y) != ocean);
-            if off_ocean && check_place(seed, BuildingKind::Storehouse, x, y, free, &[]) == Ok(()) {
+            if off_ocean && check_place(seed, BuildingKind::Storehouse, x, y, free, |_, _| true, &[]) == Ok(()) {
                 lake = Some((x, y));
                 break 'lake;
             }
@@ -246,7 +246,7 @@ fn the_harbour_wants_a_hut_and_the_open_sea() {
     }
     if let Some((x, y)) = lake {
         assert_eq!(
-            check_place(seed, BuildingKind::Harbour, x, y, free, &[]),
+            check_place(seed, BuildingKind::Harbour, x, y, free, |_, _| true, &[]),
             Err(PlaceError::NeedsSeaBerth),
             "a lake floated a harbour"
         );

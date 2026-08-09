@@ -338,14 +338,91 @@ fn check_ground<O: Fn(i32, i32) -> bool>(
     Ok(())
 }
 
+/// Open ground the owner's BUILDERS can actually stand on and walk to, flooded
+/// once from where they are standing.
+///
+/// The origin has to be the hands, not the halls. Seeding from a building's
+/// own surroundings begs the question: the tile that started this — a farm plot
+/// directly bordering the keep on seed 4 — is in the keep's ring AND sealed off
+/// from every peasant in the town, so a flood seeded there declares the pocket
+/// reachable from inside itself. `walk_to` asks from the hand's own position,
+/// so this does too.
+///
+/// `check_place` then answers "can the crew get there" with a set lookup rather
+/// than a search per candidate: a search per candidate cost +28% of the whole
+/// sim tick with six Hard bots, measured, because `place_near` ring-probes a
+/// perimeter every decision window.
+///
+/// CLIPPED to the town's box. Unbounded it floods the whole landmass — +48% on
+/// the tick, measured — and every legal placement is within `TOWN_RADIUS` of an
+/// owned building anyway, so ground beyond that box can never be an approach.
+///
+/// A* forbids corner cutting (a diagonal step needs both its orthogonals open),
+/// so four-connected open ground is exactly what a builder can traverse. The
+/// answer is a SET, so nothing here can depend on hash iteration order.
+pub fn town_reach<W: Fn(i32, i32) -> bool>(
+    walkable: W,
+    hands: &[V2],
+    anchors: &[V2],
+    budget: usize,
+) -> HashSet<i32> {
+    let mut seen: HashSet<i32> = HashSet::new();
+    if hands.is_empty() {
+        return seen;
+    }
+    let margin = TOWN_RADIUS.ceil().to_num::<i32>() + 2;
+    let (mut lo_x, mut lo_y, mut hi_x, mut hi_y) = (i32::MAX, i32::MAX, i32::MIN, i32::MIN);
+    for o in hands.iter().chain(anchors) {
+        lo_x = lo_x.min(floor_i32(o.x) - margin);
+        lo_y = lo_y.min(floor_i32(o.y) - margin);
+        hi_x = hi_x.max(floor_i32(o.x) + margin);
+        hi_y = hi_y.max(floor_i32(o.y) + margin);
+    }
+    let inside = |tx: i32, ty: i32| tx >= lo_x && ty >= lo_y && tx <= hi_x && ty <= hi_y;
+    let mut queue: Vec<(i32, i32)> = Vec::new();
+    let seed_tile = |tx: i32, ty: i32, seen: &mut HashSet<i32>, queue: &mut Vec<(i32, i32)>| {
+        if inside(tx, ty) && walkable(tx, ty) && seen.insert(tile_key(tx, ty)) {
+            queue.push((tx, ty));
+        }
+    };
+    for h in hands {
+        let (hx, hy) = (floor_i32(h.x), floor_i32(h.y));
+        seed_tile(hx, hy, &mut seen, &mut queue);
+        // a hand caught on a tile a building has since covered still stands
+        // beside one it can walk from
+        for (dx, dy) in DIRS4 {
+            seed_tile(hx + dx, hy + dy, &mut seen, &mut queue);
+        }
+    }
+    let mut head = 0;
+    while head < queue.len() && seen.len() < budget {
+        let (tx, ty) = queue[head];
+        head += 1;
+        for (dx, dy) in DIRS4 {
+            let (nx, ny) = (tx + dx, ty + dy);
+            if inside(nx, ny) && walkable(nx, ny) && seen.insert(tile_key(nx, ny)) {
+                queue.push((nx, ny));
+            }
+        }
+    }
+    seen
+}
+
 /// The COMPLETE placement rule set, shared by the build command, the wall
 /// drag, the AI planner and the client's ghost preview.
-pub fn check_place<O: Fn(i32, i32) -> bool>(
+///
+/// `occupied` is what covers GROUND (buildings including passable ones, plus
+/// resource nodes). `reachable` is a different question and a different set:
+/// can a builder of MINE stand on this tile and walk to it — `town_reach`,
+/// which excludes tiles a building stands on and tiles walled off from the
+/// town. `|_, _| true` waives it, which is what a caller with no town does.
+pub fn check_place<O: Fn(i32, i32) -> bool, R: Fn(i32, i32) -> bool>(
     seed: u32,
     kind: BuildingKind,
     x: Fx,
     y: Fx,
     occupied: O,
+    reachable: R,
     own_buildings: &[V2],
 ) -> Result<(), PlaceError> {
     let def = building_def(kind);
@@ -383,7 +460,15 @@ pub fn check_place<O: Fn(i32, i32) -> bool>(
             return Err(PlaceError::OutsideTown);
         }
     }
-    if !def.passable && !has_passable_approach(def.footprint, x, y, |tx, ty| is_passable(seed, tx, ty)) {
+    // A tile with a building standing on it is not an approach, and an approach
+    // nobody can WALK TO is not one either: `has_passable_approach` only ever
+    // promised that a walkable tile borders the footprint, and ringing a plot
+    // with your own keep and barracks leaves that true while the pocket is
+    // sealed. Nothing downstream noticed — `walk_to` hands the crew an empty
+    // A*, drops them, and the foundation stands at zero work forever with its
+    // cost already paid. Measured on seed 4, a farm at (92, 88).
+    let approach = |tx: i32, ty: i32| is_passable(seed, tx, ty) && reachable(tx, ty);
+    if !def.passable && !has_passable_approach(def.footprint, x, y, approach) {
         return Err(PlaceError::NoApproach);
     }
     Ok(())
@@ -394,12 +479,13 @@ pub fn check_place<O: Fn(i32, i32) -> bool>(
 /// ghost, the command and the AI all ask this, so a preview can never turn
 /// green on a placement the command will refuse.
 #[allow(clippy::too_many_arguments)]
-pub fn check_build<O: Fn(i32, i32) -> bool>(
+pub fn check_build<O: Fn(i32, i32) -> bool, R: Fn(i32, i32) -> bool>(
     seed: u32,
     kind: BuildingKind,
     x: Fx,
     y: Fx,
     occupied: O,
+    reachable: R,
     own_buildings: &[V2],
     owned_kinds: &HashSet<BuildingKind>,
     own_counts: &[i32],
@@ -415,7 +501,7 @@ pub fn check_build<O: Fn(i32, i32) -> bool>(
     if def.max_count > 0 && own_counts.get(kind as usize).copied().unwrap_or(0) >= def.max_count {
         return Err(PlaceError::TooMany);
     }
-    check_place(seed, kind, x, y, occupied, own_buildings)?;
+    check_place(seed, kind, x, y, occupied, reachable, own_buildings)?;
     if !stock.can_afford(&def.cost) {
         return Err(PlaceError::CannotAfford);
     }
@@ -565,7 +651,7 @@ mod tests {
         let mut owned: HashSet<BuildingKind> = HashSet::new();
         owned.insert(BuildingKind::Keep);
         let go = |kind, owned: &HashSet<BuildingKind>, counts: &[i32], stock: &Stockpile| {
-            check_build(seed, kind, site.x, site.y, free, &[], owned, counts, stock)
+            check_build(seed, kind, site.x, site.y, free, |_, _| true, &[], owned, counts, stock)
         };
 
         assert_eq!(
@@ -684,16 +770,16 @@ mod tests {
                     let (x, y) = (Fx::from_num(tx), Fx::from_num(ty));
                     if huts < 3 && off_ocean(1, footprint_center(1, x, y)) {
                         // the hut only wants a shoreline, and a lake is one
-                        if check_place(seed, BuildingKind::FishingHut, x, y, free, &[]) == Ok(()) {
+                        if check_place(seed, BuildingKind::FishingHut, x, y, free, |_, _| true, &[]) == Ok(()) {
                             huts += 1;
                         }
                     }
                     if quays < 3
                         && off_ocean(2, footprint_center(2, x, y))
-                        && check_place(seed, BuildingKind::Storehouse, x, y, free, &[]) == Ok(())
+                        && check_place(seed, BuildingKind::Storehouse, x, y, free, |_, _| true, &[]) == Ok(())
                     {
                         assert_eq!(
-                            check_place(seed, BuildingKind::Harbour, x, y, free, &[]),
+                            check_place(seed, BuildingKind::Harbour, x, y, free, |_, _| true, &[]),
                             Err(PlaceError::NeedsSeaBerth),
                             "seed {seed} sited a harbour on a lake at {tx},{ty}"
                         );
@@ -723,12 +809,12 @@ mod tests {
                     let c = footprint_center(2, x, y);
                     let on_ocean =
                         berth_of(seed, 2, c).is_some_and(|b| water_region_at(seed, b.x, b.y) == ocean);
-                    if !on_ocean || check_place(seed, BuildingKind::Storehouse, x, y, free, &[]) != Ok(())
+                    if !on_ocean || check_place(seed, BuildingKind::Storehouse, x, y, free, |_, _| true, &[]) != Ok(())
                     {
                         continue;
                     }
                     assert_eq!(
-                        check_place(seed, BuildingKind::Harbour, x, y, free, &[]),
+                        check_place(seed, BuildingKind::Harbour, x, y, free, |_, _| true, &[]),
                         Ok(()),
                         "seed {seed} refused a harbour on the open coast at {tx},{ty}"
                     );

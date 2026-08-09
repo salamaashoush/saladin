@@ -1558,7 +1558,7 @@ mod tests {
             for ty in sy - reach..=sy + reach {
                 for tx in sx - reach..=sx + reach {
                     let (x, y) = (Fx::from_num(tx) + half, Fx::from_num(ty) + half);
-                    if check_place(seed, BuildingKind::Farm, x, y, |_, _| false, &[]).is_err() {
+                    if check_place(seed, BuildingKind::Farm, x, y, |_, _| false, |_, _| true, &[]).is_err() {
                         continue;
                     }
                     plots += 1;

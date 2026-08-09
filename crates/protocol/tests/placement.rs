@@ -368,7 +368,7 @@ fn nothing_is_founded_on_a_hillside() {
     );
     let pos = center(steepest.1, steepest.2);
     assert_eq!(
-        check_place(seed, BuildingKind::House, pos.x, pos.y, |_, _| false, &[]),
+        check_place(seed, BuildingKind::House, pos.x, pos.y, |_, _| false, |_, _| true, &[]),
         Err(PlaceError::TooSteep),
         "a house on a {} slope at ({},{})",
         steepest.0,
@@ -379,7 +379,7 @@ fn nothing_is_founded_on_a_hillside() {
     // it varies, not the individual tiles
     let (cx, cy) = inland_block(seed);
     assert!(
-        check_place(seed, BuildingKind::House, center(cx + 2, cy + 2).x, center(cx + 2, cy + 2).y, |_, _| false, &[])
+        check_place(seed, BuildingKind::House, center(cx + 2, cy + 2).x, center(cx + 2, cy + 2).y, |_, _| false, |_, _| true, &[])
             .is_ok(),
         "flat inland ground must still take a building"
     );
@@ -459,4 +459,107 @@ fn a_watchtower_cannot_be_bought() {
     cmd(&mut app, PlayerCommand::Build { player_id: 1, kind: BuildingKind::Watchtower, pos: center(cx + 5, cy + 5), facing: 0, builders: vec![] });
     step(app.world_mut());
     assert_eq!(building_count(&mut app, BuildingKind::Watchtower), 0);
+}
+
+/// `has_passable_approach` only ever promised that a walkable tile BORDERS the
+/// footprint. Ring a plot with your own buildings and that stays true while the
+/// pocket is sealed — and nothing downstream notices: `walk_to` hands the crew
+/// an empty A*, drops them, and the foundation stands at zero work forever with
+/// its cost already paid. Found by devctl on seed 4, a farm at (92, 88).
+#[test]
+fn a_foundation_the_crew_cannot_walk_to_is_refused() {
+    let seed = 1;
+    let (cx, cy) = inland_block(seed);
+    let (px, py) = (cx + 3, cy + 3);
+    let at = center(px, py);
+    // the town's own ground, which is everything but the sealed pocket
+    let outside = |tx: i32, ty: i32| (tx - px).abs() > 1 || (ty - py).abs() > 1;
+
+    assert_eq!(
+        check_place(seed, BuildingKind::Tower, at.x, at.y, |_, _| false, outside, &[]),
+        Err(PlaceError::NoApproach),
+        "a sealed pocket is not an approach, however walkable the tile beside it"
+    );
+    assert!(
+        check_place(seed, BuildingKind::Tower, at.x, at.y, |_, _| false, |_, _| true, &[]).is_ok(),
+        "open ground must still take a building"
+    );
+    assert!(
+        check_place(seed, BuildingKind::Tower, at.x, at.y, |_, _| false, |tx, ty| !outside(tx, ty), &[])
+            .is_ok(),
+        "the same pocket with the town INSIDE it is fine"
+    );
+}
+
+/// `town_reach` is the set the rule reads: four-connected open ground flooded
+/// from the town, which is exactly what A* can traverse (a diagonal step needs
+/// both its orthogonals open, so there is no corner to cut through).
+#[test]
+fn the_town_flood_stops_at_a_sealed_wall() {
+    let seed = 1;
+    let (cx, cy) = inland_block(seed);
+    let (px, py) = (cx + 5, cy + 5);
+    let sealed: Vec<(i32, i32)> = [(1, 0), (-1, 0), (0, 1), (0, -1)]
+        .iter()
+        .map(|(dx, dy)| (px + dx, py + dy))
+        .collect();
+    let walkable = |tx: i32, ty: i32| {
+        is_passable(seed, tx, ty) && !sealed.contains(&(tx, ty))
+    };
+    // flooded from where a hand STANDS, not from a hall: the pocket that
+    // started this borders the keep, so a flood seeded on the keep's own ring
+    // declares it reachable from inside itself
+    let hand = center(cx + 1, cy + 2);
+    let reach = saladin_sim::town_reach(walkable, &[hand], &[center(cx + 1, cy + 1)], 32768);
+    assert!(reach.contains(&saladin_sim::tile_key(cx + 2, cy + 1)), "the town's own ground");
+    assert!(
+        !reach.contains(&saladin_sim::tile_key(px, py)),
+        "the walled pocket is not the town's ground"
+    );
+    assert!(!reach.contains(&saladin_sim::tile_key(px + 1, py)), "and neither is the wall itself");
+}
+
+/// The same rule through the COMMAND, with the pocket made of real walls. A*
+/// forbids corner cutting (a diagonal step needs both its orthogonals open), so
+/// four orthogonal walls are a true seal and a four-way flood is the right
+/// question to ask.
+#[test]
+fn walling_yourself_out_of_a_plot_refuses_the_build() {
+    let seed = 1;
+    let mut app = build_app(seed);
+    spawn_player(&mut app, 1);
+    let (cx, cy) = inland_block(seed);
+    spawn_building(&mut app, 10, 1, BuildingKind::Keep, center(cx + 1, cy + 1));
+    let (px, py) = (cx + 5, cy + 5);
+    for (i, (dx, dy)) in [(1, 0), (-1, 0), (0, 1), (0, -1)].into_iter().enumerate() {
+        spawn_building(&mut app, 20 + i as u64, 1, BuildingKind::Wall, center(px + dx, py + dy));
+    }
+    // a hand OUTSIDE the pocket: the rule is about who can get there, so with
+    // nobody to be cut off it is rightly waived
+    let hand = center(cx + 1, cy + 3);
+    app.world_mut().spawn((
+        GameId(30),
+        Owner(1),
+        MatchId(1),
+        Pos { pos: hand, facing: ZERO },
+        Unit::new(UnitKind::Peasant, hand),
+    ));
+
+    cmd(&mut app, PlayerCommand::Build { player_id: 1, kind: BuildingKind::Tower, pos: center(px, py), facing: 0, builders: vec![] });
+    step(app.world_mut());
+    assert_eq!(building_count(&mut app, BuildingKind::Tower), 0, "raised inside a sealed pocket");
+    let why: Vec<PlaceError> =
+        app.world().resource::<CommandFeedback>().0.iter().map(|(_, e)| *e).collect();
+    assert_eq!(why, vec![PlaceError::NoApproach], "and it must say so");
+
+    // knock one wall out and the same plot is buildable
+    let gap = {
+        let world = app.world_mut();
+        let mut q = world.query::<(bevy_ecs::prelude::Entity, &GameId)>();
+        q.iter(world).find(|(_, g)| g.0 == 20).map(|(e, _)| e).expect("a wall to remove")
+    };
+    app.world_mut().despawn(gap);
+    cmd(&mut app, PlayerCommand::Build { player_id: 1, kind: BuildingKind::Tower, pos: center(px, py), facing: 0, builders: vec![] });
+    step(app.world_mut());
+    assert_eq!(building_count(&mut app, BuildingKind::Tower), 1, "one gap is a way in");
 }

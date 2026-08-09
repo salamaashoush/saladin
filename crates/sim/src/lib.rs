@@ -84,7 +84,7 @@ pub use terrain::{
 pub use buildings::{
     BUILD_SLOPE_MAX, FOUNDATION_RELIEF, Occupant, PlaceError, Tile, accepts, berth_is_seagoing,
     berth_of, build_rate,
-    cancel_refund, check_build, check_place, composes_with_walls, demolish_refund,
+    cancel_refund, check_build, check_place, composes_with_walls, demolish_refund, town_reach,
     find_buildable_near, footprint_relief, soil_quality, gate_blocks, hp_step, operational,
     place_error_text, repair_charge, site_start_hp, work_step,
     footprint_center, footprint_tiles, has_passable_approach, occupancy_set,

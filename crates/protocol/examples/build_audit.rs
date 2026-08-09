@@ -95,7 +95,7 @@ fn free_spot(app: &mut App, seed: u32, id: u64, kind: BuildingKind, from: V2, st
                 }
                 let x = Fx::from_num(bx + dx) + fx!("0.5");
                 let y = Fx::from_num(by + dy) + fx!("0.5");
-                if check_place(seed, kind, x, y, |tx, ty| occ.contains(&tile_key(tx, ty)), &own).is_ok() {
+                if check_place(seed, kind, x, y, |tx, ty| occ.contains(&tile_key(tx, ty)), |_, _| true, &own).is_ok() {
                     return Some(V2::new(x, y));
                 }
             }

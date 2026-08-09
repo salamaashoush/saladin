@@ -43,12 +43,12 @@ fn main() {
                         let x = Fx::from_num(kx + dx) + half;
                         let y = Fx::from_num(ky + dy) + half;
                         if farm_at < 0
-                            && check_place(seed, BuildingKind::Farm, x, y, |_, _| false, &[]).is_ok()
+                            && check_place(seed, BuildingKind::Farm, x, y, |_, _| false, |_, _| true, &[]).is_ok()
                         {
                             farm_at = r;
                         }
                         if shore_at < 0
-                            && check_place(seed, BuildingKind::FishingHut, x, y, |_, _| false, &[]).is_ok()
+                            && check_place(seed, BuildingKind::FishingHut, x, y, |_, _| false, |_, _| true, &[]).is_ok()
                         {
                             shore_at = r;
                         }

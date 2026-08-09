@@ -42,7 +42,7 @@ fn main() {
             if dx.abs().max(dy.abs()) != r { continue; }
             let x = kp.x.floor() + Fx::from_num(dx) + fx!("0.5");
             let y = kp.y.floor() + Fx::from_num(dy) + fx!("0.5");
-            if check_place(seed, BuildingKind::Farm, x, y, |_, _| false, &own).is_ok() { fp = Some(V2::new(x, y)); break 'f; }
+            if check_place(seed, BuildingKind::Farm, x, y, |_, _| false, |_, _| true, &own).is_ok() { fp = Some(V2::new(x, y)); break 'f; }
         }}
     }
     let fp = fp.expect("farm site");
