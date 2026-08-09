@@ -227,22 +227,31 @@ fn walk_to(
     let cost = |tx: i32, ty: i32| move_cost_at(seed, tx, ty);
     let path = {
         let mut scratch = world.resource_mut::<PathScratch>();
-        let snap = approach_tile(seed, &passable, h.pos, to, 3).or_else(|| {
-            nearest_reachable_passable_grid(
+        let route = |scratch: &mut PathScratch, s: V2| {
+            scratch.0.find_path_costed(&passable, &cost, h.pos.x, h.pos.y, s.x, s.y, MAX_EXPANSIONS)
+        };
+        // `approach_tile` answers "a passable tile beside the job", which is not
+        // the same question as "one this hand can get to". A farm founded on a
+        // tongue of land takes the two tiles behind it out of the world, and the
+        // tidy approach on that side wins over the reachable one on the other —
+        // the A* comes back empty, the hand is dropped, and the foundation
+        // stands at zero work forever with its cost paid. Measured on seed 4.
+        let mut path = match approach_tile(seed, &passable, h.pos, to, 3) {
+            Some(s) => route(&mut scratch, s),
+            None => Vec::new(),
+        };
+        if path.is_empty()
+            && let Some(r) = nearest_reachable_passable_grid(
                 &mut scratch.1,
                 &passable,
                 h.pos,
                 to,
                 reach_budget(dist(h.pos, to)),
             )
-            .map(|r| r.at)
-        });
-        match snap {
-            Some(s) => {
-                scratch.0.find_path_costed(&passable, &cost, h.pos.x, h.pos.y, s.x, s.y, MAX_EXPANSIONS)
-            }
-            None => Vec::new(),
+        {
+            path = route(&mut scratch, r.at);
         }
+        path
     };
     if path.is_empty() {
         // no route to the job at all — back to the fields rather than a failing

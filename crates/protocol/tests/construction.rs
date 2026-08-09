@@ -737,3 +737,68 @@ fn a_town_is_founded_manned_burned_mended_and_moves_on() {
     assert_eq!(w.state, BuildState::Complete);
     assert_eq!(w.hp, building_def(BuildingKind::Watchtower).max_hp);
 }
+
+/// `approach_tile` answers "a passable tile beside the job" — NOT "one this
+/// hand can get to". It picks the tile closest to the job and breaks ties on
+/// the side the walker is already on, so a dead-end pocket on the near side
+/// beats an open approach on the far one. `walk_to` then handed the A* an
+/// unreachable target, got nothing back, and dropped the crew: the foundation
+/// stood at zero work forever with its cost already paid.
+///
+/// Measured on seed 4 — a farm founded on a tongue of land sealed the two tiles
+/// behind it, and three of five peasants went idle for the rest of the match.
+#[test]
+fn a_builder_routes_to_the_far_approach_when_the_near_one_is_a_dead_end() {
+    let (cx, cy) = open_block();
+    let mut app = build_app();
+    spawn_player(&mut app, 1);
+    spawn_keep(&mut app, 10, 1, center(cx, cy + 4));
+
+    // the site, with its west neighbour walled into a one-tile dead end
+    let (sx, sy) = (cx, cy);
+    for (i, (dx, dy)) in [(-2, 0), (-1, -1), (-1, 1)].into_iter().enumerate() {
+        let at = center(sx + dx, sy + dy);
+        let def = building_def(BuildingKind::Wall);
+        app.world_mut().spawn((
+            GameId(20 + i as u64),
+            Owner(1),
+            MatchId(1),
+            Pos { pos: at, facing: ZERO },
+            Building::new(BuildingKind::Wall, def.max_hp, at),
+        ));
+    }
+    // the hand stands WEST of the seal, so the dead-end tile wins the tie-break
+    let hand_at = center(sx - 3, sy);
+    app.world_mut().spawn((
+        GameId(30),
+        Owner(1),
+        MatchId(1),
+        Pos { pos: hand_at, facing: ZERO },
+        Unit::new(UnitKind::Peasant, hand_at),
+    ));
+
+    cmd(&mut app, PlayerCommand::Build {
+        player_id: 1,
+        kind: BuildingKind::Tower,
+        pos: center(sx, sy),
+        facing: 0,
+        builders: vec![30],
+    });
+    for _ in 0..400 {
+        step(app.world_mut());
+    }
+
+    let (tower_id, tower) =
+        find_building(&mut app, BuildingKind::Tower).expect("the tower was founded");
+    let hand = {
+        let world = app.world_mut();
+        let mut q = world.query::<(&GameId, &Unit)>();
+        q.iter(world).find(|(g, _)| g.0 == 30).map(|(_, u)| u.clone()).expect("the hand")
+    };
+    assert_eq!(hand.job_site, tower_id, "the hand was dropped instead of routed round");
+    assert!(
+        tower.work > Fx::ZERO || tower.state != BuildState::Site,
+        "the crew never reached the site: work {}",
+        tower.work
+    );
+}

@@ -1408,7 +1408,22 @@ fn staff_jobs(
     if crews.is_empty() {
         return;
     }
-    let mut committed: i32 = crews.iter().map(|(_, _, c)| *c).sum();
+    // A farm still going UP is field labour too — its crew stands in the plot,
+    // not in the woods, and converts to a tending crew the moment the plot tops
+    // out. Counting only finished fields let a bot raising four farms at once
+    // hire a full crew for each and then hand every one of them to the crop
+    // together: 13 of 14 peasants in the fields for a beat, measured.
+    //
+    // Counted, but never STRIPPED: taking hands off a foundation to stay under
+    // the tending budget just stops the farm being built, which is how an island
+    // bot lost its economy and never crossed. Sites bound what the finished
+    // fields may hire; they are not themselves thinned.
+    let raising: i32 = jobs
+        .iter()
+        .filter(|j| j.owner == owner && j.kind == BuildingKind::Farm && !operational(j.state))
+        .map(|j| crew_of(j.id))
+        .sum();
+    let mut committed: i32 = crews.iter().map(|(_, _, c)| *c).sum::<i32>() + raising;
     // Over budget — send the surplus back to the woods. Deepest crew first, so
     // a town that has just lost peasants thins its fields evenly instead of
     // abandoning one.
