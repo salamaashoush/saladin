@@ -268,6 +268,10 @@ pub(crate) struct BuildContext {
     /// ground and what stops a walker are different sets, and a plot your own
     /// keep has sealed off is neither occupied nor reachable.
     reach: HashSet<i32>,
+    /// What a walker cannot cross: buildings, passable ones excluded. Kept
+    /// beside `reach` because founding has to ask what the ground looks like
+    /// AFTER this footprint lands on it.
+    walk_occ: HashSet<i32>,
     /// Whether the owner has any hand that could raise anything at all. With
     /// none, the rule is waived — there is nobody to be cut off.
     has_hands: bool,
@@ -327,6 +331,7 @@ pub(crate) fn build_context(world: &World, owner: u64) -> Option<BuildContext> {
     Some(BuildContext {
         occ,
         reach,
+        walk_occ,
         has_hands,
         wall_keys,
         walls,
@@ -378,6 +383,121 @@ impl BuildContext {
     }
 }
 
+/// Tiles a pocket may hold before it stops being a pocket. A courtyard your
+/// own town encloses is bigger than this; the traps the bots build are two and
+/// three tiles across.
+const POCKET_MAX: usize = 32;
+
+/// Would raising this footprint wall the owner's own people in?
+///
+/// A bot's town is dense, and each building is legal on its own. Measured on
+/// River Valley seed 3, one grew around its peasants and left EIGHT of fourteen
+/// standing in two-tile pockets for the rest of the match: nothing crushes
+/// them, nothing tells them, and an A* out of a sealed pocket simply returns
+/// nothing every time they are asked to work.
+///
+/// One bounded flood per FOUNDING — not per candidate. `place_near` probes a
+/// perimeter every decision window and a search per probe cost 28% of the sim
+/// tick, measured; a founding happens a few times a minute.
+fn seals_own_units(
+    world: &World,
+    ctx: &BuildContext,
+    owner: u64,
+    seed: u32,
+    kind: BuildingKind,
+    pos: V2,
+) -> bool {
+    let def = building_def(kind);
+    if def.passable {
+        return false;
+    }
+    let tiles = footprint_tiles(def.footprint, pos.x, pos.y);
+    let laid: HashSet<i32> = tiles.iter().map(|t| tile_key(t.tx, t.ty)).collect();
+    let open = |tx: i32, ty: i32| {
+        let k = tile_key(tx, ty);
+        is_passable(seed, tx, ty) && !ctx.walk_occ.contains(&k) && !laid.contains(&k)
+    };
+    let centre = footprint_center(def.footprint, pos.x, pos.y);
+    let near = Fx::from_num(def.footprint + 4);
+
+    let Some(mut q) = world.try_query::<(&Owner, &Pos, &Unit)>() else { return false };
+    for (o, p, u) in q.iter(world) {
+        if o.0 != owner || u.garrisoned_in != 0 || unit_def(u.kind).afloat() {
+            continue;
+        }
+        if (p.pos.x - centre.x).abs() > near || (p.pos.y - centre.y).abs() > near {
+            continue;
+        }
+        let (ux, uy) = (p.pos.x.to_num::<i32>(), p.pos.y.to_num::<i32>());
+        if laid.contains(&tile_key(ux, uy)) {
+            continue; // standing on the plot: `shove_clear` puts him outside it
+        }
+        if !open(ux, uy) {
+            continue; // already off the walkable grid; not this footprint's doing
+        }
+        let mut seen: HashSet<i32> = HashSet::new();
+        let mut queue = vec![(ux, uy)];
+        seen.insert(tile_key(ux, uy));
+        let mut head = 0;
+        while head < queue.len() && seen.len() < POCKET_MAX {
+            let (tx, ty) = queue[head];
+            head += 1;
+            for (dx, dy) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
+                let (nx, ny) = (tx + dx, ty + dy);
+                if open(nx, ny) && seen.insert(tile_key(nx, ny)) {
+                    queue.push((nx, ny));
+                }
+            }
+        }
+        if seen.len() < POCKET_MAX {
+            return true;
+        }
+    }
+    false
+}
+
+/// Put the owner's own people off the ground a new footprint just took, the
+/// way a hall displaces the villagers standing in it. Without this the man is
+/// inside a solid block: nothing crushes him, and every A* out of it returns
+/// nothing for the rest of the match.
+fn shove_clear(world: &mut World, owner: u64, seed: u32, kind: BuildingKind, pos: V2) {
+    let def = building_def(kind);
+    if def.passable {
+        return;
+    }
+    let tiles = footprint_tiles(def.footprint, pos.x, pos.y);
+    let laid: HashSet<i32> = tiles.iter().map(|t| tile_key(t.tx, t.ty)).collect();
+    let occ = super::building_occupancy(world, false);
+    let free = |tx: i32, ty: i32| {
+        let k = tile_key(tx, ty);
+        is_passable(seed, tx, ty) && !occ.contains(&k) && !laid.contains(&k)
+    };
+    let inside: Vec<Entity> = {
+        let Some(mut q) = world.try_query::<(Entity, &Owner, &Pos, &Unit)>() else { return };
+        q.iter(world)
+            .filter(|(_, o, p, u)| {
+                o.0 == owner
+                    && u.garrisoned_in == 0
+                    && !unit_def(u.kind).afloat()
+                    && laid.contains(&tile_key(p.pos.x.to_num::<i32>(), p.pos.y.to_num::<i32>()))
+            })
+            .map(|(e, _, _, _)| e)
+            .collect()
+    };
+    for e in inside {
+        let Some(at) = world.get::<Pos>(e).map(|p| p.pos) else { continue };
+        let to = nearest_passable_grid(&free, at.x, at.y);
+        if let Some(mut p) = world.get_mut::<Pos>(e) {
+            p.pos = to;
+        }
+        if let Some(mut u) = world.get_mut::<Unit>(e) {
+            u.has_target = false;
+            u.path.clear();
+            u.path_idx = 0;
+        }
+    }
+}
+
 /// Found `kind` at `pos` against an already-gathered context — the full
 /// `check_build` rule set (buildable biome, node/building occupancy, waterside,
 /// town radius, approach, prereqs, per-kind limit, cost). The cost is paid in
@@ -404,6 +524,9 @@ pub(crate) fn build_with(
     let seed = world.resource::<WorldConfig>().seed;
     let composes = composes_with_walls(kind);
     ctx.check(seed, kind, pos)?;
+    if seals_own_units(world, ctx, owner, seed, kind, pos) {
+        return Err(PlaceError::NoApproach);
+    }
     {
         let mut q = world.query::<&mut Player>();
         let Some(mut p) = q.iter_mut(world).find(|p| p.player_id == owner) else {
@@ -438,6 +561,7 @@ pub(crate) fn build_with(
 
     let center = footprint_center(def.footprint, pos.x, pos.y);
     let state = if def.build_time > Fx::ZERO { BuildState::Site } else { BuildState::Complete };
+    shove_clear(world, owner, seed, kind, center);
     let id = spawn::spawn_building(world, owner, kind, center, ctx.match_id, state);
     if state == BuildState::Complete {
         finish_building(world, id);

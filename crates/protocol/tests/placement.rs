@@ -563,3 +563,94 @@ fn walling_yourself_out_of_a_plot_refuses_the_build() {
     step(app.world_mut());
     assert_eq!(building_count(&mut app, BuildingKind::Tower), 1, "one gap is a way in");
 }
+
+/// A bot's town is dense and every building in it is legal on its own. On River
+/// Valley seed 3 one grew around its own peasants and left EIGHT of fourteen
+/// standing in two-tile pockets for the rest of the match: nothing crushes
+/// them, nothing tells them, and an A* out of a sealed pocket returns nothing
+/// every time they are asked to work. Found by the devctl soak.
+#[test]
+fn founding_never_walls_your_own_people_in() {
+    let seed = 1;
+    let (cx, cy) = inland_block(seed);
+    let mut app = build_app(seed);
+    spawn_player(&mut app, 1);
+    spawn_building(&mut app, 10, 1, BuildingKind::Keep, center(cx + 1, cy + 1));
+
+    // a one-tile alcove: three walls, the mouth still open
+    let (px, py) = (cx + 5, cy + 5);
+    for (i, (dx, dy)) in [(-1, 0), (1, 0), (0, -1)].into_iter().enumerate() {
+        spawn_building(&mut app, 20 + i as u64, 1, BuildingKind::Wall, center(px + dx, py + dy));
+    }
+    let man = center(px, py);
+    app.world_mut().spawn((
+        GameId(30),
+        Owner(1),
+        MatchId(1),
+        Pos { pos: man, facing: ZERO },
+        Unit::new(UnitKind::Peasant, man),
+    ));
+
+    // stopping the mouth would leave him one tile to live in
+    cmd(&mut app, PlayerCommand::Build { player_id: 1, kind: BuildingKind::Tower, pos: center(px, py + 1), facing: 0, builders: vec![] });
+    step(app.world_mut());
+    assert_eq!(building_count(&mut app, BuildingKind::Tower), 0, "the mouth was stopped on him");
+    let why: Vec<PlaceError> =
+        app.world().resource::<CommandFeedback>().0.iter().map(|(_, e)| *e).collect();
+    assert_eq!(why, vec![PlaceError::NoApproach]);
+
+    // with nobody in the alcove the same placement is fine
+    let out = center(cx + 1, cy + 4);
+    {
+        let world = app.world_mut();
+        let mut q = world.query::<(&GameId, &mut Pos)>();
+        let (_, mut p) = q.iter_mut(world).find(|(g, _)| g.0 == 30).expect("the man");
+        p.pos = out;
+    }
+    cmd(&mut app, PlayerCommand::Build { player_id: 1, kind: BuildingKind::Tower, pos: center(px, py + 1), facing: 0, builders: vec![] });
+    step(app.world_mut());
+    assert_eq!(building_count(&mut app, BuildingKind::Tower), 1, "an empty alcove may be closed");
+}
+
+/// A hall displaces the villagers standing in it — it does not entomb them.
+#[test]
+fn a_foundation_shoves_the_men_standing_on_it_clear() {
+    let seed = 1;
+    let (cx, cy) = inland_block(seed);
+    let mut app = build_app(seed);
+    spawn_player(&mut app, 1);
+    spawn_building(&mut app, 10, 1, BuildingKind::Keep, center(cx + 1, cy + 1));
+
+    let at = center(cx + 5, cy + 5);
+    app.world_mut().spawn((
+        GameId(30),
+        Owner(1),
+        MatchId(1),
+        Pos { pos: at, facing: ZERO },
+        Unit::new(UnitKind::Peasant, at),
+    ));
+
+    cmd(&mut app, PlayerCommand::Build { player_id: 1, kind: BuildingKind::Barracks, pos: at, facing: 0, builders: vec![] });
+    step(app.world_mut());
+    assert_eq!(building_count(&mut app, BuildingKind::Barracks), 1, "the hall went up");
+
+    let (moved, footprint) = {
+        let world = app.world_mut();
+        let mut q = world.query::<(&GameId, &Pos)>();
+        let man = q.iter(world).find(|(g, _)| g.0 == 30).map(|(_, p)| p.pos).expect("the man");
+        let fp = saladin_sim::footprint_tiles(
+            building_def(BuildingKind::Barracks).footprint,
+            at.x,
+            at.y,
+        );
+        (man, fp)
+    };
+    let on = footprint.iter().any(|t| {
+        t.tx == moved.x.to_num::<i32>() && t.ty == moved.y.to_num::<i32>()
+    });
+    assert!(!on, "the man was entombed under the hall at {moved:?}");
+    assert!(
+        is_passable(seed, moved.x.to_num::<i32>(), moved.y.to_num::<i32>()),
+        "he was shoved onto ground he cannot stand on"
+    );
+}

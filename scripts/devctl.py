@@ -108,7 +108,7 @@ def _factory(name: str):
 for _n in COMMANDS:
     globals()[_n] = _factory(_n)
 
-__all__ = ["Devctl", "DevctlError", "Cmd", "Row", "State", "wait_for", *COMMANDS]
+__all__ = ["Devctl", "DevctlError", "Cmd", "Row", "State", "draw", "wait_for", *COMMANDS]
 
 
 class Row(dict):
@@ -300,6 +300,53 @@ class Devctl:
             req["near"] = {"pos": _plain(near["pos"]), "radius": near["radius"]}
         return State(self._ok(self.request(req), "query state"))
 
+    def probe(
+        self,
+        kind: str,
+        pos: tuple | list | None = None,
+        near: tuple | list | None = None,
+        radius: int = 6,
+        player: int = 1,
+    ) -> list[Row]:
+        """Would this placement be accepted, and if not why? A dry run through
+        the command's own rule set: no tick, no cost, no site to cancel."""
+        req: dict[str, Any] = {"query": "probe", "player": player, "kind": kind}
+        if pos is not None:
+            req["pos"] = _plain(pos)
+        else:
+            req["near"] = _plain(near)
+            req["radius"] = radius
+        return [Row(r) for r in self._ok(self.request(req), f"probe {kind}")["results"]]
+
+    def buildable(self, kind: str, near, radius: int = 6, player: int = 1) -> list[Row]:
+        """Every accepted spot in one square, nearest the centre first."""
+        cx, cy = _plain(near)
+        ok = [r for r in self.probe(kind, near=near, radius=radius, player=player) if r["ok"]]
+        return sorted(ok, key=lambda r: (r.pos[0] - cx) ** 2 + (r.pos[1] - cy) ** 2)
+
+    def path(self, to, unit: int | None = None, frm=None, player: int = 0, domain: str = "Land") -> Row:
+        """Can this unit walk there, by the closure `movement` itself builds?"""
+        req: dict[str, Any] = {"query": "path", "to": _plain(to), "domain": domain}
+        if unit is not None:
+            req["unit"] = unit
+        else:
+            req["from"] = _plain(frm)
+            req["player"] = player
+        return Row(self._ok(self.request(req), "query path"))
+
+    def terrain(self, near, radius: int = 12, player: int | None = None) -> Row:
+        """The ground as the sim sees it, drawn. `player` overlays that owner's
+        builder reach — seeing both is how a placement that disagrees with the
+        pathfinder gets caught."""
+        req: dict[str, Any] = {"query": "terrain", "near": _plain(near), "radius": radius}
+        if player is not None:
+            req["player"] = player
+        return Row(self._ok(self.request(req), "query terrain"))
+
+    def invariants(self) -> Row:
+        """Everything that must never be true, checked in one pass."""
+        return Row(self._ok(self.request({"query": "invariants"}), "query invariants"))
+
     def feedback(self) -> list[dict]:
         """Every refusal since the last call — WHY a command did nothing."""
         return self._ok(self.request({"feedback": True}), "feedback")["feedback"]
@@ -353,6 +400,17 @@ class Devctl:
                 )
             last = reply
         return last
+
+
+def draw(t: Row) -> str:
+    """A terrain answer as a labelled block, for a log or a terminal."""
+    x0, y0 = t["origin"]
+    head = [
+        "    " + "".join(str((x0 + i) // 10 % 10) for i in range(t["size"])),
+        "    " + "".join(str((x0 + i) % 10) for i in range(t["size"])),
+    ]
+    body = [f"{y0 + i:3d} {row}" for i, row in enumerate(t["rows"])]
+    return "\n".join(head + body)
 
 
 def wait_for(port: int, host: str = "127.0.0.1", seconds: float = 60.0) -> Devctl:

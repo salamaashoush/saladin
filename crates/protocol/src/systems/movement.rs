@@ -1,7 +1,7 @@
 use crate::{GameIndex, MatchStatuses, WorldConfig};
 use crate::components::{GameId, MatchId, ORDER_NONE, ORDER_STOP, Pos, Unit};
 use bevy_ecs::prelude::*;
-use saladin_sim::{ARRIVE_EPS, Domain, Fx, MOVE_DT, V2, is_sailable, step_toward, unit_def};
+use saladin_sim::{ARRIVE_EPS, Domain, Fx, MOVE_DT, V2, is_passable, is_sailable, step_toward, unit_def};
 
 /// tan(11.25 deg) and tan(33.75 deg) — the two sector walls inside one octant.
 const T1: Fx = saladin_sim::fx!("0.19891237");
@@ -49,6 +49,28 @@ fn afloat(seed: u32, from: V2, to: V2) -> V2 {
     }
     let y_only = V2::new(from.x, to.y);
     if wet(y_only) { y_only } else { from }
+}
+
+/// The step a walker may actually take — `afloat`'s mirror, and needed for the
+/// same reason. `line_of_sight` samples a leg twice a tile, so a leg that
+/// crosses a one-tile river diagonally can be sampled on both banks and read as
+/// clear: the man then walks over the water, and a ford stops being the only
+/// way across. Found by the devctl soak on seeds 4 and 6, a Spearman and a
+/// peasant standing mid-River with legal paths in hand.
+///
+/// A mover ALREADY off the grid is let through: it is the only way back, and
+/// freezing it there would turn one bad step into a unit lost for the match.
+fn ashore(seed: u32, from: V2, to: V2) -> V2 {
+    let dry = |p: V2| is_passable(seed, p.x.to_num::<i32>(), p.y.to_num::<i32>());
+    if dry(to) || !dry(from) {
+        return to;
+    }
+    let x_only = V2::new(to.x, from.y);
+    if dry(x_only) {
+        return x_only;
+    }
+    let y_only = V2::new(from.x, to.y);
+    if dry(y_only) { y_only } else { from }
 }
 
 /// Integrate every active mover one base tick toward its target, advancing along
@@ -112,17 +134,14 @@ pub fn movement(
         let step = u.speed * MOVE_DT;
         let from = pos.pos;
         let r = step_toward(pos.pos, u.target, step, ARRIVE_EPS);
-        // A hull is the one mover whose ground is VISIBLE, and the only one whose
-        // path being right is not enough. Every sea leg is cleared with the exact
-        // DDA when it is laid, but `step_toward` is fixed point and `separation`
-        // nudges: a leg that runs along a tile boundary crosses it on a hair of
-        // drift, and the boat then stands on a headland with a perfectly legal
-        // path still in hand. Slide along whichever axis still floats, exactly as
-        // `separation` lands a push. Land is untouched — one enum compare — both
-        // because a man a hair inside a wall is invisible and because every land
-        // path in the game is measured against the behaviour it has now.
+        // A path being right is not enough for either domain. `step_toward` is
+        // fixed point and `separation` nudges, so a leg that runs along a tile
+        // boundary crosses it on a hair of drift; and a land leg is only
+        // SAMPLED when it is laid, so one that shaves a river corner was never
+        // clear at all. Slide along whichever axis still holds the mover,
+        // exactly as `separation` lands a push.
         pos.pos = match unit_def(u.kind).domain {
-            Domain::Land => r.pos,
+            Domain::Land => ashore(seed, from, r.pos),
             Domain::Sea => afloat(seed, from, r.pos),
         };
         let d = V2::new(pos.pos.x - from.x, pos.pos.y - from.y);

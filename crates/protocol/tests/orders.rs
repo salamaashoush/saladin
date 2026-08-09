@@ -317,13 +317,22 @@ fn a_stop_halts_everything_and_the_man_can_be_put_back_to_work() {
         ResourceNode { res_type: ResourceType::Wood, remaining: 500, cap: 500, regen: 0 },
     ));
 
+    // the hunter has to be someone who can actually swing: `combat` skips a
+    // worker on exactly that test, so a target set on one would never be
+    // cleared again
+    put(&mut app, 3, 1, UnitKind::Spearman, tile(cx + 3, cy + 2));
     push(&mut app, PlayerCommand::Move { player_id: 1, unit: 1, target: tile(cx + 20, cy + 20) });
+    push(&mut app, PlayerCommand::Attack { player_id: 1, unit: 3, target: 2 });
     push(&mut app, PlayerCommand::Attack { player_id: 1, unit: 1, target: 2 });
     step(app.world_mut());
-    assert_ne!(unit_of(&mut app, 1).attack_target, 0);
+    assert_ne!(unit_of(&mut app, 3).attack_target, 0);
+    let worker = unit_of(&mut app, 1);
+    assert_eq!(worker.attack_target, 0, "a worker locked onto a quarry he can never strike");
+    assert!(worker.has_target, "...and did not even march on it");
 
-    push(&mut app, PlayerCommand::Stop { player_id: 1, units: vec![1] });
+    push(&mut app, PlayerCommand::Stop { player_id: 1, units: vec![1, 3] });
     step(app.world_mut());
+    assert_eq!(unit_of(&mut app, 3).attack_target, 0, "a stopped hunter is still hunting");
     let u = unit_of(&mut app, 1);
     assert!(!u.has_target, "a stopped man is still walking");
     assert!(u.path.is_empty(), "a stopped man kept his path");
@@ -620,4 +629,64 @@ fn a_peer_that_ordered_differently_hashes_differently() {
         b.world().resource::<StateHash>().0,
         "two different formations hashed the same"
     );
+}
+
+/// The mirror of `naval.rs::a_hull_handed_a_leg_across_land_still_never_stands_on_it`.
+///
+/// A land leg is only SAMPLED when it is laid — twice a tile — so a leg that
+/// crosses a one-tile river diagonally can be sampled on both banks and read as
+/// clear. The man then walks over the water and a ford stops being the only way
+/// across. Found by the devctl soak on seeds 4 and 6: a Spearman and a peasant
+/// standing mid-River with legal paths in hand.
+#[test]
+fn a_walker_handed_a_leg_across_a_river_never_stands_in_it() {
+    use saladin_sim::{Biome, WORLD_SIZE, sample_terrain};
+    let seed = saladin_sim::compose_seed(2, 2); // River Valley: rivers to cross
+
+    // a river tile with dry ground on both sides along one axis
+    let half = saladin_sim::fx!("0.5");
+    let wet = |tx: i32, ty: i32| {
+        matches!(
+            sample_terrain(seed, Fx::from_num(tx) + half, Fx::from_num(ty) + half).biome,
+            Biome::River
+        ) && !is_passable(seed, tx, ty)
+    };
+    let mut crossing = None;
+    'find: for ty in 24..WORLD_SIZE - 24 {
+        for tx in 24..WORLD_SIZE - 24 {
+            if wet(tx, ty)
+                && (1..=3).all(|d| is_passable(seed, tx - d, ty))
+                && (1..=3).all(|d| is_passable(seed, tx + d, ty))
+            {
+                crossing = Some((tx, ty));
+                break 'find;
+            }
+        }
+    }
+    let (rx, ry) = crossing.expect("River Valley has a river with banks");
+    let from = V2::new(Fx::from_num(rx - 3) + half, Fx::from_num(ry) + half);
+    let to = V2::new(Fx::from_num(rx + 3) + half, Fx::from_num(ry) + half);
+
+    let mut app = arena(seed);
+    // straight at the far bank, through the water — no pathfinder involved
+    put(&mut app, 1, 1, UnitKind::Spearman, from);
+    {
+        let world = app.world_mut();
+        let mut q = world.query::<(&GameId, &mut Unit)>();
+        let (_, mut u) = q.iter_mut(world).find(|(g, _)| g.0 == 1).expect("the man");
+        u.path = vec![to];
+        u.path_idx = 0;
+        u.target = to;
+        u.has_target = true;
+    }
+
+    let mut checked = 0;
+    for _ in 0..400 {
+        step(app.world_mut());
+        let p = pos_of(&mut app, 1);
+        let (tx, ty) = (p.x.to_num::<i32>(), p.y.to_num::<i32>());
+        assert!(is_passable(seed, tx, ty), "the man forded the river at {tx},{ty}");
+        checked += 1;
+    }
+    assert!(checked >= 400);
 }

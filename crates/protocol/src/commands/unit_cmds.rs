@@ -182,6 +182,17 @@ pub(crate) fn gather(world: &mut World, owner: u64, unit: u64, node: u64) {
 }
 
 /// Order an explicit attack on an enemy unit or building. Mirrors `attackUnit`.
+/// Can this unit hold a target at all? The gate `combat` itself uses, read the
+/// same way (through the owner's tech mask, so a research that arms a kind arms
+/// it here too). A unit that cannot fight must never be handed an
+/// `attack_target`: `combat` skips it on exactly this test, so nothing would
+/// ever clear the id — the man walks to where the corpse used to be and keeps
+/// walking, order intact, for the rest of the match. Found by the devctl soak,
+/// three of a bot's support units chasing a dead row across half the map.
+pub(crate) fn fights(world: &mut World, owner: u64, kind: UnitKind) -> bool {
+    effective_unit_def(kind, super::tech_mask_of(world, owner)).attack > 0
+}
+
 pub(crate) fn attack(world: &mut World, owner: u64, unit: u64, target: u64) {
     let Some(e) = find_owned(world, owner, unit) else { return };
     if world.get::<Unit>(e).is_none_or(|u| u.garrisoned_in != 0) {
@@ -193,6 +204,21 @@ pub(crate) fn attack(world: &mut World, owner: u64, unit: u64, target: u64) {
         q.iter(world).any(|(g, o)| g.0 == target && o.0 != owner)
     };
     if !target_enemy {
+        return;
+    }
+    let kind = match world.get::<Unit>(e) {
+        Some(u) => u.kind,
+        None => return,
+    };
+    // a non-combatant marches ON the target instead of locking to it
+    if !fights(world, owner, kind) {
+        let tpos = {
+            let mut q = world.query::<(&GameId, &Pos)>();
+            q.iter(world).find(|(g, _)| g.0 == target).map(|(_, p)| p.pos)
+        };
+        if let Some(tpos) = tpos {
+            move_unit(world, owner, unit, tpos);
+        }
         return;
     }
     if let Some(mut u) = world.get_mut::<Unit>(e) {
@@ -544,6 +570,13 @@ fn lay_march(
         domain_passable(seed, dom, tx, ty) && !occ.contains(&k) && !gate_blocks(&gates, k, owner)
     };
     let cost = step_cost(seed, dom);
+    // one tech-mask read for the whole column, not one per man
+    let can_fight: std::collections::HashMap<u64, bool> = if attack_target == 0 {
+        Default::default()
+    } else {
+        let mask = super::tech_mask_of(world, owner);
+        members.iter().map(|m| (m.id, effective_unit_def(m.kind, mask).attack > 0)).collect()
+    };
     let free = |p: V2| passable(p.x.to_num::<i32>(), p.y.to_num::<i32>());
     // Whether a mover may be sent down a straight leg. A man is measured with
     // the sampled line every land march in the game has always used — shaving
@@ -648,11 +681,15 @@ fn lay_march(
         } else if walks && path.is_empty() {
             walks = false;
         }
+        // Support and workers march with the wave but never hold its target:
+        // `combat` skips anything that cannot swing, so an id set here would
+        // never be cleared and the man would chase a corpse forever.
+        let locks = attack_target != 0 && can_fight.get(&m.id).copied().unwrap_or(false);
         let Some(mut u) = world.get_mut::<Unit>(m.e) else { continue };
         u.gather_state = GatherState::Idle;
         u.target_node = 0;
         u.job_site = 0;
-        u.attack_target = attack_target;
+        u.attack_target = if locks { attack_target } else { 0 };
         u.order = order;
         u.order_target = dest;
         u.anchor = m.pos;

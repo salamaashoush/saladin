@@ -27,9 +27,23 @@ pub(super) fn query(world: &mut World, v: &Value, req: &Map<String, Value>, repl
             Ok(scope) => reply.ok(capture(world, &scope)),
             Err(e) => reply.err(e),
         },
-        other => {
-            reply.err(format!("unknown query: {other} (expected one of: tick, state, feedback)"))
-        }
+        "probe" => match probe(world, req) {
+            Ok(v) => reply.ok(v),
+            Err(e) => reply.err(e),
+        },
+        "path" => match path(world, req) {
+            Ok(v) => reply.ok(v),
+            Err(e) => reply.err(e),
+        },
+        "terrain" => match terrain(world, req) {
+            Ok(v) => reply.ok(v),
+            Err(e) => reply.err(e),
+        },
+        "invariants" => reply.ok(invariants(world)),
+        other => reply.err(format!(
+            "unknown query: {other} \
+             (expected one of: tick, state, probe, path, terrain, invariants, feedback)"
+        )),
     }
 }
 
@@ -391,4 +405,345 @@ fn nodes(world: &World, scope: &Scope) -> Vec<Value> {
         })
         .collect();
     by_id(rows)
+}
+
+// ── the instruments ──────────────────────────────────────────────────────────
+
+/// Would this placement be accepted, and if not, why? A DRY RUN: it asks the
+/// command's own gathering (`BuildContext::check`), so it can never answer
+/// differently from the order it stands in for, and it costs nothing — no tick,
+/// no stockpile, no site to cancel. Probing by issuing a real Build and reading
+/// the refusal works, but it churns the world and only answers once a tick.
+fn probe(world: &World, req: &Map<String, Value>) -> Result<Value, String> {
+    let player = at(req, "player")?.as_u64().ok_or("player takes a player id")?;
+    let kind: saladin_sim::BuildingKind = serde_json::from_value(at(req, "kind")?.clone())
+        .map_err(|e| format!("field \"kind\": {e}"))?;
+    let seed = world.resource::<WorldConfig>().seed;
+    let ctx = crate::commands::build_context(world, player)
+        .ok_or_else(|| format!("no player {player} in this match"))?;
+
+    let one = |pos: V2| {
+        let verdict = ctx.check(seed, kind, pos);
+        json!({
+            "pos": v2_json(pos),
+            "ok": verdict.is_ok(),
+            "error": verdict.err().map(|e| format!("{e:?}")),
+            "text": verdict.err().map(saladin_sim::place_error_text),
+        })
+    };
+    match req.get("pos") {
+        Some(v) => Ok(json!({ "results": [one(v2_from(v).map_err(|e| format!("pos: {e}"))?)] })),
+        // a whole square at once: an agent siting a base asks about a REGION,
+        // and one request beats sixty round trips
+        None => {
+            let c = v2_from(at(req, "near")?).map_err(|e| format!("near: {e}"))?;
+            let r = at(req, "radius")?.as_i64().ok_or("radius takes tiles")?.clamp(0, 24) as i32;
+            let (cx, cy) = (c.x.to_num::<i32>(), c.y.to_num::<i32>());
+            let half = saladin_sim::fx!("0.5");
+            let mut out = Vec::new();
+            for dy in -r..=r {
+                for dx in -r..=r {
+                    out.push(one(V2::new(
+                        Fx::from_num(cx + dx) + half,
+                        Fx::from_num(cy + dy) + half,
+                    )));
+                }
+            }
+            Ok(json!({ "results": out }))
+        }
+    }
+}
+
+/// Can this unit walk there, and by what route? The closure is built exactly as
+/// `movement` and `construction` build theirs — same domain, same occupancy,
+/// same gates — so a disagreement between what the placement rules allow and
+/// what a builder can actually reach shows up here as a fact rather than as a
+/// foundation stuck at zero work.
+///
+/// Allocates its own `AStar` and `Flood` rather than borrowing `PathScratch`:
+/// a query that writes a sim resource is a query that can desync a peer, and a
+/// few megabytes once per debug request is not a hot path.
+fn path(world: &World, req: &Map<String, Value>) -> Result<Value, String> {
+    use saladin_sim::{
+        AStar, Domain, Flood, MAX_EXPANSIONS, approach_tile, domain_passable, gate_blocks,
+        move_cost_at, nearest_reachable_passable_grid, reach_budget, unit_def,
+    };
+    let seed = world.resource::<WorldConfig>().seed;
+    let to = v2_from(at(req, "to")?).map_err(|e| format!("to: {e}"))?;
+
+    let (from, owner, domain, unit) = match req.get("unit") {
+        Some(v) => {
+            let id = v.as_u64().ok_or("unit takes a game id")?;
+            let mut q = world
+                .try_query::<(&GameId, &Owner, &Pos, &Unit)>()
+                .ok_or("this world has no units")?;
+            let row = q
+                .iter(world)
+                .find(|(g, ..)| g.0 == id)
+                .ok_or_else(|| format!("no unit {id}"))?;
+            (row.2.pos, row.1.0, unit_def(row.3.kind).domain, Some(id))
+        }
+        None => (
+            v2_from(at(req, "from")?).map_err(|e| format!("from: {e}"))?,
+            req.get("player").and_then(|v| v.as_u64()).unwrap_or(0),
+            match req.get("domain").and_then(|v| v.as_str()) {
+                Some("Sea") => Domain::Sea,
+                _ => Domain::Land,
+            },
+            None,
+        ),
+    };
+
+    let (occ, gates) = crate::commands::occupancy_and_gates(world, false);
+    let passable = |tx: i32, ty: i32| {
+        let k = saladin_sim::tile_key(tx, ty);
+        domain_passable(seed, domain, tx, ty)
+            && !occ.contains(&k)
+            && !gate_blocks(&gates, k, owner)
+    };
+    let mut flood = Flood::default();
+    let reach = nearest_reachable_passable_grid(
+        &mut flood,
+        &passable,
+        from,
+        to,
+        reach_budget(saladin_sim::dist(from, to)),
+    );
+    let truncated = reach.as_ref().map(|r| r.truncated);
+    let snap = approach_tile(seed, &passable, from, to, 3).or(reach.map(|r| r.at));
+    let route = match snap {
+        Some(s) => {
+            let cost = |tx: i32, ty: i32| move_cost_at(seed, tx, ty);
+            let mut astar = AStar::default();
+            astar.find_path_costed_in(
+                &passable,
+                &cost,
+                from.x,
+                from.y,
+                s.x,
+                s.y,
+                MAX_EXPANSIONS,
+                domain.smoothing(),
+            )
+        }
+        None => Vec::new(),
+    };
+    Ok(json!({
+        "unit": unit,
+        "from": v2_json(from),
+        "to": v2_json(to),
+        "domain": format!("{domain:?}"),
+        "reachable": !route.is_empty(),
+        "snap": snap.map(v2_json),
+        "truncated": truncated,
+        "legs": route.len(),
+        "route": route.iter().map(|p| v2_json(*p)).collect::<Vec<_>>(),
+    }))
+}
+
+/// The ground as the sim sees it, drawn. One request answers "why can nothing
+/// walk from here to there" that a thousand `path` calls only hint at, and an
+/// ASCII block is readable by an agent and by a human over `nc` alike.
+///
+/// `player` overlays that owner's builder reach (`town_reach`), which is the
+/// set the placement rules read — seeing the two together is how a placement
+/// that disagrees with the pathfinder gets caught.
+fn terrain(world: &World, req: &Map<String, Value>) -> Result<Value, String> {
+    let c = v2_from(at(req, "near")?).map_err(|e| format!("near: {e}"))?;
+    let r = at(req, "radius")?.as_i64().ok_or("radius takes tiles")?.clamp(1, 60) as i32;
+    let seed = world.resource::<WorldConfig>().seed;
+    let (cx, cy) = (c.x.to_num::<i32>(), c.y.to_num::<i32>());
+
+    let occ = crate::commands::occupancy_and_gates(world, false).0;
+    let solid = crate::commands::occupancy_and_gates(world, true).0;
+    let nodes: std::collections::HashSet<i32> = match world.try_query::<(&Pos, &ResourceNode)>() {
+        Some(mut q) => q
+            .iter(world)
+            .map(|(p, _)| saladin_sim::tile_key(p.pos.x.to_num::<i32>(), p.pos.y.to_num::<i32>()))
+            .collect(),
+        None => Default::default(),
+    };
+    let reach = match req.get("player").and_then(|v| v.as_u64()) {
+        Some(p) => crate::commands::build_context(world, p).map(|ctx| ctx.reach_set().clone()),
+        None => None,
+    };
+
+    let mut rows = Vec::with_capacity((r * 2 + 1) as usize);
+    for ty in cy - r..=cy + r {
+        let mut row = String::with_capacity((r * 2 + 1) as usize);
+        for tx in cx - r..=cx + r {
+            let key = saladin_sim::tile_key(tx, ty);
+            let ch = if solid.contains(&key) {
+                if occ.contains(&key) { 'B' } else { 'g' }
+            } else if nodes.contains(&key) {
+                'n'
+            } else if saladin_sim::is_sailable(seed, tx, ty) {
+                '~'
+            } else if !saladin_sim::is_passable(seed, tx, ty) {
+                '#'
+            } else if reach.as_ref().is_some_and(|s| s.contains(&key)) {
+                '+'
+            } else if reach.is_some() {
+                '-'
+            } else {
+                '.'
+            };
+            row.push(ch);
+        }
+        rows.push(row);
+    }
+    Ok(json!({
+        "origin": [cx - r, cy - r],
+        "size": r * 2 + 1,
+        "rows": rows,
+        "legend": {
+            "B": "building (blocks a walker)",
+            "g": "gatehouse (its owner walks through)",
+            "n": "resource node",
+            "~": "sailable water",
+            "#": "impassable land",
+            "+": "open, and inside this player's builder reach",
+            "-": "open, but CUT OFF from this player's builders",
+            ".": "open (no player asked about)"
+        }
+    }))
+}
+
+/// Everything about the world that must never be true, checked in one pass.
+///
+/// A soak run asks this every few hundred ticks; each answer is a bug with its
+/// row already named, which is the difference between "the bots did something
+/// odd on seed 31" and a repro. Cheap enough to ask often: one walk of the
+/// units, one of the buildings, one of the nodes.
+fn invariants(world: &World) -> Value {
+    use saladin_sim::{Domain, WORLD_SIZE, is_passable, is_sailable, unit_def};
+    let seed = world.resource::<WorldConfig>().seed;
+    let mut bad: Vec<Value> = Vec::new();
+    let mut note = |rule: &str, id: u64, what: String| {
+        bad.push(json!({ "rule": rule, "id": id, "detail": what }));
+    };
+
+    let mut alive: std::collections::HashSet<u64> = Default::default();
+    let mut seen: std::collections::HashSet<u64> = Default::default();
+    if let Some(mut q) = world.try_query::<&GameId>() {
+        for g in q.iter(world) {
+            alive.insert(g.0);
+            if !seen.insert(g.0) {
+                note("duplicate GameId", g.0, "two rows share one id".into());
+            }
+        }
+    }
+    let players: std::collections::HashSet<u64> = match world.try_query::<&Player>() {
+        Some(mut q) => q.iter(world).map(|p| p.player_id).collect(),
+        None => Default::default(),
+    };
+
+    if let Some(mut q) = world.try_query::<(&GameId, &Owner, &Pos, &Unit)>() {
+        for (g, o, p, u) in q.iter(world) {
+            let (tx, ty) = (p.pos.x.to_num::<i32>(), p.pos.y.to_num::<i32>());
+            if tx < 0 || ty < 0 || tx >= WORLD_SIZE || ty >= WORLD_SIZE {
+                note("unit off the map", g.0, format!("at {tx},{ty}"));
+            } else if unit_def(u.kind).domain == Domain::Sea {
+                if !is_sailable(seed, tx, ty) {
+                    note("hull aground", g.0, format!("{:?} at {tx},{ty}", u.kind));
+                }
+            } else if u.garrisoned_in == 0 && !is_passable(seed, tx, ty) {
+                let biome = saladin_sim::sample_terrain(
+                    seed,
+                    Fx::from_num(tx) + saladin_sim::fx!("0.5"),
+                    Fx::from_num(ty) + saladin_sim::fx!("0.5"),
+                )
+                .biome;
+                note(
+                    "walker on impassable ground",
+                    g.0,
+                    format!(
+                        "{:?} at {tx},{ty} on {biome:?} (order {}, routing {}, path {})",
+                        u.kind,
+                        u.order,
+                        u.routing,
+                        u.path.len()
+                    ),
+                );
+            }
+            if u.hp <= 0 {
+                note("dead unit still standing", g.0, format!("hp {}", u.hp));
+            }
+            if !players.contains(&o.0) {
+                note("unit with no player", g.0, format!("owner {}", o.0));
+            }
+            // A HAULER legitimately remembers the node it just emptied — the
+            // whole crew that drew one to zero carries its id home and picks a
+            // new one on arrival. Only a hand still walking TO a node, or a
+            // passenger of a hull that no longer exists, is a dangling
+            // reference. A checker that cries wolf gets ignored.
+            let heading_out = matches!(
+                u.gather_state,
+                saladin_sim::GatherState::ToResource | saladin_sim::GatherState::Harvesting
+            );
+            for (what, target) in [
+                ("attack_target", u.attack_target),
+                ("target_node", if heading_out { u.target_node } else { 0 }),
+                ("job_site", u.job_site),
+                ("garrisoned_in", u.garrisoned_in),
+            ] {
+                if target != 0 && !alive.contains(&target) {
+                    note("order points at a dead row", g.0, format!("{what} = {target}"));
+                }
+            }
+        }
+    }
+
+    if let Some(mut q) = world.try_query::<(&GameId, &Owner, &Building)>() {
+        for (g, o, b) in q.iter(world) {
+            if b.hp <= 0 {
+                note("razed building still standing", g.0, format!("hp {}", b.hp));
+            }
+            if b.builders < 0 {
+                note("negative crew", g.0, format!("builders {}", b.builders));
+            }
+            if b.queue_len as usize > saladin_sim::QUEUE_CAP {
+                note("queue past its cap", g.0, format!("len {}", b.queue_len));
+            }
+            if !players.contains(&o.0) {
+                note("building with no player", g.0, format!("owner {}", o.0));
+            }
+        }
+    }
+
+    if let Some(mut q) = world.try_query::<(&GameId, &ResourceNode)>() {
+        for (g, n) in q.iter(world) {
+            if n.remaining < 0 {
+                note("node drawn below zero", g.0, format!("remaining {}", n.remaining));
+            }
+            if n.cap > 0 && n.remaining > n.cap {
+                note("node past its cap", g.0, format!("{} of {}", n.remaining, n.cap));
+            }
+        }
+    }
+    if let Some(mut q) = world.try_query::<(&GameId, &FieldOf)>() {
+        for (g, f) in q.iter(world) {
+            if !alive.contains(&f.0) {
+                note("field outliving its farm", g.0, format!("farm {}", f.0));
+            }
+        }
+    }
+    if let Some(mut q) = world.try_query::<&Player>() {
+        for p in q.iter(world) {
+            for (res, v) in
+                [("wood", p.stock.wood), ("stone", p.stock.stone), ("food", p.stock.food), ("gold", p.stock.gold)]
+            {
+                if v < 0 {
+                    note("stockpile below zero", p.player_id, format!("{res} {v}"));
+                }
+            }
+        }
+    }
+
+    json!({
+        "tick": world.resource::<Tick>().0,
+        "hash": world.resource::<StateHash>().0,
+        "clean": bad.is_empty(),
+        "violations": bad,
+    })
 }
