@@ -6,6 +6,8 @@
 
 pub mod commands;
 pub mod components;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod devctl;
 pub mod net;
 pub mod net_msg;
 #[cfg(not(target_arch = "wasm32"))]
@@ -16,6 +18,8 @@ pub mod relay_core;
 pub mod save;
 pub mod systems;
 
+#[cfg(not(target_arch = "wasm32"))]
+pub use devctl::{DevctlLink, DevctlPlugin};
 #[cfg(not(target_arch = "wasm32"))]
 pub use net_tcp::{TcpTransport, run_relay, spawn_host_relay};
 #[cfg(not(target_arch = "wasm32"))]

@@ -4825,6 +4825,7 @@ dependencies = [
  "ewebsock",
  "saladin-sim",
  "serde",
+ "serde_json",
  "tungstenite 0.29.0",
 ]
 
