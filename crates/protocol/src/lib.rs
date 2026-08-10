@@ -169,6 +169,36 @@ impl MatchStats {
     }
 }
 
+/// What each bot's brain SAW on its last beat, for devctl's planner query.
+///
+/// Published by `ai_brain` at the point the numbers are computed, never
+/// re-derived: a debugger that reconstructs the planner's inputs from the world
+/// is a second implementation, and the moment it disagrees it is worse than
+/// nothing. The resource only exists when devctl is listening, so a normal run
+/// pays one `Option` check per brain beat and no clone at all.
+#[derive(Resource, Default)]
+pub struct BotDebug(pub HashMap<u64, BotThoughts>);
+
+/// One bot's view of itself, as its own planner assembled it.
+#[derive(Clone, Debug)]
+pub struct BotThoughts {
+    pub tick: u64,
+    pub state: saladin_sim::PlannerState,
+    pub tuning: saladin_sim::PlannerTuning,
+    pub crisis: bool,
+    pub food_emergency: bool,
+    pub food_surplus: bool,
+    pub food_cushion: i32,
+    pub scarce_build: saladin_sim::ResourceType,
+    pub on_food: i32,
+    pub want_food: i32,
+    pub idle_bias: Option<saladin_sim::ResourceType>,
+    pub labour: saladin_sim::FieldLabour,
+    pub build: Option<saladin_sim::BuildDecision>,
+    pub trade: Option<saladin_sim::TradeDecision>,
+    pub phase: saladin_sim::AiPhase,
+}
+
 /// `match_id → status` snapshot, rebuilt each tick from the `MatchInfo` rows so
 /// every sub-rate system can cheaply skip entities in Paused/Ended matches.
 #[derive(Resource, Default)]

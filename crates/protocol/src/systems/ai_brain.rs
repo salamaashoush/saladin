@@ -630,6 +630,38 @@ pub fn ai_brain(world: &mut World) {
         // paid for with the wood and stone the other half brings in.
         let want_food = (peasants / 2).max(2);
 
+        // What this brain just decided, for `{"query": "planner"}`. Published
+        // HERE and not re-derived anywhere: a debugger that reconstructs the
+        // planner's inputs is a second implementation, and the moment it
+        // disagrees it is worse than nothing. The resource exists only while
+        // devctl is listening, so a normal run pays one Option check.
+        if world.contains_resource::<crate::BotDebug>() {
+            let thoughts = crate::BotThoughts {
+                tick: world.resource::<crate::Tick>().0,
+                state: state.clone(),
+                tuning: tune,
+                crisis,
+                food_emergency,
+                food_surplus,
+                food_cushion: food_cushion(&state, &tune),
+                scarce_build,
+                on_food,
+                want_food,
+                idle_bias: if food_emergency && on_food < want_food {
+                    Some(ResourceType::Food)
+                } else if food_surplus {
+                    Some(scarce_build)
+                } else {
+                    None
+                },
+                labour: field_labour(&state, &tune),
+                build: next_build(&state, &tune),
+                trade: next_trade(&state, &tune),
+                phase: next_phase(&state, &tune),
+            };
+            world.resource_mut::<crate::BotDebug>().0.insert(owner, thoughts);
+        }
+
         // Pull peasants OFF a resource and idle them so they reassign to `want`.
         // Skips the scout, idle ones, loads in transit, and anyone whose target
         // node already matches `want`. `moved` keeps a second steer in the same

@@ -216,7 +216,11 @@ impl Devctl {
 /// how tests run several of these at once.
 pub fn attach(app: &mut App, port: u16) -> std::io::Result<u16> {
     let (devctl, bound) = Devctl::listen(port)?;
-    app.insert_resource(devctl).init_resource::<DevctlLink>().add_systems(Update, serve);
+    app.insert_resource(devctl)
+        .init_resource::<DevctlLink>()
+        // its mere existence is what makes the brain publish what it saw
+        .init_resource::<crate::BotDebug>()
+        .add_systems(Update, serve);
     Ok(bound)
 }
 

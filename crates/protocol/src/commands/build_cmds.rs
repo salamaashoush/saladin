@@ -383,28 +383,56 @@ impl BuildContext {
     }
 }
 
-/// Ground the cut-off test may walk before it gives up and allows the
-/// placement. A man this far from his own hall is not sealed in by one
-/// footprint.
-const CUTOFF_FLOOD_MAX: usize = 4096;
+/// Ground the cut-off test may walk. The town box plus a margin: a man past
+/// that is not in the town, and one footprint is not what cut him off.
+const CUTOFF_FLOOD_MAX: usize = 8192;
 
-/// Would raising this footprint wall the owner's own people in?
+/// Everything of the owner's that this ground can be walked to from the keep.
+fn keep_reach<W: Fn(i32, i32) -> bool>(keep: V2, walkable: &W) -> HashSet<i32> {
+    let margin = TOWN_RADIUS.ceil().to_num::<i32>() * 2;
+    let (kx, ky) = (keep.x.to_num::<i32>(), keep.y.to_num::<i32>());
+    let inside = |tx: i32, ty: i32| (tx - kx).abs() <= margin && (ty - ky).abs() <= margin;
+    let mut seen: HashSet<i32> = HashSet::new();
+    let mut queue: Vec<(i32, i32)> = Vec::new();
+    for dy in -3..=3 {
+        for dx in -3..=3 {
+            let (tx, ty) = (kx + dx, ky + dy);
+            if inside(tx, ty) && walkable(tx, ty) && seen.insert(tile_key(tx, ty)) {
+                queue.push((tx, ty));
+            }
+        }
+    }
+    let mut head = 0;
+    while head < queue.len() && seen.len() < CUTOFF_FLOOD_MAX {
+        let (tx, ty) = queue[head];
+        head += 1;
+        for (dx, dy) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
+            let (nx, ny) = (tx + dx, ty + dy);
+            if inside(nx, ny) && walkable(nx, ny) && seen.insert(tile_key(nx, ny)) {
+                queue.push((nx, ny));
+            }
+        }
+    }
+    seen
+}
+
+/// Would raising this footprint wall the owner's own people off from their keep?
 ///
 /// A bot's town is dense, and each building is legal on its own. Measured on
 /// River Valley seed 3, one grew around its peasants and left EIGHT of fourteen
 /// standing in two-tile pockets for the rest of the match: nothing crushes
-/// them, nothing tells them, and an A* out of a sealed pocket simply returns
-/// nothing every time they are asked to work.
+/// them, nothing tells them, and every gather gate they are put through says
+/// "no standing room the hand can reach" forever.
 ///
-/// The question is CUT OFF FROM THE TOWN, not "in a small pocket". A size
-/// threshold was tried first and is wrong in both directions: at 96 tiles it
-/// refused ordinary farms, and at 32 it let Continental seed 22 seal nine
-/// peasants into a bay bigger than that. So the flood runs until it reaches an
-/// anchor the owner already holds.
+/// The test is the DIFFERENCE the footprint makes: flood the keep's ground with
+/// and without it, and refuse if any of the owner's men fall out of the second
+/// set. Checking only the men standing near the plot — which is what this did
+/// first — misses the ones who walked into the bay five tiles away before the
+/// neck was closed, which is how Continental seed 22 still lost nine hands.
 ///
-/// One bounded flood per FOUNDING — not per candidate. `place_near` probes a
+/// Two bounded floods per FOUNDING, never per candidate: `place_near` probes a
 /// perimeter every decision window and a search per probe cost 28% of the sim
-/// tick, measured; a founding happens a few times a minute.
+/// tick, measured. A founding happens a few times a minute.
 fn seals_own_units(
     world: &World,
     ctx: &BuildContext,
@@ -417,17 +445,10 @@ fn seals_own_units(
     if def.passable {
         return false;
     }
-    let tiles = footprint_tiles(def.footprint, pos.x, pos.y);
-    let laid: HashSet<i32> = tiles.iter().map(|t| tile_key(t.tx, t.ty)).collect();
-    let open = |tx: i32, ty: i32| {
-        let k = tile_key(tx, ty);
-        is_passable(seed, tx, ty) && !ctx.walk_occ.contains(&k) && !laid.contains(&k)
-    };
-    let centre = footprint_center(def.footprint, pos.x, pos.y);
-    let near = Fx::from_num(def.footprint + 4);
-    // The KEEP is the town, and reaching it is what "still one of mine" means.
-    // Any owned building will not do: the walls that seal a man in are owned
-    // buildings too, and standing beside one of them is not connectivity.
+    // The KEEP is the town. Any owned building will not do: the walls that seal
+    // a man in are owned buildings too, and standing beside one is not
+    // connectivity. A hand-built world (every test) leaves `Player.keep` at 0,
+    // so the hall itself is the fallback.
     let keep = {
         let mut pq = match world.try_query::<&Player>() {
             Some(q) => q,
@@ -438,9 +459,8 @@ fn seals_own_units(
             Some(q) => q,
             None => return false,
         };
-        let named = bq.iter(world).find(|(g, _, _, _)| g.0 == id && id != 0).map(|(_, _, p, _)| p.pos);
-        // a hand-built world (every test) leaves `Player.keep` at 0; the hall
-        // itself is still the town
+        let named =
+            bq.iter(world).find(|(g, _, _, _)| g.0 == id && id != 0).map(|(_, _, p, _)| p.pos);
         match named.or_else(|| {
             bq.iter(world)
                 .filter(|(_, o, _, b)| o.0 == owner && b.kind == BuildingKind::Keep)
@@ -451,56 +471,28 @@ fn seals_own_units(
             None => return false,
         }
     };
-    let touch = saladin_sim::fx!("3.5");
-    let arrived = |tx: i32, ty: i32| {
-        let c = V2::new(
-            Fx::from_num(tx) + saladin_sim::fx!("0.5"),
-            Fx::from_num(ty) + saladin_sim::fx!("0.5"),
-        );
-        dist(c, keep) <= touch
-    };
+
+    let laid: HashSet<i32> = footprint_tiles(def.footprint, pos.x, pos.y)
+        .iter()
+        .map(|t| tile_key(t.tx, t.ty))
+        .collect();
+    let before = keep_reach(keep, &|tx, ty| {
+        is_passable(seed, tx, ty) && !ctx.walk_occ.contains(&tile_key(tx, ty))
+    });
+    let after = keep_reach(keep, &|tx, ty| {
+        let k = tile_key(tx, ty);
+        is_passable(seed, tx, ty) && !ctx.walk_occ.contains(&k) && !laid.contains(&k)
+    });
 
     let Some(mut q) = world.try_query::<(&Owner, &Pos, &Unit)>() else { return false };
-    for (o, p, u) in q.iter(world) {
+    q.iter(world).any(|(o, p, u)| {
         if o.0 != owner || u.garrisoned_in != 0 || unit_def(u.kind).afloat() {
-            continue;
+            return false;
         }
-        if (p.pos.x - centre.x).abs() > near || (p.pos.y - centre.y).abs() > near {
-            continue;
-        }
-        let (ux, uy) = (p.pos.x.to_num::<i32>(), p.pos.y.to_num::<i32>());
-        if laid.contains(&tile_key(ux, uy)) {
-            continue; // standing on the plot: `shove_clear` puts him outside it
-        }
-        if !open(ux, uy) {
-            continue; // already off the walkable grid; not this footprint's doing
-        }
-        let mut seen: HashSet<i32> = HashSet::new();
-        let mut queue = vec![(ux, uy)];
-        seen.insert(tile_key(ux, uy));
-        let mut head = 0;
-        let mut home = false;
-        while head < queue.len() && seen.len() < CUTOFF_FLOOD_MAX {
-            let (tx, ty) = queue[head];
-            head += 1;
-            if arrived(tx, ty) {
-                home = true;
-                break;
-            }
-            for (dx, dy) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
-                let (nx, ny) = (tx + dx, ty + dy);
-                if open(nx, ny) && seen.insert(tile_key(nx, ny)) {
-                    queue.push((nx, ny));
-                }
-            }
-        }
-        // ran out of ground to search: too far from anything to be sealed by one
-        // footprint, so let it stand
-        if !home && seen.len() < CUTOFF_FLOOD_MAX {
-            return true;
-        }
-    }
-    false
+        let key = tile_key(p.pos.x.to_num::<i32>(), p.pos.y.to_num::<i32>());
+        // standing ON the plot is `shove_clear`'s job, not a refusal
+        !laid.contains(&key) && before.contains(&key) && !after.contains(&key)
+    })
 }
 
 /// Put the owner's own people off the ground a new footprint just took, the

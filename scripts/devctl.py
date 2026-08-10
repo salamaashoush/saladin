@@ -343,6 +343,21 @@ class Devctl:
             req["player"] = player
         return Row(self._ok(self.request(req), "query terrain"))
 
+    def planner(self, player: int | None = None) -> list[Row]:
+        """What each bot's brain SAW on its last beat, and what it concluded —
+        published by the brain itself, so it cannot drift from the real thing."""
+        req: dict[str, Any] = {"query": "planner"}
+        if player is not None:
+            req["player"] = player
+        return [Row(b) for b in self._ok(self.request(req), "query planner")["bots"]]
+
+    def gather(self, unit: int, limit: int = 12) -> Row:
+        """Why this hand is not gathering: every candidate node with the gate
+        that refused it, through the balancer's own four helpers."""
+        return Row(
+            self._ok(self.request({"query": "gather", "unit": unit, "limit": limit}), "query gather")
+        )
+
     def invariants(self) -> Row:
         """Everything that must never be true, checked in one pass."""
         return Row(self._ok(self.request({"query": "invariants"}), "query invariants"))

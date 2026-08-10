@@ -40,9 +40,18 @@ pub(super) fn query(world: &mut World, v: &Value, req: &Map<String, Value>, repl
             Err(e) => reply.err(e),
         },
         "invariants" => reply.ok(invariants(world)),
+        "planner" => match planner(world, req) {
+            Ok(v) => reply.ok(v),
+            Err(e) => reply.err(e),
+        },
+        "gather" => match gather_probe(world, req) {
+            Ok(v) => reply.ok(v),
+            Err(e) => reply.err(e),
+        },
         other => reply.err(format!(
             "unknown query: {other} \
-             (expected one of: tick, state, probe, path, terrain, invariants, feedback)"
+             (expected one of: tick, state, probe, path, terrain, planner, gather, \
+             invariants, feedback)"
         )),
     }
 }
@@ -755,4 +764,229 @@ fn invariants(world: &World) -> Value {
         "clean": bad.is_empty(),
         "violations": bad,
     })
+}
+
+/// What a bot's brain SAW on its last beat, and what it concluded.
+///
+/// Not a reconstruction: `ai_brain` publishes this at the point the numbers are
+/// computed. Tuning the gatherer steer means knowing whether the planner
+/// thought food was short, which trade it called scarce, and how many hands its
+/// budget allowed — inferring any of that from the world is guesswork that goes
+/// stale the first time the planner changes.
+fn planner(world: &World, req: &Map<String, Value>) -> Result<Value, String> {
+    let dbg = world
+        .get_resource::<crate::BotDebug>()
+        .ok_or("devctl is not attached to this world, so no brain is publishing")?;
+    let want = match req.get("player") {
+        None | Some(Value::Null) => None,
+        Some(v) => Some(v.as_u64().ok_or("player takes a player id")?),
+    };
+    let mut rows: Vec<(u64, Value)> = dbg
+        .0
+        .iter()
+        .filter(|(id, _)| want.is_none_or(|w| w == **id))
+        .map(|(id, t)| (*id, thoughts(*id, t)))
+        .collect();
+    rows.sort_by_key(|(id, _)| *id);
+    if want.is_some() && rows.is_empty() {
+        return Err("that player has no brain, or it has not had a beat yet".into());
+    }
+    Ok(json!({
+        "tick": world.resource::<Tick>().0,
+        "bots": rows.into_iter().map(|(_, v)| v).collect::<Vec<_>>(),
+    }))
+}
+
+fn thoughts(id: u64, t: &crate::BotThoughts) -> Value {
+    let s = &t.state;
+    let kinds = |c: &saladin_sim::Census| {
+        UnitKind::ALL
+            .iter()
+            .filter(|k| c[**k as usize] > 0)
+            .map(|k| (format!("{k:?}"), json!(c[*k as usize])))
+            .collect::<Map<String, Value>>()
+    };
+    json!({
+        "player_id": id,
+        "seen_at_tick": t.tick,
+        "phase": t.phase,
+        // what the steer branches on, in the order it branches
+        "steer": {
+            "crisis": t.crisis,
+            "food_emergency": t.food_emergency,
+            "food_surplus": t.food_surplus,
+            "food_cushion": t.food_cushion,
+            "scarce_build": t.scarce_build,
+            "on_food": t.on_food,
+            "want_food": t.want_food,
+            "idle_bias": t.idle_bias,
+            "field_hands_per_farm": t.labour.per_field,
+            "field_hands_budget": t.labour.budget,
+        },
+        "stock": {
+            "wood": s.wood, "stone": s.stone, "food": s.food, "gold": s.gold,
+            "campaign_food": s.campaign_food,
+        },
+        "town": {
+            "peasants": s.peasants, "pop": s.pop, "cap": s.cap,
+            "farms": s.farms, "fields_ripe": s.fields_ripe,
+            "farmland_near": s.farmland_near, "storehouses": s.storehouses,
+            "damaged": s.damaged, "builders_busy": s.builders_busy,
+            "owned": s.owned.iter().map(|k| format!("{k:?}")).collect::<Vec<_>>(),
+            "sites_in_flight": saladin_sim::BuildingKind::ALL
+                .iter()
+                .filter(|k| s.sites_in_flight[**k as usize] > 0)
+                .map(|k| (format!("{k:?}"), json!(s.sites_in_flight[*k as usize])))
+                .collect::<Map<String, Value>>(),
+        },
+        "war": {
+            "soldiers": s.soldiers, "sieges": s.sieges, "towers": s.towers,
+            "army": kinds(&s.army_composition),
+            "enemy": kinds(&s.enemy),
+            "enemy_has_walls": s.enemy_has_walls,
+            "enemy_towers": s.enemy_towers,
+            "threat_near_home": s.threat_near_home,
+            "enemy_by_land": s.enemy_by_land,
+        },
+        "sea": {
+            "fisheries": s.fisheries,
+            "fishery_centroid": s.fishery_centroid.map(v2_json),
+            "offshore_cluster": s.offshore_cluster.map(v2_json),
+            "boats": s.boats,
+            "ferries": s.ferries,
+        },
+        // what it decided with all of the above
+        "build": t.build.map(|b| json!({
+            "action": format!("{:?}", b.action),
+            "kind": if b.is_unit {
+                UnitKind::from_u8(b.kind).map(|k| format!("{k:?}"))
+            } else {
+                saladin_sim::BuildingKind::from_u8(b.kind).map(|k| format!("{k:?}"))
+            },
+            "is_unit": b.is_unit,
+            "trainer": b.trainer.map(|k| format!("{k:?}")),
+        })),
+        "trade": t.trade.map(|d| json!({
+            "res": d.res, "amount": d.amount, "buy": d.buy,
+        })),
+        "targets": {
+            "peasants": saladin_sim::dynamic_peasant_target(s, &t.tuning),
+            "army": saladin_sim::dynamic_army_target(s, &t.tuning),
+        },
+    })
+}
+
+/// Why this hand is not gathering: every candidate node with the gate that
+/// refused it.
+///
+/// `probe` for timber. The balancer walks four gates — domain, region
+/// reachability, whether a stander can get close enough, and whether the node
+/// can be cut at all — and a hand that fails all four on every node simply
+/// stands still, which from outside is indistinguishable from a planner that
+/// never asked it to work. This calls the SAME four helpers the balancer calls,
+/// so a verdict here is the verdict there.
+fn gather_probe(world: &World, req: &Map<String, Value>) -> Result<Value, String> {
+    use saladin_sim::{Domain, Flood, MAX_EXPANSIONS, domain_passable, gate_blocks, unit_def};
+    let id = at(req, "unit")?.as_u64().ok_or("unit takes a game id")?;
+    let want = req.get("limit").and_then(|v| v.as_u64()).unwrap_or(12) as usize;
+    let seed = world.resource::<WorldConfig>().seed;
+
+    let (pos, owner, kind, mtch) = {
+        let mut q = world
+            .try_query::<(&GameId, &Owner, &Pos, &Unit, &MatchId)>()
+            .ok_or("this world has no units")?;
+        let row = q.iter(world).find(|(g, ..)| g.0 == id).ok_or_else(|| format!("no unit {id}"))?;
+        (row.2.pos, row.1.0, row.3.kind, row.4.0)
+    };
+    let def = unit_def(kind);
+    if def.carry <= 0 {
+        return Err(format!("{kind:?} carries nothing, so it never gathers"));
+    }
+    let dom = def.domain;
+
+    let (occ, gates) = crate::commands::occupancy_and_gates(world, false);
+    let passable = |tx: i32, ty: i32| {
+        let k = saladin_sim::tile_key(tx, ty);
+        domain_passable(seed, dom, tx, ty) && !occ.contains(&k) && !gate_blocks(&gates, k, owner)
+    };
+    let mut flood = Flood::default();
+    let flooded = flood.explore(&passable, pos, MAX_EXPANSIONS);
+
+    let footprints: std::collections::HashMap<u64, i32> = {
+        let sizes: std::collections::HashMap<u64, i32> = match world.try_query::<(&GameId, &Building)>() {
+            Some(mut q) => q
+                .iter(world)
+                .map(|(g, b)| (g.0, saladin_sim::building_def(b.kind).footprint))
+                .collect(),
+            None => Default::default(),
+        };
+        match world.try_query::<(&GameId, &FieldOf)>() {
+            Some(mut q) => q
+                .iter(world)
+                .map(|(g, f)| (g.0, sizes.get(&f.0).copied().unwrap_or(1)))
+                .collect(),
+            None => Default::default(),
+        }
+    };
+
+    let mut rows: Vec<(Fx, Value, &'static str)> = Vec::new();
+    if let Some(mut q) =
+        world.try_query::<(&GameId, &Pos, &ResourceNode, &MatchId, Option<&FieldOf>, Option<&Crop>)>()
+    {
+        for (g, p, n, m, f, c) in q.iter(world) {
+            if m.0 != mtch {
+                continue;
+            }
+            let d = saladin_sim::dist(pos, p.pos);
+            let gate = if crate::systems::node_domain(seed, p.pos) != dom {
+                "wrong domain"
+            } else if !reapable(n, f.is_some(), c) {
+                if f.is_some() { "crop not ripe" } else { "drawn out" }
+            } else if !match dom {
+                Domain::Land => saladin_sim::node_reachable(seed, pos, p.pos),
+                Domain::Sea => saladin_sim::sea_reachable(seed, pos, p.pos),
+            } {
+                "another region"
+            } else if !crate::systems::workable(
+                &flood,
+                p.pos,
+                crate::systems::node_reach(seed, p.pos, footprints.get(&g.0).copied()),
+            ) {
+                "no standing room the hand can reach"
+            } else {
+                "ok"
+            };
+            rows.push((
+                d,
+                json!({
+                    "id": g.0,
+                    "res": n.res_type,
+                    "pos": v2_json(p.pos),
+                    "dist": fx_json(d),
+                    "remaining": n.remaining,
+                    "gate": gate,
+                }),
+                gate,
+            ));
+        }
+    }
+    rows.sort_by(|a, b| a.0.cmp(&b.0));
+    let mut tally: Map<String, Value> = Map::new();
+    for (_, _, gate) in &rows {
+        let n = tally.get(*gate).and_then(|v| v.as_u64()).unwrap_or(0) + 1;
+        tally.insert((*gate).to_string(), json!(n));
+    }
+    let pick = rows.iter().find(|(_, _, g)| *g == "ok").map(|(_, v, _)| v["id"].clone());
+    Ok(json!({
+        "unit": id,
+        "kind": format!("{kind:?}"),
+        "domain": format!("{dom:?}"),
+        "pos": v2_json(pos),
+        // a flood that never started is the whole answer: the hand is standing
+        // somewhere its own domain cannot be walked out of
+        "flooded": flooded,
+        "nearest_workable": pick,
+        "gates": tally,
+        "nodes": rows.into_iter().take(want).map(|(_, v, _)| v).collect::<Vec<_>>(),
+    }))
 }
