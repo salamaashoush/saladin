@@ -127,25 +127,45 @@ fn inventory(world: &mut World) -> Value {
         q.iter(world).map(|g| g.0).collect()
     };
     // where the SIM says each drawn thing is, and what it is
+    let seed = world.resource::<saladin_protocol::WorldConfig>().seed;
     let mut placed: std::collections::HashMap<u64, (Vec2, bool, bool)> = Default::default();
+    let mut adrift: Vec<(u64, Vec2, saladin_sim::BuildingKind)> = Vec::new();
     {
         let mut q = world.query::<(
             &saladin_protocol::GameId,
             &saladin_protocol::Pos,
             Option<&saladin_protocol::Unit>,
+            Option<&saladin_protocol::Building>,
         )>();
-        for (g, p, u) in q.iter(world) {
+        for (g, p, u, b) in q.iter(world) {
             let afloat = u.is_some_and(|u| saladin_sim::unit_def(u.kind).afloat());
-            placed.insert(
-                g.0,
-                (Vec2::new(p.pos.x.to_num::<f32>(), p.pos.y.to_num::<f32>()), u.is_some(), afloat),
-            );
+            let at = Vec2::new(p.pos.x.to_num::<f32>(), p.pos.y.to_num::<f32>());
+            placed.insert(g.0, (at, u.is_some(), afloat));
+            // A hall standing in the sea. `check_place` refuses this outright,
+            // so in a real match it cannot happen — which is exactly why it is
+            // worth checking: it means something bypassed the placement rules.
+            if let Some(b) = b
+                && !saladin_sim::is_buildable_tile(
+                    seed,
+                    p.pos.x.to_num::<i32>(),
+                    p.pos.y.to_num::<i32>(),
+                )
+            {
+                adrift.push((g.0, at, b.kind));
+            }
         }
     }
     let mut problems: Vec<Value> = Vec::new();
     let mut note = |id: u64, rule: &str, detail: String| {
         problems.push(json!({ "id": id, "rule": rule, "detail": detail }));
     };
+    for (id, at, kind) in adrift {
+        note(
+            id,
+            "building on ground it could never be founded on",
+            format!("{kind:?} at {:.0},{:.0}", at.x, at.y),
+        );
+    }
 
     // A root whose sim row is gone is a leak: it keeps drawing, it keeps its
     // meshes alive, and nothing will ever despawn it.

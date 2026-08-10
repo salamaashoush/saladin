@@ -706,16 +706,84 @@ pub fn auto_spawn_units(world: &mut World, mut stage: Local<u8>) {
         // one of every other building kind in a grid west of the keep so
         // SALADIN_AUTO=units verifies all building models in one shot
         use saladin_sim::BuildingKind;
+        // ON GROUND THEY COULD BE FOUNDED ON. A keep on a spit ran the grid
+        // straight out to sea and half the roster stood on open water, which
+        // is a model-verification shot that verifies nothing. Found by the
+        // render query, which now refuses any hall on a tile `check_place`
+        // would reject.
+        let seed = world.resource::<saladin_protocol::WorldConfig>().seed;
+        // Nearest dry ground ALONE piles the whole roster onto the keep's own
+        // beach, one model inside the next. A shot that verifies a model has to
+        // show one of it, so a placed footprint claims its ground.
+        let mut taken: std::collections::HashSet<i32> = {
+            let mut q = world.query::<(&Pos, &saladin_protocol::Building)>();
+            q.iter(world)
+                .flat_map(|(p, b)| {
+                    saladin_sim::footprint_tiles(
+                        saladin_sim::building_def(b.kind).footprint + 2,
+                        p.pos.x,
+                        p.pos.y,
+                    )
+                })
+                .map(|t| saladin_sim::tile_key(t.tx, t.ty))
+                .collect()
+        };
+        let dry = |p: saladin_sim::V2, fp: i32, taken: &std::collections::HashSet<i32>| {
+            saladin_sim::footprint_tiles(fp, p.x, p.y).iter().all(|t| {
+                saladin_sim::is_buildable_tile(seed, t.tx, t.ty)
+                    && !taken.contains(&saladin_sim::tile_key(t.tx, t.ty))
+            })
+        };
+        // Crowding a neighbour is a worse SHOT; standing in the sea is a
+        // broken one. So the ring is walked twice — once keeping models apart,
+        // once not — and a kind with nowhere dry at all is left out rather than
+        // floated.
+        let mut ashore = |want: saladin_sim::V2, fp: i32| -> Option<saladin_sim::V2> {
+            let claim = |c: saladin_sim::V2, taken: &mut std::collections::HashSet<i32>| {
+                for t in saladin_sim::footprint_tiles(fp + 2, c.x, c.y) {
+                    taken.insert(saladin_sim::tile_key(t.tx, t.ty));
+                }
+                c
+            };
+            for spaced in [true, false] {
+                let free = |c: saladin_sim::V2, taken: &std::collections::HashSet<i32>| {
+                    if spaced { dry(c, fp, taken) } else { dry(c, fp, &Default::default()) }
+                };
+                if free(want, &taken) {
+                    return Some(claim(want, &mut taken));
+                }
+                for r in 1..30i32 {
+                    for dy in -r..=r {
+                        for dx in -r..=r {
+                            if dx.abs().max(dy.abs()) != r {
+                                continue;
+                            }
+                            let c = saladin_sim::V2::new(
+                                want.x + saladin_sim::Fx::from_num(dx),
+                                want.y + saladin_sim::Fx::from_num(dy),
+                            );
+                            if free(c, &taken) {
+                                return Some(claim(c, &mut taken));
+                            }
+                        }
+                    }
+                }
+            }
+            None
+        };
         let showcase: Vec<BuildingKind> = BuildingKind::ALL
             .iter()
             .copied()
             .filter(|k| !matches!(k, BuildingKind::Keep | BuildingKind::Wall))
             .collect();
         for (i, kind) in showcase.into_iter().enumerate() {
-            let pos = saladin_sim::V2::new(
+            let want = saladin_sim::V2::new(
                 kp.x - saladin_sim::Fx::from_num(6 + (i as i32 % 3) * 4),
                 kp.y - saladin_sim::Fx::from_num(2 + (i as i32 / 3) * 4),
             );
+            let Some(pos) = ashore(want, saladin_sim::building_def(kind).footprint) else {
+                continue;
+            };
             let id = world.resource_mut::<NextEntityId>().alloc();
             world.spawn((
                 GameId(id),
@@ -737,10 +805,15 @@ pub fn auto_spawn_units(world: &mut World, mut stage: Local<u8>) {
         ];
         for (i, (kind, state, pct)) in lifecycle.into_iter().enumerate() {
             let def = saladin_sim::building_def(kind);
-            let pos = saladin_sim::V2::new(
-                kp.x - saladin_sim::Fx::from_num(6 + i as i32 * 4),
-                kp.y - saladin_sim::Fx::from_num(22),
-            );
+            let Some(pos) = ashore(
+                saladin_sim::V2::new(
+                    kp.x - saladin_sim::Fx::from_num(6 + i as i32 * 4),
+                    kp.y - saladin_sim::Fx::from_num(22),
+                ),
+                def.footprint,
+            ) else {
+                continue;
+            };
             let mut b = match state {
                 saladin_protocol::BuildState::Site => {
                     saladin_protocol::Building::site(kind, def.max_hp, pos)
