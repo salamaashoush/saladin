@@ -9,3 +9,7 @@ dist/
 spacetime.local.json
 node_modules
 __pycache__/
+# Visual baselines are LOCAL. 16 MB of PNGs would outweigh the rest of the repo,
+# and this project bakes every pixel of its art procedurally on purpose. Bless
+# before a change, compare after: scripts/visual.py --bless
+/tests/visual/

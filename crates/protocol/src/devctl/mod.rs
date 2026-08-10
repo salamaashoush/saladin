@@ -166,6 +166,37 @@ pub struct CameraSpec {
     pub yaw: Option<i32>,
 }
 
+/// A query the protocol crate cannot answer, parked for the host.
+///
+/// Rendering questions belong to whoever owns the renderer, and that is never
+/// this crate. Rather than teach protocol about meshes, an unknown query goes
+/// to the host when there is one — so the client can add a query without
+/// touching the wire at all.
+pub struct ClientAsk {
+    pub query: String,
+    pub req: Map<String, Value>,
+    reply: Reply,
+}
+
+impl ClientAsk {
+    pub fn ok(self, body: Value) {
+        self.reply.ok(body);
+    }
+
+    pub fn err(self, msg: impl std::fmt::Display) {
+        self.reply.err(msg);
+    }
+
+    /// A number the caller may have supplied, or `default`.
+    pub fn number(&self, key: &str, default: f32) -> f32 {
+        self.req.get(key).and_then(|v| v.as_f64()).map_or(default, |n| n as f32)
+    }
+
+    pub fn flag(&self, key: &str) -> Option<bool> {
+        self.req.get(key).and_then(|v| v.as_bool())
+    }
+}
+
 /// A `{"step": N}` request waiting on N ticks of simulation.
 pub struct StepJob {
     pub ticks: u64,
@@ -177,6 +208,7 @@ pub struct Devctl {
     rx: Mutex<Receiver<Job>>,
     outbox: Vec<PlayerCommand>,
     shots: Vec<ShotJob>,
+    asks: Vec<ClientAsk>,
     steps: Vec<StepJob>,
     feedback: Vec<Value>,
     /// Last tick whose `CommandFeedback` was mirrored — the same tick's batch
@@ -202,6 +234,7 @@ impl Devctl {
                 rx: Mutex::new(rx),
                 outbox: Vec::new(),
                 shots: Vec::new(),
+                asks: Vec::new(),
                 steps: Vec::new(),
                 feedback: Vec::new(),
                 mirrored: None,
@@ -239,6 +272,25 @@ pub fn take_shots(world: &mut World) -> Vec<ShotJob> {
         Some(mut d) => std::mem::take(&mut d.shots),
         None => Vec::new(),
     }
+}
+
+/// Queries only the host can answer. Anything left unanswered replies for
+/// itself when dropped, so a caller never hangs on a host that ignores it.
+pub fn take_asks(world: &mut World) -> Vec<ClientAsk> {
+    match world.get_resource_mut::<Devctl>() {
+        Some(mut d) => std::mem::take(&mut d.asks),
+        None => Vec::new(),
+    }
+}
+
+/// Park a query for the host. Called by the query dispatcher for a name this
+/// crate does not know.
+pub(crate) fn ask_host(world: &mut World, query: &str, req: &Map<String, Value>, reply: Reply) {
+    world.resource_mut::<Devctl>().asks.push(ClientAsk {
+        query: query.to_string(),
+        req: req.clone(),
+        reply,
+    });
 }
 
 /// Tick budgets granted by `{"step": N}`. The host runs them and then calls

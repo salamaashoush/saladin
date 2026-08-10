@@ -59,7 +59,7 @@ crates/
 ## Commands
 
 ```bash
-cargo test --workspace                 # 492 tests, all must stay green
+cargo test --workspace                 # 502 tests, all must stay green
 cargo run -p saladin-client --bin saladin-client          # single player
 cargo run -p saladin-client --bin saladin-client connect <ip>   # dev shortcut (menus cover all MP flows)
 cargo run -p saladin-server                                # internet relay (rooms) — VPS docs: crates/server/README.md
@@ -151,6 +151,16 @@ cargo run -p saladin-protocol --bin saladin-headless -- --port 7777 --seed 4
 python3 scripts/playtest.py --port 7777 [--record f] [--replay f] [--shot png]
                                        # an agent playing a whole match over
                                        # devctl: base, army, march, assert
+python3 scripts/visual.py [--bless] [--scenes a,b] [--out dir]
+                                       # VISUAL REGRESSION: named scenes shot
+                                       # through devctl, diffed against local
+                                       # baselines (gitignored - 16 MB of PNGs
+                                       # do not belong in a repo whose art is
+                                       # procedural). Needs SALADIN_FIXED_DT and
+                                       # {"clock":{"pause_at":N}} to be
+                                       # reproducible; it sets both. Also prints
+                                       # the render `problems` list, which
+                                       # catches what pixels do not.
 python3 scripts/soak.py --seeds 10 --minutes 12 [--preset n]
                                        # THE BUG HUNT: bot matches across seeds,
                                        # asking {"query":"invariants"} every 400
@@ -215,6 +225,21 @@ crate. Output is f64 and read by nothing.
 
 `command_to_json`'s match is exhaustive: a new `PlayerCommand` variant breaks
 the build there, which is what keeps the parser and `COMMAND_NAMES` honest.
+
+**A rendering bug is invisible to `state`.** `{"query":"render"}` (client only)
+answers the other half: every drawn root with its transform, rig parts and mesh
+count, plus a `problems` list — an orphan root outliving its row, a row nothing
+draws, a model drifted more than 3 tiles from the row it is drawing, a hull off
+`WATERLINE_Y`. `{"query":"clock"}` freezes it: `pause_at` stops the world on an
+exact TICK, because polling and then pausing slips a frame and one frame is a
+different pose. `SALADIN_FIXED_DT=0.05` makes the whole app a function of frame
+count (Bevy's `TimeUpdateStrategy`), which is what makes a pixel diff mean
+anything. `scripts/visual.py` drives all of it; baselines are local and
+gitignored.
+
+A query the protocol crate does not know is PARKED for the host when one
+renders (`devctl::take_asks`) — that is how the client answers `render` and
+`clock` without protocol ever learning what a mesh is.
 
 Beyond `state`, four read-only instruments, and they are how the last four bugs
 were found: `probe` dry-runs a placement through `BuildContext::check` (the

@@ -4810,6 +4810,7 @@ dependencies = [
  "saladin-protocol",
  "saladin-sim",
  "serde",
+ "serde_json",
  "toml",
 ]
 

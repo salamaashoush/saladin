@@ -413,6 +413,123 @@ fn a_scoped_capture_answers_only_what_was_asked() {
     assert_eq!(bad["ok"], json!(false), "{bad}");
 }
 
+/// The planner query is the bot's OWN numbers, published by its brain. A
+/// re-derivation here would be a second implementation and would go stale.
+#[test]
+fn the_planner_query_reports_what_the_brain_saw() {
+    let seed = 1;
+    let (mut peer, port) = Peer::new(1, shared_relay(vec![1]), seed, true);
+    let mut client = Client::new(port);
+
+    let reply = ask(
+        &mut peer,
+        &mut client,
+        json!({"cmd": {"AddAi": {"player_id": 1000, "host": 1,
+                                 "difficulty": "Normal", "faction": "Crusader"}}}),
+    );
+    assert_eq!(reply["ok"], json!(true), "{reply}");
+    for _ in 0..200 {
+        peer.tick();
+    }
+
+    let p = ask(&mut peer, &mut client, json!({"query": "planner", "player": 1000}));
+    assert_eq!(p["ok"], json!(true), "{p}");
+    let bot = &p["bots"][0];
+    assert_eq!(bot["player_id"], json!(1000));
+    assert!(bot["seen_at_tick"].as_u64().expect("a beat") > 0, "{bot}");
+    // the branch points the gatherer steer actually reads
+    for key in ["crisis", "food_emergency", "food_surplus", "scarce_build", "want_food"] {
+        assert!(!bot["steer"][key].is_null(), "steer.{key} missing: {bot}");
+    }
+    assert!(bot["stock"]["food"].is_number() && bot["town"]["peasants"].is_number(), "{bot}");
+    assert!(bot["phase"].is_string(), "{bot}");
+
+    let none = ask(&mut peer, &mut client, json!({"query": "planner", "player": 1}));
+    assert_eq!(none["ok"], json!(false), "a human seat has no brain: {none}");
+}
+
+/// `probe` and `gather` are dry runs through the game's OWN gates: a probe that
+/// can answer differently from the order it stands in for is worse than none.
+#[test]
+fn the_dry_runs_answer_through_the_real_rules() {
+    let seed = 1;
+    let (cx, cy) = land_block(seed);
+    let (mut peer, port) = Peer::new(1, shared_relay(vec![1]), seed, true);
+    let mut client = Client::new(port);
+    found_player(&mut peer, 1, tile(cx + 2, cy + 2));
+    // tile CENTRES: `scatter_nodes` puts every node on one, and the harvest
+    // reach is measured from the stander's tile centre to the node
+    let centre = |x: i32, y: i32| {
+        V2::new(Fx::from_num(x) + saladin_sim::fx!("0.5"), Fx::from_num(y) + saladin_sim::fx!("0.5"))
+    };
+    let hand = centre(cx + 4, cy + 4);
+    peer.app.world_mut().spawn((
+        GameId(700),
+        Owner(1),
+        MatchId(1),
+        Pos { pos: hand, facing: Fx::ZERO },
+        Unit::new(UnitKind::Peasant, hand),
+    ));
+    peer.app.world_mut().spawn((
+        GameId(701),
+        MatchId(1),
+        Pos { pos: centre(cx + 6, cy + 4), facing: Fx::ZERO },
+        ResourceNode::deposit(saladin_sim::ResourceType::Wood, 100),
+    ));
+    for _ in 0..20 {
+        peer.tick();
+    }
+
+    // a placement dry run costs nothing and founds nothing
+    let before = g_buildings(&mut peer);
+    let pr = ask(
+        &mut peer,
+        &mut client,
+        json!({"query": "probe", "player": 1, "kind": "House", "near": [cx + 4, cy + 2], "radius": 3}),
+    );
+    assert_eq!(pr["ok"], json!(true), "{pr}");
+    let results = pr["results"].as_array().expect("a verdict per tile");
+    assert_eq!(results.len(), 49, "a radius of 3 is a 7x7 square");
+    assert!(results.iter().any(|r| r["ok"] == json!(true)), "open ground took nothing: {pr}");
+    assert!(
+        results.iter().filter(|r| r["ok"] == json!(false)).all(|r| r["error"].is_string()),
+        "a refusal must name itself: {pr}"
+    );
+    assert_eq!(g_buildings(&mut peer), before, "a DRY run founded something");
+
+    // and the gather probe names the gate for every node
+    let gr = ask(&mut peer, &mut client, json!({"query": "gather", "unit": 700}));
+    assert_eq!(gr["ok"], json!(true), "{gr}");
+    assert_eq!(gr["nearest_workable"], json!(701), "the timber two tiles away: {gr}");
+    let node = &gr["nodes"][0];
+    assert_eq!(node["gate"], json!("ok"), "{gr}");
+    assert_eq!(gr["flooded"], json!(true), "{gr}");
+
+    let bad = ask(&mut peer, &mut client, json!({"query": "gather", "unit": 999}));
+    assert_eq!(bad["ok"], json!(false), "{bad}");
+}
+
+fn g_buildings(peer: &mut Peer) -> usize {
+    let world = peer.app.world_mut();
+    let mut q = world.query::<&Building>();
+    q.iter(world).count()
+}
+
+/// A render-side query has nowhere to go without a renderer, and must say so
+/// rather than be silently swallowed.
+#[test]
+fn a_render_query_without_a_renderer_is_refused() {
+    let seed = 1;
+    let (mut peer, port) = Peer::new(1, shared_relay(vec![1]), seed, true);
+    let mut client = Client::new(port);
+    let reply = ask(&mut peer, &mut client, json!({"query": "render"}));
+    assert_eq!(reply["ok"], json!(false), "{reply}");
+    assert!(
+        reply["error"].as_str().expect("an error").contains("client"),
+        "it must say a client is needed: {reply}"
+    );
+}
+
 /// THE test. A devctl-driven peer and an untouched one, same match, 1200 ticks:
 /// if injection went anywhere but the lockstep stream, these hashes part.
 #[test]

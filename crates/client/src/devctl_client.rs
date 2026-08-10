@@ -14,18 +14,40 @@ use crate::camera::{self, CameraState, GameCamera};
 use crate::terrain::{HeightField, height_at};
 use crate::{LocalInput, Net};
 
+/// Env: seconds of game time each rendered frame advances. With it set, the
+/// whole app is a function of FRAME COUNT — the fixed-update sim runs exactly
+/// one tick per frame at 0.05, and every pose in the renderer, which is wall
+/// time and nothing else, lands on the same phase every run. Without it two
+/// screenshots of one unchanged world are never the same image and a pixel
+/// diff means nothing. Bevy's own `TimeUpdateStrategy` does the work.
+pub const FIXED_DT_ENV: &str = "SALADIN_FIXED_DT";
+
 pub fn register(app: &mut App) {
+    if let Ok(dt) = std::env::var(FIXED_DT_ENV)
+        && let Ok(secs) = dt.trim().parse::<f32>()
+        && secs > 0.0
+    {
+        app.insert_resource(bevy::time::TimeUpdateStrategy::ManualDuration(
+            std::time::Duration::from_secs_f32(secs),
+        ));
+    }
     app.add_plugins(saladin_protocol::DevctlPlugin);
     if !app.world().contains_resource::<devctl::DevctlLink>() {
         return; // SALADIN_DEVCTL unset: the plugin added nothing
     }
-    app.init_resource::<PendingShots>().add_systems(
-        Update,
-        (
-            publish_clock.before(devctl::serve),
-            (route_commands, collect_shots, fire_shots).chain().after(devctl::serve),
-        ),
-    );
+    app.init_resource::<PendingShots>()
+        .init_resource::<crate::render::inspect::FreezeAt>()
+        .init_resource::<crate::render::inspect::FreezeDone>()
+        .add_systems(
+            Update,
+            (
+                crate::render::inspect::freeze_at_tick,
+                publish_clock.before(devctl::serve),
+                (route_commands, answer_asks, collect_shots, fire_shots)
+                    .chain()
+                    .after(devctl::serve),
+            ),
+        );
 }
 
 /// Where a command queued right now will land, and what this host can do.
@@ -39,6 +61,13 @@ fn route_commands(world: &mut World) {
     let cmds = devctl::take_outbox(world);
     if !cmds.is_empty() {
         world.resource_mut::<LocalInput>().0.extend(cmds);
+    }
+}
+
+/// Queries the protocol crate parked for whoever owns the renderer.
+fn answer_asks(world: &mut World) {
+    for ask in devctl::take_asks(world) {
+        crate::render::inspect::answer(world, ask);
     }
 }
 

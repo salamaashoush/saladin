@@ -71,6 +71,10 @@ echoed back so a client can multiplex.
 | `{"query": "path", "unit": 7, "to": [120, 80]}` | can this unit walk there, by the closure `movement` itself builds |
 | `{"query": "terrain", "near": [120, 80], "radius": 14, "player": 1}` | the ground as the sim sees it, drawn, with that player's builder reach overlaid |
 | `{"query": "invariants"}` | everything that must never be true, checked in one pass |
+| `{"query": "planner", "player": 1000}` | what that bot's brain SAW on its last beat and what it concluded |
+| `{"query": "gather", "unit": 7}` | why this hand is not gathering: every node with the gate that refused it |
+| `{"query": "render"}` | what the RENDERER thinks it is drawing, and what is wrong with it (client only) |
+| `{"query": "clock", "pause_at": 200}` | stop the world at an exact tick, so a frame can be compared (client only) |
 | `{"step": 60}` | replies once the 60 ticks have run (headless only) |
 | `{"feedback": true}` | every refusal since the last call, with its `PlaceError` |
 | `{"screenshot": "/tmp/x.png", "camera": {"pos": [120, 80], "zoom": 6, "yaw": 2}}` | replies once the PNG is on disk |
@@ -103,6 +107,29 @@ script would otherwise never learn why its order was refused.
 fixed-update clock, and in a match to the lockstep group; `{"query": "tick"}`
 reports `may_step` so a script can tell. There is no `wait` verb — poll with
 `step` plus a query, which is what `Devctl.advance()` in the driver does.
+
+### Seeing it
+
+`{"query": "state"}` describes the simulation and can never tell you that a
+unit has no mesh, that a razed building left its root behind, or that a hull is
+drawn on the beach — which is what a rendering bug looks like from outside.
+`{"query": "render"}` answers the other half: one row per drawn thing plus a
+`problems` list (orphan roots, rows nothing draws, a model drifted from the row
+it draws, a hull off the waterline).
+
+```bash
+python3 scripts/visual.py --bless      # record baselines for the scenes
+python3 scripts/visual.py              # shoot them again and diff
+```
+
+Every pose in the renderer is a function of wall time, so two shots of one
+unchanged world are never the same image. `SALADIN_FIXED_DT=0.05` makes the
+whole app a function of FRAME COUNT — the sim runs exactly one 20 Hz tick per
+frame — and `{"clock": {"pause_at": N}}` stops it on the tick itself rather than
+whenever a request happens to arrive. With both, a rerun is bit-identical and a
+pixel diff means something. Baselines are LOCAL and gitignored: 16 MB of PNGs
+would outweigh the rest of a repo that bakes every pixel of its art
+procedurally.
 
 `scripts/soak.py` runs bot matches across seeds and presets and asks
 `invariants` after every chunk, plus the things only a watcher can see — a

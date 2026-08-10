@@ -48,10 +48,14 @@ pub(super) fn query(world: &mut World, v: &Value, req: &Map<String, Value>, repl
             Ok(v) => reply.ok(v),
             Err(e) => reply.err(e),
         },
+        // anything else belongs to whoever owns the renderer, if there is one
+        other if world.resource::<super::DevctlLink>().renders => {
+            super::ask_host(world, other, req, reply)
+        }
         other => reply.err(format!(
             "unknown query: {other} \
              (expected one of: tick, state, probe, path, terrain, planner, gather, \
-             invariants, feedback)"
+             invariants, feedback; render-side queries need a client)"
         )),
     }
 }
